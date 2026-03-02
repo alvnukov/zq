@@ -1,0 +1,39 @@
+[package]
+name = "zq"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Standalone jq-compatible query engine with JSON/YAML input and JSON/YAML output"
+repository = "https://github.com/alvnukov/zq"
+homepage = "https://github.com/alvnukov/zq"
+readme = "README.md"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "1"
+indexmap = { version = "2", features = ["serde"] }
+regex = "1"
+unsafe-libyaml = "0.2"
+
+[package.metadata.deb]
+maintainer = "alvnukov"
+copyright = "2026, alvnukov"
+section = "utils"
+priority = "optional"
+assets = [
+  ["target/release/zq", "usr/bin/zq", "755"],
+  ["README.md", "usr/share/doc/zq/README.md", "644"],
+  ["LICENSE", "usr/share/doc/zq/LICENSE", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Standalone jq-compatible query engine"
+auto-req = "auto"
+assets = [
+  { source = "target/release/zq", dest = "/usr/bin/zq", mode = "755" },
+  { source = "README.md", dest = "/usr/share/doc/zq/README.md", mode = "644", doc = true },
+  { source = "LICENSE", dest = "/usr/share/doc/zq/LICENSE", mode = "644", doc = true },
+]

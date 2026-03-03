@@ -129,3 +129,68 @@ jobs:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           files: dist/*
+
+  publish-homebrew-tap:
+    name: Publish Homebrew Tap
+    needs: publish-release
+    runs-on: ubuntu-latest
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO }}
+      HOMEBREW_TAP_FORMULA_PATH: ${{ vars.HOMEBREW_TAP_FORMULA_PATH }}
+    steps:
+      - name: Update tap formula
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${HOMEBREW_TAP_TOKEN:-}" ]]; then
+            echo "::error::Missing required secret HOMEBREW_TAP_TOKEN"
+            exit 1
+          fi
+
+          VERSION="${GITHUB_REF_NAME}"
+          TAP_REPO="${HOMEBREW_TAP_REPO:-${GITHUB_REPOSITORY_OWNER}/homebrew-tap}"
+          FORMULA_PATH="${HOMEBREW_TAP_FORMULA_PATH:-Formula/zq.rb}"
+          SOURCE_URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${VERSION}.tar.gz"
+
+          curl -fsSL "$SOURCE_URL" -o zq-src.tar.gz
+          SHA256="$(sha256sum zq-src.tar.gz | awk '{print $1}')"
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
+          cd tap
+          mkdir -p "$(dirname "$FORMULA_PATH")"
+
+          cat > "$FORMULA_PATH" <<EOF
+          class Zq < Formula
+            desc "Standalone jq-compatible query engine with JSON/YAML input and JSON/YAML output"
+            homepage "https://github.com/${GITHUB_REPOSITORY}"
+            url "${SOURCE_URL}"
+            sha256 "${SHA256}"
+            license "Apache-2.0"
+            head "https://github.com/${GITHUB_REPOSITORY}.git", branch: "main"
+
+            depends_on "rust" => :build
+
+            def install
+              system "cargo", "install", *std_cargo_args(path: ".")
+            end
+
+            test do
+              (testpath/"in.json").write("{\\"a\\":1}")
+              assert_equal "1", shell_output("#{bin}/zq -r '.a' < #{testpath}/in.json").strip
+            end
+          end
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- "$FORMULA_PATH"; then
+            echo "No tap changes detected in $FORMULA_PATH"
+            exit 0
+          fi
+
+          git add "$FORMULA_PATH"
+          git commit -m "zq ${VERSION}"
+          git push origin HEAD

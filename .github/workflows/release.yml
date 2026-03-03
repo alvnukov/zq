@@ -186,11 +186,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet -- "$FORMULA_PATH"; then
-            echo "No tap changes detected in $FORMULA_PATH"
-            exit 0
-          fi
-
           git add "$FORMULA_PATH"
+          if git rev-parse --verify HEAD >/dev/null 2>&1; then
+            if git diff --cached --quiet -- "$FORMULA_PATH"; then
+              echo "No tap changes detected in $FORMULA_PATH"
+              exit 0
+            fi
+          fi
           git commit -m "zq ${VERSION}"
           git push origin HEAD

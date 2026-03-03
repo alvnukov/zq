@@ -207,7 +207,8 @@ fn jq_style_escape_del(line: &str) -> String {
 pub fn format_output_yaml_documents(values: &[JsonValue]) -> Result<String, Error> {
     let mut docs = Vec::with_capacity(values.len());
     for v in values {
-        docs.push(serde_yaml::to_string(v).map_err(|e| Error::OutputYamlEncode(e.to_string()))?);
+        let yv = json_to_yaml_value(v)?;
+        docs.push(serde_yaml::to_string(&yv).map_err(|e| Error::OutputYamlEncode(e.to_string()))?);
     }
     if docs.is_empty() {
         return Ok(String::new());
@@ -221,6 +222,45 @@ pub fn format_output_yaml_documents(values: &[JsonValue]) -> Result<String, Erro
         .collect::<Vec<_>>()
         .join("\n---\n");
     Ok(joined)
+}
+
+fn json_to_yaml_value(v: &JsonValue) -> Result<serde_yaml::Value, Error> {
+    use serde_yaml::{Mapping, Number, Value as YamlValue};
+    match v {
+        JsonValue::Null => Ok(YamlValue::Null),
+        JsonValue::Bool(b) => Ok(YamlValue::Bool(*b)),
+        JsonValue::Number(n) => {
+            let token = n.to_string();
+            if let Ok(i) = token.parse::<i64>() {
+                return Ok(YamlValue::Number(Number::from(i)));
+            }
+            if let Ok(u) = token.parse::<u64>() {
+                return Ok(YamlValue::Number(Number::from(u)));
+            }
+            if let Ok(f) = token.parse::<f64>() {
+                if let Ok(yv) = serde_yaml::to_value(f) {
+                    return Ok(yv);
+                }
+            }
+            serde_yaml::from_str::<YamlValue>(&token)
+                .map_err(|e| Error::OutputYamlEncode(e.to_string()))
+        }
+        JsonValue::String(s) => Ok(YamlValue::String(s.clone())),
+        JsonValue::Array(arr) => {
+            let mut seq = Vec::with_capacity(arr.len());
+            for item in arr {
+                seq.push(json_to_yaml_value(item)?);
+            }
+            Ok(YamlValue::Sequence(seq))
+        }
+        JsonValue::Object(obj) => {
+            let mut map = Mapping::new();
+            for (k, val) in obj {
+                map.insert(YamlValue::String(k.clone()), json_to_yaml_value(val)?);
+            }
+            Ok(YamlValue::Mapping(map))
+        }
+    }
 }
 
 pub fn format_query_error(tool: &str, input: &str, err: &crate::QueryError) -> String {

@@ -114,6 +114,22 @@ pub struct Cli {
     )]
     pub exit_status: bool,
     #[arg(
+        long = "debug-dump-disasm",
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        hide = true,
+        help = "Print disassembly (jq compatibility flag, currently no-op)"
+    )]
+    pub debug_dump_disasm: bool,
+    #[arg(
+        long = "seq",
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        hide = true,
+        help = "Use application/json-seq framing (jq compatibility, partial support)"
+    )]
+    pub seq: bool,
+    #[arg(
         long = "output-format",
         value_enum,
         default_value_t = OutputFormat::Json,

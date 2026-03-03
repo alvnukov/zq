@@ -193,3 +193,15 @@ fn parity_exit_status_matches_jq_contract() {
     let out = run_zq(&["-en", "true"]);
     assert_eq!(out.status.code(), Some(0), "true should exit 0");
 }
+
+#[test]
+fn parity_accepts_debug_dump_disasm_flag() {
+    let out = run_zq(&["-n", "--debug-dump-disasm", "1+1"]);
+    assert_ok(&out, "--debug-dump-disasm compatibility");
+}
+
+#[test]
+fn parity_accepts_seq_flag() {
+    let out = run_zq(&["-n", "--seq", "1"]);
+    assert_ok(&out, "--seq compatibility");
+}

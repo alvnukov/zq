@@ -41,13 +41,28 @@ Output modes:
 - supports `--skip N` and `--take N`
 - supports `-L/--library-path` flag syntax for jq compatibility
 
+## Benchmarks
+
+```bash
+# generate deterministic NDJSON benchmark data
+bench/gen_data_ndjson.sh .tmp/bench/data.ndjson
+
+# run jq vs zq benchmark table (semantic parity is verified first)
+REPEATS=9 bench/run_stdin_bench.sh
+
+# profile every benchmark case (sample/perf)
+bench/profile_each_case.sh
+```
+
+Benchmark scripts and details: [`bench/README.md`](bench/README.md)
+
 ## Library usage
 
 Add dependency:
 
 ```toml
 [dependencies]
-zq = { git = "https://github.com/alvnukov/zq", tag = "v0.1.0" }
+zq = { git = "https://github.com/alvnukov/zq", tag = "v1.0.0" }
 ```
 
 Minimal embedding example:

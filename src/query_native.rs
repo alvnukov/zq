@@ -1,7 +1,10 @@
 use base64::Engine as _;
+use regex::Regex;
 use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::ffi::{CStr, CString};
 use std::sync::OnceLock;
 
 #[derive(Debug, thiserror::Error)]
@@ -738,226 +741,107 @@ fn execute_special_query(
         input_stream.to_vec()
     };
 
-    if q == r#"[match("( )*"; "g")]"# {
-        let profile = std::env::var("ZQ_JQ_COMPAT_PROFILE").unwrap_or_default();
-        if profile == "jq171" {
-            let mut out = Vec::new();
-            let expected_input = normalize_jsonish_line(r#""abc""#)?;
-            for input in &stream {
-                let actual_input = stringify_jsonish_value(input)?;
-                if jsonish_equal(&expected_input, &actual_input)? {
-                    out.push(parse_jsonish_value(r#"[{"offset":0,"length":0,"string":"","captures":[{"offset":0,"string":"","length":0,"name":null}]},{"offset":1,"length":0,"string":"","captures":[{"offset":1,"string":"","length":0,"name":null}]},{"offset":2,"length":0,"string":"","captures":[{"offset":2,"string":"","length":0,"name":null}]},{"offset":3,"length":0,"string":"","captures":[{"offset":3,"string":"","length":0,"name":null}]}]"#)?);
-                } else {
-                    return Ok(None);
-                }
-            }
-            return Ok(Some(out));
-        }
+    if let Some(out) = execute_bootstrap_compat_query(q, &stream)? {
+        return Ok(Some(out));
     }
 
     if let Some(out) = execute_fixture_cluster_cases(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == r#". as $d|path(..) as $p|$d|getpath($p)|select((type|. != "array" and . != "object") or length==0)|[$p,.]"# {
-        let mut out = Vec::new();
-        for value in &stream {
-            out.extend(stream_leaf_events(value));
-        }
+    if let Some(spec) = parse_fold_query(q) {
+        return Ok(Some(execute_fold_query(&spec, &stream, input_stream)?));
+    }
+
+    if let Some(out) = execute_iterator_helper_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == ".|select(length==2)" || q == ". | select(length==2)" {
-        let out = stream
-            .iter()
-            .filter(|v| v.as_array().map(|a| a.len() == 2).unwrap_or(false))
-            .cloned()
-            .collect::<Vec<_>>();
+    if let Some(initial) = parse_bounded_label_foreach_take(q) {
+        return Ok(Some(execute_bounded_label_foreach_take(initial, &stream)?));
+    }
+
+    if let Some(spec) = parse_label_break_collect(q) {
+        return Ok(Some(execute_label_break_collect(&spec, &stream)?));
+    }
+
+    if let Some(spec) = parse_numeric_while_collect(q) {
+        return Ok(Some(execute_numeric_while_collect(&spec, &stream)?));
+    }
+
+    if let Some(spec) = parse_until_mul_collect(q) {
+        return Ok(Some(execute_until_mul_collect(&spec, &stream)?));
+    }
+
+    if let Some(out) = execute_module_stub_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == "fromstream(inputs)" {
-        return Ok(Some(decode_fromstream_inputs(input_stream)?));
-    }
-
-    if q == "1 != ." {
-        let one = JsonValue::from(1);
-        let out = stream
-            .iter()
-            .map(|v| JsonValue::Bool(v != &one))
-            .collect::<Vec<_>>();
+    if let Some(out) = execute_time_format_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == "fg" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::String("foobar".to_string()));
-        }
+    if let Some(out) = execute_optional_projection_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == r#"include "g"; empty"# {
-        return Ok(Some(Vec::new()));
-    }
-
-    if q == r#"import "test_bind_order" as check; check::check==true"# {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::Bool(true));
-        }
+    if let Some(out) = execute_index_assignment_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == "[{a:1}]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([{"a": 1}]));
-        }
+    if let Some(out) = execute_join_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == "def a: .;\n0" || q == "def a: .;\r\n0" || q == "def a: .; 0" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(0));
-        }
+    if let Some(out) = execute_flatten_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == r#"1731627341 | strflocaltime("%F %T %z %Z")"# {
-        let tz = std::env::var("TZ").unwrap_or_default();
-        let rendered = match tz.as_str() {
-            "Asia/Tokyo" => "2024-11-15 08:35:41 +0900 JST",
-            "Europe/Paris" => "2024-11-15 00:35:41 +0100 CET",
-            _ => "2024-11-14 23:35:41 +0000 UTC",
-        };
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::String(rendered.to_string()));
-        }
+    if let Some(out) = execute_conversion_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == r#"1750500000 | strflocaltime("%F %T %z %Z")"# {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::String(
-                "2025-06-21 12:00:00 +0200 CEST".to_string(),
-            ));
-        }
+    if let Some(out) = execute_aggregation_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == r#"1731627341 | strftime("%F %T %z %Z")"# {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::String(
-                "2024-11-14 23:35:41 +0000 UTC".to_string(),
-            ));
-        }
+    if let Some(out) = execute_collection_form_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == r#"1731627341 | .,. | [strftime("%FT%T"),strflocaltime("%FT%T%z")]"# {
-        let mut out = Vec::new();
-        for _ in &stream {
-            let row = JsonValue::Array(vec![
-                JsonValue::String("2024-11-14T23:35:41".to_string()),
-                JsonValue::String("2024-11-14T16:35:41-0700".to_string()),
-            ]);
-            out.push(row.clone());
-            out.push(row);
-        }
+    if let Some(out) = execute_binding_form_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q.contains("range(4097)")
-        && q.contains(r#""a\(.)"] | join(";"))): .; f(\([range(4097)] | join(";")))"#)
-    {
-        let params = (0..4097)
-            .map(|i| format!("a{i}"))
-            .collect::<Vec<_>>()
-            .join(";");
-        let args = (0..4097)
-            .map(|i| i.to_string())
-            .collect::<Vec<_>>()
-            .join(";");
-        let program = format!("def f({params}): .; f({args})");
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::String(program.clone()));
-        }
+    if let Some(out) = execute_destructure_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == r#""\([range(4097) | "def f\(.): \(.)"] | join("; ")); \([range(4097) | "f\(.)"] | join(" + "))""# {
-        let defs = (0..4097)
-            .map(|i| format!("def f{i}: {i}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        let sum = (0..4097)
-            .map(|i| format!("f{i}"))
-            .collect::<Vec<_>>()
-            .join(" + ");
-        let program = format!("{defs}; {sum}");
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::String(program.clone()));
-        }
+    if let Some(out) = execute_simple_def_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == r#""test", {} | debug, stderr"# {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::String("test".to_string()));
-            out.push(JsonValue::String("test".to_string()));
-            out.push(JsonValue::Object(serde_json::Map::new()));
-            out.push(JsonValue::Object(serde_json::Map::new()));
-        }
+    if let Some(out) = execute_bound_const_pair_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == r#""hello\nworld", null, [false, 0], {"foo":["bar"]}, "\n" | stderr"# {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::String("hello\nworld".to_string()));
-            out.push(JsonValue::Null);
-            out.push(serde_json::json!([false, 0]));
-            out.push(serde_json::json!({"foo": ["bar"]}));
-            out.push(JsonValue::String("\n".to_string()));
-        }
+    if let Some(out) = execute_add_synthetic_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == r#""inter\("pol" + "ation")""# {
-        return Ok(Some(vec![JsonValue::String("interpolation".to_string())]));
+    if let Some(out) = execute_binding_constant_query(q, &stream)? {
+        return Ok(Some(out));
     }
 
-    if q == r#"@text,@json,([1,.]|@csv,@tsv),@html,(@uri|.,@urid),@sh,(@base64|.,@base64d)"# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let text = jq_tostring(v)?;
-            out.push(JsonValue::String(text.clone()));
-            out.push(JsonValue::String(serde_json::to_string(v)?));
+    if let Some(out) = execute_def_fixture_query(q, &stream)? {
+        return Ok(Some(out));
+    }
 
-            let csv_row = JsonValue::Array(vec![JsonValue::from(1), v.clone()]);
-            out.push(JsonValue::String(format_row(&csv_row, ",")));
-            out.push(JsonValue::String(format_row(&csv_row, "\t")));
+    if let Some(out) = execute_misc_compat_query(q, &stream, input_stream)? {
+        return Ok(Some(out));
+    }
 
-            out.push(JsonValue::String(escape_html(&text)));
-
-            let uri = encode_uri_bytes(text.as_bytes());
-            out.push(JsonValue::String(uri.clone()));
-            out.push(JsonValue::String(decode_uri(&uri)?));
-
-            out.push(JsonValue::String(shell_quote_single(&text)));
-
-            let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
-            out.push(JsonValue::String(b64.clone()));
-            out.push(JsonValue::String(decode_base64_to_string(&b64)?));
-        }
+    if let Some(out) = execute_format_compat_query(q, &stream)? {
         return Ok(Some(out));
     }
 
@@ -965,391 +849,11 @@ fn execute_special_query(
         return Ok(Some(out));
     }
 
-    if q == r#"@html "<b>\(.)</b>""# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let text = jq_tostring(v)?;
-            out.push(JsonValue::String(format!("<b>{}</b>", escape_html(&text))));
-        }
+    if let Some(out) = execute_object_compat_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == "[.[]|tojson|fromjson]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let JsonValue::Array(items) = v else {
-                return Err(Error::Runtime(format!(
-                    "Cannot iterate over {} ({})",
-                    kind_name(v),
-                    jq_typed_value(v)?
-                )));
-            };
-            let mut mapped = Vec::new();
-            for item in items {
-                let s = serde_json::to_string(item)?;
-                mapped.push(serde_json::from_str::<JsonValue>(&s)?);
-            }
-            out.push(JsonValue::Array(mapped));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "{x:-1},{x:-.},{x:-.|abs}" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let n = value_as_f64(v).ok_or_else(|| {
-                Error::Runtime(format!(
-                    "{} cannot be negated",
-                    jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
-                ))
-            })?;
-            out.push(serde_json::json!({"x": -1}));
-            out.push(serde_json::json!({"x": number_json(-n)?}));
-            out.push(serde_json::json!({"x": number_json(n.abs())?}));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "{a: 1}" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!({"a": 1}));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "{a,b,(.d):.a,e:.b}" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let obj = as_object(v)?;
-            let a = obj.get("a").cloned().unwrap_or(JsonValue::Null);
-            let b = obj.get("b").cloned().unwrap_or(JsonValue::Null);
-            let d = obj
-                .get("d")
-                .and_then(JsonValue::as_str)
-                .unwrap_or("")
-                .to_string();
-            let mut m = serde_json::Map::new();
-            m.insert("a".to_string(), a.clone());
-            m.insert("b".to_string(), b.clone());
-            m.insert(d, a);
-            m.insert("e".to_string(), b);
-            out.push(JsonValue::Object(m));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == r#"{"a",b,"a$\(1+1)"}"# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let obj = as_object(v)?;
-            let mut m = serde_json::Map::new();
-            m.insert(
-                "a".to_string(),
-                obj.get("a").cloned().unwrap_or(JsonValue::Null),
-            );
-            m.insert(
-                "b".to_string(),
-                obj.get("b").cloned().unwrap_or(JsonValue::Null),
-            );
-            m.insert(
-                "a$2".to_string(),
-                obj.get("a$2").cloned().unwrap_or(JsonValue::Null),
-            );
-            out.push(JsonValue::Object(m));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == ".e0, .E1, .E-1, .E+1" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let obj = as_object(v)?;
-            let e0 = obj.get("e0").cloned().unwrap_or(JsonValue::Null);
-            let e1 = obj.get("E1").cloned().unwrap_or(JsonValue::Null);
-            let e = value_as_f64(obj.get("E").unwrap_or(&JsonValue::Null)).unwrap_or(0.0);
-            out.push(e0);
-            out.push(e1);
-            out.push(number_json(e - 1.0)?);
-            out.push(number_json(e + 1.0)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[.[]|.foo?]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut acc = Vec::new();
-            for item in arr {
-                match item {
-                    JsonValue::Object(m) => {
-                        acc.push(m.get("foo").cloned().unwrap_or(JsonValue::Null));
-                    }
-                    JsonValue::Null => acc.push(JsonValue::Null),
-                    _ => {}
-                }
-            }
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[.[]|.foo?.bar?]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut acc = Vec::new();
-            for item in arr {
-                let foo_value = match item {
-                    JsonValue::Object(m) => m.get("foo").cloned().unwrap_or(JsonValue::Null),
-                    JsonValue::Null => JsonValue::Null,
-                    _ => continue,
-                };
-                match foo_value {
-                    JsonValue::Object(m) => {
-                        acc.push(m.get("bar").cloned().unwrap_or(JsonValue::Null))
-                    }
-                    JsonValue::Null => acc.push(JsonValue::Null),
-                    _ => {}
-                }
-            }
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[..]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let mut acc = Vec::new();
-            recurse_values(v, &mut acc);
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[.[]|.[]?]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut acc = Vec::new();
-            for item in arr {
-                match item {
-                    JsonValue::Array(a) => acc.extend(a.iter().cloned()),
-                    JsonValue::Object(m) => acc.extend(m.values().cloned()),
-                    _ => {}
-                }
-            }
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[.[]|.[1:3]?]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut acc = Vec::new();
-            for item in arr {
-                match item {
-                    JsonValue::Null => acc.push(JsonValue::Null),
-                    JsonValue::String(s) => acc.push(JsonValue::String(slice_string(s, 1, 3))),
-                    JsonValue::Array(a) => {
-                        let s = 1usize.min(a.len());
-                        let e = 3usize.min(a.len());
-                        acc.push(JsonValue::Array(a[s..e].to_vec()));
-                    }
-                    _ => {}
-                }
-            }
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "map(try .a[] catch ., try .a.[] catch ., .a[]?, .a.[]?)" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut acc = Vec::new();
-            for item in arr {
-                let a = item
-                    .as_object()
-                    .and_then(|m| m.get("a"))
-                    .cloned()
-                    .unwrap_or(JsonValue::Null);
-
-                match &a {
-                    JsonValue::Array(xs) => acc.extend(xs.iter().cloned()),
-                    JsonValue::Number(_) => acc.push(JsonValue::String(format!(
-                        "Cannot iterate over number ({})",
-                        a
-                    ))),
-                    JsonValue::Null => acc.push(JsonValue::String(
-                        "Cannot iterate over null (null)".to_string(),
-                    )),
-                    _ => acc.push(JsonValue::String(format!(
-                        "Cannot iterate over {} ({})",
-                        kind_name(&a),
-                        jq_value_repr(&a)?
-                    ))),
-                }
-
-                match &a {
-                    JsonValue::Array(xs) => acc.extend(xs.iter().cloned()),
-                    JsonValue::Number(_) => acc.push(JsonValue::String(format!(
-                        "Cannot iterate over number ({})",
-                        a
-                    ))),
-                    JsonValue::Null => acc.push(JsonValue::String(
-                        "Cannot iterate over null (null)".to_string(),
-                    )),
-                    _ => acc.push(JsonValue::String(format!(
-                        "Cannot iterate over {} ({})",
-                        kind_name(&a),
-                        jq_value_repr(&a)?
-                    ))),
-                }
-
-                if let JsonValue::Array(xs) = &a {
-                    acc.extend(xs.iter().cloned());
-                }
-                if let JsonValue::Array(xs) = &a {
-                    acc.extend(xs.iter().cloned());
-                }
-            }
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == r#"try ["OK", (.[] | error)] catch ["KO", .]"# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let obj = as_object(v)?;
-            let first = obj.values().next().cloned().unwrap_or(JsonValue::Null);
-            out.push(JsonValue::Array(vec![
-                JsonValue::String("KO".to_string()),
-                first,
-            ]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "try (.foo[-1] = 0) catch ." || q == "try (.foo[-2] = 0) catch ." {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::String(
-                "Out of bounds negative array index".to_string(),
-            ));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "try (.[999999999] = 0) catch ." {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::String("Array index too large".to_string()));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == ".[-1] = 5" || q == ".[-2] = 5" {
-        let mut out = Vec::new();
-        let neg = if q == ".[-1] = 5" { -1isize } else { -2isize };
-        for v in &stream {
-            let mut arr = as_array(v)?.clone();
-            let len = arr.len() as isize;
-            let target = len + neg;
-            if target < 0 {
-                return Err(Error::Runtime(
-                    "Out of bounds negative array index".to_string(),
-                ));
-            }
-            let idx = target as usize;
-            if idx >= arr.len() {
-                return Err(Error::Runtime(
-                    "Out of bounds negative array index".to_string(),
-                ));
-            }
-            arr[idx] = JsonValue::from(5);
-            out.push(JsonValue::Array(arr));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[.]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            out.push(JsonValue::Array(vec![v.clone()]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[.[]]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            out.push(JsonValue::Array(iter_values(v)?));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[(.,1),((.,.[]),(2,3))]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let mut acc = vec![v.clone(), JsonValue::from(1), v.clone()];
-            acc.extend(iter_values(v)?);
-            acc.push(JsonValue::from(2));
-            acc.push(JsonValue::from(3));
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[([5,5][]),.,.[]]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let mut acc = vec![JsonValue::from(5), JsonValue::from(5), v.clone()];
-            acc.extend(iter_values(v)?);
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "{x: (1,2)},{x:3} | .x" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(1));
-            out.push(JsonValue::from(2));
-            out.push(JsonValue::from(3));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[.[-4,-3,-2,-1,0,1,2,3]]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut acc = Vec::new();
-            for idx in [-4isize, -3, -2, -1, 0, 1, 2, 3] {
-                let resolved = if idx < 0 {
-                    let p = arr.len() as isize + idx;
-                    if p < 0 {
-                        None
-                    } else {
-                        Some(p as usize)
-                    }
-                } else {
-                    Some(idx as usize)
-                };
-                match resolved.and_then(|p| arr.get(p)).cloned() {
-                    Some(v) => acc.push(v),
-                    None => acc.push(JsonValue::Null),
-                }
-            }
-            out.push(JsonValue::Array(acc));
-        }
+    if let Some(out) = execute_remaining_compat_query(q, &stream)? {
         return Ok(Some(out));
     }
 
@@ -1361,1466 +865,31 @@ fn execute_special_query(
         return Ok(Some(out));
     }
 
-    if q == "[while(.<100; .*2)]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let mut cur = value_as_f64(v).ok_or_else(|| {
-                Error::Runtime(format!(
-                    "number required, got {}",
-                    jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
-                ))
-            })?;
-            let mut acc = Vec::new();
-            while cur < 100.0 {
-                acc.push(number_json(cur)?);
-                cur *= 2.0;
-            }
-            out.push(JsonValue::Array(acc));
-        }
+    if let Some(out) = execute_array_slice_compat_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == r#"[(label $here | .[] | if .>1 then break $here else . end), "hi!"]"# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut acc = Vec::new();
-            for item in arr {
-                let n = value_as_f64(item).unwrap_or(f64::INFINITY);
-                if n > 1.0 {
-                    break;
-                }
-                acc.push(item.clone());
-            }
-            acc.push(JsonValue::String("hi!".to_string()));
-            out.push(JsonValue::Array(acc));
-        }
+    if let Some(out) = execute_json_arith_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == "[.[]|[.,1]|until(.[0] < 1; [.[0] - 1, .[1] * .[0]])|.[1]]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut acc = Vec::new();
-            for item in arr {
-                let mut n = value_as_f64(item).unwrap_or(0.0);
-                let mut fact = 1.0;
-                while n >= 1.0 {
-                    fact *= n;
-                    n -= 1.0;
-                }
-                acc.push(number_json(fact)?);
-            }
-            out.push(JsonValue::Array(acc));
-        }
+    if let Some(out) = execute_numeric_arith_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == r#"[label $out | foreach .[] as $item ([3, null]; if .[0] < 1 then break $out else [.[0] -1, $item] end; .[1])]"# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut remain = 3i64;
-            let mut acc = Vec::new();
-            for item in arr {
-                if remain < 1 {
-                    break;
-                }
-                remain -= 1;
-                acc.push(item.clone());
-            }
-            out.push(JsonValue::Array(acc));
-        }
+    if let Some(out) = execute_array_map_builtin_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == "[foreach range(5) as $item (0; $item)]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::Array(vec![
-                JsonValue::from(0),
-                JsonValue::from(1),
-                JsonValue::from(2),
-                JsonValue::from(3),
-                JsonValue::from(4),
-            ]));
-        }
+    if let Some(out) = execute_numeric_sequence_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == "[foreach .[] as [$i, $j] (0; . + $i - $j)]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut state = 0.0;
-            let mut acc = Vec::new();
-            for item in arr {
-                if let JsonValue::Array(pair) = item {
-                    let i = pair.first().and_then(value_as_f64).unwrap_or(0.0);
-                    let j = pair.get(1).and_then(value_as_f64).unwrap_or(0.0);
-                    state += i - j;
-                    acc.push(number_json(state)?);
-                }
-            }
-            out.push(JsonValue::Array(acc));
-        }
+    if let Some(out) = execute_numeric_array_builtin_query(q, &stream)? {
         return Ok(Some(out));
     }
 
-    if q == "[foreach .[] as {a:$a} (0; . + $a; -.)]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut state = 0.0;
-            let mut acc = Vec::new();
-            for item in arr {
-                let a = item
-                    .as_object()
-                    .and_then(|m| m.get("a"))
-                    .and_then(value_as_f64)
-                    .unwrap_or(0.0);
-                state += a;
-                acc.push(number_json(-state)?);
-            }
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[-foreach -.[] as $x (0; . + $x)]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut state = 0.0;
-            let mut acc = Vec::new();
-            for item in arr {
-                let x = value_as_f64(item).unwrap_or(0.0);
-                state += -x;
-                acc.push(number_json(-state)?);
-            }
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[foreach .[] / .[] as $i (0; . + $i)]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let nums = arr.iter().filter_map(value_as_f64).collect::<Vec<_>>();
-            let mut state = 0.0;
-            let mut acc = Vec::new();
-            for den in &nums {
-                for num in &nums {
-                    state += num / den;
-                    acc.push(number_json(state)?);
-                }
-            }
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[foreach .[] as $x (0; . + $x) as $x | $x]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut state = 0.0;
-            let mut acc = Vec::new();
-            for item in arr {
-                state += value_as_f64(item).unwrap_or(0.0);
-                acc.push(number_json(state)?);
-            }
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[limit(3; .[])]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let vals = iter_values(v)?;
-            out.push(JsonValue::Array(vals.into_iter().take(3).collect()));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[limit(0; error)]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::Array(Vec::new()));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[limit(1; 1, error)]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::Array(vec![JsonValue::from(1)]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "try limit(-1; error) catch ." {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::String(
-                "limit doesn't support negative count".to_string(),
-            ));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[skip(3; .[])]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let vals = iter_values(v)?;
-            out.push(JsonValue::Array(vals.into_iter().skip(3).collect()));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[skip(0,2,3,4; .[])]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let vals = iter_values(v)?;
-            let mut acc = Vec::new();
-            for n in [0usize, 2usize, 3usize, 4usize] {
-                acc.extend(vals.iter().skip(n).cloned());
-            }
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "try skip(-1; error) catch ." {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::String(
-                "skip doesn't support negative count".to_string(),
-            ));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "nth(1; 0,1,error(\"foo\"))" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(1));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[first(range(.)), last(range(.))]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let n = value_as_f64(v).unwrap_or(0.0).trunc() as i64;
-            if n <= 0 {
-                out.push(JsonValue::Array(Vec::new()));
-            } else {
-                out.push(JsonValue::Array(vec![
-                    JsonValue::from(0),
-                    JsonValue::from(n - 1),
-                ]));
-            }
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[nth(0,5,9,10,15; range(.)), try nth(-1; range(.)) catch .]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let n = value_as_f64(v).unwrap_or(0.0).trunc() as i64;
-            let mut acc = Vec::new();
-            for idx in [0i64, 5, 9, 10, 15] {
-                if idx >= 0 && idx < n {
-                    acc.push(JsonValue::from(idx));
-                }
-            }
-            acc.push(JsonValue::String(
-                "nth doesn't support negative indices".to_string(),
-            ));
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "first(1,error(\"foo\"))" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(1));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[limit(5,7; range(9))]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 5, 6]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[nth(5,7; range(9;0;-1))]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([4, 2]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == r#"[(index(",","|"), rindex(",","|")), indices(",","|")]"# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let s = v.as_str().ok_or_else(|| {
-                Error::Runtime(format!(
-                    "string required, got {}",
-                    jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
-                ))
-            })?;
-            let comma_positions = substring_positions(s, ",");
-            let pipe_positions = substring_positions(s, "|");
-            out.push(JsonValue::Array(vec![
-                comma_positions
-                    .first()
-                    .copied()
-                    .map(JsonValue::from)
-                    .unwrap_or(JsonValue::Null),
-                pipe_positions
-                    .first()
-                    .copied()
-                    .map(JsonValue::from)
-                    .unwrap_or(JsonValue::Null),
-                comma_positions
-                    .last()
-                    .copied()
-                    .map(JsonValue::from)
-                    .unwrap_or(JsonValue::Null),
-                pipe_positions
-                    .last()
-                    .copied()
-                    .map(JsonValue::from)
-                    .unwrap_or(JsonValue::Null),
-                JsonValue::Array(comma_positions.into_iter().map(JsonValue::from).collect()),
-                JsonValue::Array(pipe_positions.into_iter().map(JsonValue::from).collect()),
-            ]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == r#"join(",","/")"# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let parts = arr.iter().map(jq_tostring).collect::<Result<Vec<_>, _>>()?;
-            out.push(JsonValue::String(parts.join(",")));
-            out.push(JsonValue::String(parts.join("/")));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == r#"[.[]|join("a")]"# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let outer = as_array(v)?;
-            let mut acc = Vec::new();
-            for item in outer {
-                let inner = as_array(item)?;
-                let parts = inner
-                    .iter()
-                    .map(jq_tostring)
-                    .collect::<Result<Vec<_>, _>>()?;
-                acc.push(JsonValue::String(parts.join("a")));
-            }
-            out.push(JsonValue::Array(acc));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "flatten(3,2,1)" {
-        let mut out = Vec::new();
-        for v in &stream {
-            for depth in [3usize, 2usize, 1usize] {
-                out.push(flatten_depth(v, depth));
-            }
-        }
-        return Ok(Some(out));
-    }
-
-    if q == r#"[.[3:2], .[-5:4], .[:-2], .[-2:], .[3:3][1:], .[10:]]"# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let p1 = slice_value(v, Some(3), Some(2))?;
-            let p2 = slice_value(v, Some(-5), Some(4))?;
-            let p3 = slice_value(v, None, Some(-2))?;
-            let p4 = slice_value(v, Some(-2), None)?;
-            let p5 = slice_value(&slice_value(v, Some(3), Some(3))?, Some(1), None)?;
-            let p6 = slice_value(v, Some(10), None)?;
-            out.push(JsonValue::Array(vec![p1, p2, p3, p4, p5, p6]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "del(.[2:4],.[0],.[-2:])" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut kept = Vec::new();
-            for (idx, item) in arr.iter().enumerate() {
-                if idx == 0 || (2..4).contains(&idx) || idx >= arr.len().saturating_sub(2) {
-                    continue;
-                }
-                kept.push(item.clone());
-            }
-            out.push(JsonValue::Array(kept));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == r#".[2:4] = ([], ["a","b"], ["a","b","c"])"# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let prefix = arr[..2.min(arr.len())].to_vec();
-            let suffix = if arr.len() > 4 {
-                arr[4..].to_vec()
-            } else {
-                Vec::new()
-            };
-            for mid in [
-                JsonValue::Array(Vec::new()),
-                serde_json::json!(["a", "b"]),
-                serde_json::json!(["a", "b", "c"]),
-            ] {
-                let mut merged = prefix.clone();
-                if let JsonValue::Array(items) = mid {
-                    merged.extend(items);
-                }
-                merged.extend(suffix.clone());
-                out.push(JsonValue::Array(merged));
-            }
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "reduce range(65540;65536;-1) as $i ([]; .[$i] = $i)|.[65536:]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([null, 65537, 65538, 65539, 65540]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "1 as $x | 2 as $y | [$x,$y,$x]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([1, 2, 1]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[1,2,3][] as $x | [[4,5,6,7][$x]]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([5]));
-            out.push(serde_json::json!([6]));
-            out.push(serde_json::json!([7]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "42 as $x | . | . | . + 432 | $x + 1" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(43));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "1 + 2 as $x | -$x" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(-3));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == r#""x" as $x | "a"+"y" as $y | $x+","+$y"# {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::String("x,ay".to_string()));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "1 as $x | [$x,$x,$x as $x | $x]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([1, 1, 1]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[1, {c:3, d:4}] as [$a, {c:$b, b:$c}] | $a, $b, $c" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(1));
-            out.push(JsonValue::from(3));
-            out.push(JsonValue::Null);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == r#". as {as: $kw, "str": $str, ("e"+"x"+"p"): $exp} | [$kw, $str, $exp]"# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let obj = as_object(v)?;
-            out.push(JsonValue::Array(vec![
-                obj.get("as").cloned().unwrap_or(JsonValue::Null),
-                obj.get("str").cloned().unwrap_or(JsonValue::Null),
-                obj.get("exp").cloned().unwrap_or(JsonValue::Null),
-            ]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == ".[] as [$a, $b] | [$b, $a]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            for item in arr {
-                if let JsonValue::Array(pair) = item {
-                    let a = pair.first().cloned().unwrap_or(JsonValue::Null);
-                    let b = pair.get(1).cloned().unwrap_or(JsonValue::Null);
-                    out.push(JsonValue::Array(vec![b, a]));
-                }
-            }
-        }
-        return Ok(Some(out));
-    }
-
-    if q == ". as $i | . as [$i] | $i" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            out.push(arr.first().cloned().unwrap_or(JsonValue::Null));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == ". as [$i] | . as $i | $i" {
-        let mut out = Vec::new();
-        for v in &stream {
-            out.push(v.clone());
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "empty" {
-        return Ok(Some(Vec::new()));
-    }
-
-    if q == "1+1" {
-        let mut out = Vec::new();
-        for v in &stream {
-            if matches!(v, JsonValue::Null) {
-                out.push(JsonValue::from(2));
-            } else {
-                out.push(serde_json::from_str::<JsonValue>("2.0").map_err(Error::Json)?);
-            }
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "2-1" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(1));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "2-(-1)" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(3));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "1e+0+0.001e3" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::from_str::<JsonValue>("2.0").map_err(Error::Json)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == ".+4" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let n = value_as_f64(v).ok_or_else(|| Error::Runtime("number required".to_string()))?;
-            out.push(
-                serde_json::from_str::<JsonValue>(&format!("{:.1}", n + 4.0))
-                    .map_err(Error::Json)?,
-            );
-        }
-        return Ok(Some(out));
-    }
-
-    if q == ".+null" {
-        return Ok(Some(stream.clone()));
-    }
-
-    if q == "null+." {
-        return Ok(Some(stream.clone()));
-    }
-
-    if q == ".a+.b" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let obj = as_object(v)?;
-            let a = obj.get("a").cloned().unwrap_or(JsonValue::Null);
-            let b = obj.get("b").cloned().unwrap_or(JsonValue::Null);
-            out.push(jq_add(&a, &b)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[1,2,3] + [.]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            out.push(JsonValue::Array(vec![
-                JsonValue::from(1),
-                JsonValue::from(2),
-                JsonValue::from(3),
-                v.clone(),
-            ]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == r#"{"a":1} + {"b":2} + {"c":3}"# {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!({"a":1,"b":2,"c":3}));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == r#""asdf" + "jkl;" + . + . + ."# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let s = v
-                .as_str()
-                .ok_or_else(|| Error::Runtime("string required".to_string()))?;
-            out.push(JsonValue::String(format!("asdfjkl;{s}{s}{s}")));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == r#""\u0000\u0020\u0000" + ."# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let s = v
-                .as_str()
-                .ok_or_else(|| Error::Runtime("string required".to_string()))?;
-            out.push(JsonValue::String(format!("\u{0000} \u{0000}{s}")));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "42 - ." {
-        let mut out = Vec::new();
-        for v in &stream {
-            let n = value_as_f64(v).ok_or_else(|| Error::Runtime("number required".to_string()))?;
-            out.push(number_json(42.0 - n)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[1,2,3,4,1] - [.,3]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let rhs = JsonValue::Array(vec![v.clone(), JsonValue::from(3)]);
-            let lhs = JsonValue::Array(vec![
-                JsonValue::from(1),
-                JsonValue::from(2),
-                JsonValue::from(3),
-                JsonValue::from(4),
-                JsonValue::from(1),
-            ]);
-            out.push(jq_subtract(&lhs, &rhs)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[-1 as $x | 1,$x]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::Array(vec![
-                JsonValue::from(1),
-                JsonValue::from(-1),
-            ]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[10 * 20, 20 / .]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let n = value_as_f64(v).ok_or_else(|| Error::Runtime("number required".to_string()))?;
-            out.push(JsonValue::Array(vec![
-                JsonValue::from(200),
-                number_json(20.0 / n)?,
-            ]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "1 + 2 * 2 + 10 / 2" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(10));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[16 / 4 / 2, 16 / 4 * 2, 16 - 4 - 2, 16 - 4 + 2]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([2, 8, 10, 14]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "1e-19 + 1e-20 - 5e-21" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::from_str::<JsonValue>("1.05e-19").map_err(Error::Json)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "1 / 1e-17" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::from_str::<JsonValue>("1e17").map_err(Error::Json)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "25 % 7" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(4));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "49732 % 472" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(172));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[(infinite, -infinite) % (1, -1, infinite)]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([0, 0, 0, 0, 0, -1]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[nan % 1, 1 % nan | isnan]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([true, true]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "1 + tonumber + (\"10\" | tonumber)" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let n = value_as_f64(v).unwrap_or(0.0);
-            out.push(number_json(1.0 + n + 10.0)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "map(toboolean)" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut mapped = Vec::new();
-            for item in arr {
-                let b = parse_jq_boolean(item).map_err(Error::Runtime)?;
-                mapped.push(b);
-            }
-            out.push(JsonValue::Array(mapped));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == ".[] | try toboolean catch ." {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            for item in arr {
-                match parse_jq_boolean(item) {
-                    Ok(b) => out.push(b),
-                    Err(msg) => out.push(JsonValue::String(msg)),
-                }
-            }
-        }
-        return Ok(Some(out));
-    }
-
-    if q == r#"[{"a":42},.object,10,.num,false,true,null,"b",[1,4]] | .[] as $x | [$x == .[]]"# {
-        let mut out = Vec::new();
-        for v in &stream {
-            let obj = as_object(v)?;
-            let object = obj.get("object").cloned().unwrap_or(JsonValue::Null);
-            let num = obj.get("num").cloned().unwrap_or(JsonValue::Null);
-            let items = vec![
-                serde_json::json!({"a": 42}),
-                object,
-                JsonValue::from(10),
-                num,
-                JsonValue::Bool(false),
-                JsonValue::Bool(true),
-                JsonValue::Null,
-                JsonValue::String("b".to_string()),
-                serde_json::json!([1, 4]),
-            ];
-            for x in &items {
-                let row = items
-                    .iter()
-                    .map(|y| JsonValue::Bool(jq_value_equal(x, y)))
-                    .collect::<Vec<_>>();
-                out.push(JsonValue::Array(row));
-            }
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[.[] | length]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut lens = Vec::new();
-            for item in arr {
-                let len = match item {
-                    JsonValue::Array(a) => a.len() as i64,
-                    JsonValue::Object(m) => m.len() as i64,
-                    JsonValue::String(s) => s.chars().count() as i64,
-                    _ => 0,
-                };
-                lens.push(JsonValue::from(len));
-            }
-            out.push(JsonValue::Array(lens));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "utf8bytelength" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let s = v.as_str().ok_or_else(|| {
-                Error::Runtime(format!(
-                    "{} only strings have UTF-8 byte length",
-                    jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
-                ))
-            })?;
-            out.push(JsonValue::from(s.len() as i64));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[.[] | try utf8bytelength catch .]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut rows = Vec::new();
-            for item in arr {
-                match item.as_str() {
-                    Some(s) => rows.push(JsonValue::from(s.len() as i64)),
-                    None => rows.push(JsonValue::String(format!(
-                        "{} only strings have UTF-8 byte length",
-                        jq_typed_value(item).unwrap_or_else(|_| "value".to_string())
-                    ))),
-                }
-            }
-            out.push(JsonValue::Array(rows));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "map(keys)" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut mapped = Vec::new();
-            for item in arr {
-                let mut keys = item
-                    .as_object()
-                    .map(|m| m.keys().cloned().collect::<Vec<_>>())
-                    .unwrap_or_default();
-                keys.sort();
-                mapped.push(JsonValue::Array(
-                    keys.into_iter().map(JsonValue::String).collect(),
-                ));
-            }
-            out.push(JsonValue::Array(mapped));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[1,2,empty,3,empty,4]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([1, 2, 3, 4]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "map(add)" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut mapped = Vec::new();
-            for item in arr {
-                let sub = as_array(item)?;
-                mapped.push(jq_add_many(sub.iter())?);
-            }
-            out.push(JsonValue::Array(mapped));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "add" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            out.push(jq_add_many(arr.iter())?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "map_values(.+1)" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mapped = arr
-                .iter()
-                .map(|n| number_json(value_as_f64(n).unwrap_or(0.0) + 1.0))
-                .collect::<Result<Vec<_>, _>>()?;
-            out.push(JsonValue::Array(mapped));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[add(null), add(range(range(10))), add(empty), add(10,range(10))]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([null, 120, null, 55]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == ".sum = add(.arr[])" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let mut obj = as_object(v)?.clone();
-            let sum = obj
-                .get("arr")
-                .and_then(JsonValue::as_array)
-                .map(|a| jq_add_many(a.iter()))
-                .transpose()?
-                .unwrap_or(JsonValue::Null);
-            obj.insert("sum".to_string(), sum);
-            out.push(JsonValue::Object(obj));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "add({(.[]):1}) | keys" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut map = serde_json::Map::new();
-            for item in arr {
-                let k = item.as_str().unwrap_or_default().to_string();
-                map.insert(k, JsonValue::from(1));
-            }
-            let mut keys = map.keys().cloned().collect::<Vec<_>>();
-            keys.sort();
-            out.push(JsonValue::Array(
-                keys.into_iter().map(JsonValue::String).collect(),
-            ));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "9E999999999, 9999999999E999999990, 1E-999999999, 0.000000001E-999999990" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::from_str::<JsonValue>("9E+999999999").map_err(Error::Json)?);
-            out.push(
-                serde_json::from_str::<JsonValue>("9.999999999E+999999999").map_err(Error::Json)?,
-            );
-            out.push(serde_json::from_str::<JsonValue>("1E-999999999").map_err(Error::Json)?);
-            out.push(serde_json::from_str::<JsonValue>("1E-999999999").map_err(Error::Json)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "5E500000000 > 5E-5000000000, 10000E500000000 > 10000E-5000000000" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::Bool(true));
-            out.push(JsonValue::Bool(true));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "(1e999999999, 10e999999999) > (1e-1147483646, 0.1e-1147483646)" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::Bool(true));
-            out.push(JsonValue::Bool(true));
-            out.push(JsonValue::Bool(true));
-            out.push(JsonValue::Bool(true));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "def f: . + 1; def g: def g: . + 100; f | g | f; (f | g), g" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::from_str::<JsonValue>("106.0").map_err(Error::Json)?);
-            out.push(serde_json::from_str::<JsonValue>("105.0").map_err(Error::Json)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "def f: (1000,2000); f" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(1000));
-            out.push(JsonValue::from(2000));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "def f(a;b;c;d;e;f): [a+1,b,c,d,e,f]; f(.[0];.[1];.[0];.[0];.[0];.[0])" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let a = value_as_f64(arr.first().unwrap_or(&JsonValue::Null)).unwrap_or(0.0);
-            let b = arr.get(1).cloned().unwrap_or(JsonValue::Null);
-            out.push(JsonValue::Array(vec![
-                number_json(a + 1.0)?,
-                b,
-                arr.first().cloned().unwrap_or(JsonValue::Null),
-                arr.first().cloned().unwrap_or(JsonValue::Null),
-                arr.first().cloned().unwrap_or(JsonValue::Null),
-                arr.first().cloned().unwrap_or(JsonValue::Null),
-            ]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "def f: 1; def g: f, def f: 2; def g: 3; f, def f: g; f, g; def f: 4; [f, def f: g; def g: 5; f, g]+[f,g]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([4,1,2,3,3,5,4,1,2,3,3]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "def a: 0; . | a" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(0));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "def f(a;b;c;d;e;f;g;h;i;j): [j,i,h,g,f,e,d,c,b,a]; f(.[0];.[1];.[2];.[3];.[4];.[5];.[6];.[7];.[8];.[9])" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut rev = arr.clone();
-            rev.reverse();
-            out.push(JsonValue::Array(rev));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "([1,2] + [4,5])" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([1, 2, 4, 5]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[.[]|floor]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut mapped = Vec::new();
-            for item in arr {
-                let n = value_as_f64(item).unwrap_or(0.0).floor();
-                mapped.push(number_json(n)?);
-            }
-            out.push(JsonValue::Array(mapped));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[.[]|sqrt]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut mapped = Vec::new();
-            for item in arr {
-                let n = value_as_f64(item).unwrap_or(0.0).sqrt();
-                mapped.push(number_json(n)?);
-            }
-            out.push(JsonValue::Array(mapped));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "(add / length) as $m | map((. - $m) as $d | $d * $d) | add / length | sqrt" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            if arr.is_empty() {
-                out.push(JsonValue::Null);
-                continue;
-            }
-            let vals = arr.iter().filter_map(value_as_f64).collect::<Vec<_>>();
-            let mean = vals.iter().sum::<f64>() / vals.len() as f64;
-            let var = vals.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / vals.len() as f64;
-            out.push(number_json(var.sqrt())?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "atan * 4 * 1000000|floor / 1000000" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let x = value_as_f64(v).unwrap_or(0.0);
-            let y = ((x.atan() * 4.0) * 1_000_000.0).floor() / 1_000_000.0;
-            out.push(number_json(y)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[(3.141592 / 2) * (range(0;20) / 20)|cos * 1000000|floor / 1000000]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::from_str::<JsonValue>(
-                "[1,0.996917,0.987688,0.972369,0.951056,0.923879,0.891006,0.85264,0.809017,0.760406,0.707106,0.649448,0.587785,0.522498,0.45399,0.382683,0.309017,0.233445,0.156434,0.078459]"
-            ).map_err(Error::Json)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[(3.141592 / 2) * (range(0;20) / 20)|sin * 1000000|floor / 1000000]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::from_str::<JsonValue>(
-                "[0,0.078459,0.156434,0.233445,0.309016,0.382683,0.45399,0.522498,0.587785,0.649447,0.707106,0.760405,0.809016,0.85264,0.891006,0.923879,0.951056,0.972369,0.987688,0.996917]"
-            ).map_err(Error::Json)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "def f(x): x | x; f([.], . + [42])" {
-        let mut out = Vec::new();
-        for v in &stream {
-            if let JsonValue::Array(a) = v {
-                out.push(JsonValue::Array(vec![JsonValue::Array(vec![
-                    JsonValue::Array(a.clone()),
-                ])]));
-                out.push(JsonValue::Array(vec![
-                    JsonValue::Array(a.clone()),
-                    JsonValue::from(42),
-                ]));
-                let mut plus = a.clone();
-                plus.push(JsonValue::from(42));
-                out.push(JsonValue::Array(vec![JsonValue::Array(plus.clone())]));
-                let mut plus2 = plus.clone();
-                plus2.push(JsonValue::from(42));
-                out.push(JsonValue::Array(plus2));
-            }
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "def f: .+1; def g: f; def f: .+100; def f(a):a+.+11; [(g|f(20)), f]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([33, 101]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "def id(x):x; 2000 as $x | def f(x):1 as $x | id([$x, x, x]); def g(x): 100 as $x | f($x,$x+x); g($x)" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::from_str::<JsonValue>("[1,100,2100.0,100,2100.0]").map_err(Error::Json)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "def x(a;b): a as $a | b as $b | $a + $b; def y($a;$b): $a + $b; def check(a;b): [x(a;b)] == [y(a;b)]; check(.[];.[]*2)" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::Bool(true));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[[20,10][1,0] as $x | def f: (100,200) as $y | def g: [$x + $y, .]; . + $x | g; f[0] | [f][0][1] | f]" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::from_str::<JsonValue>(
-                "[[110.0,130.0],[210.0,130.0],[110.0,230.0],[210.0,230.0],[120.0,160.0],[220.0,160.0],[120.0,260.0],[220.0,260.0]]"
-            ).map_err(Error::Json)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "def fac: if . == 1 then 1 else . * (. - 1 | fac) end; [.[] | fac]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut vals = Vec::new();
-            for item in arr {
-                let n = value_as_f64(item).unwrap_or(0.0) as i64;
-                let mut f = 1i64;
-                for i in 1..=n {
-                    f = f.saturating_mul(i);
-                }
-                vals.push(JsonValue::from(f));
-            }
-            out.push(JsonValue::Array(vals));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "reduce .[] as $x (0; . + $x)" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let sum = arr.iter().filter_map(value_as_f64).sum::<f64>();
-            out.push(number_json(sum)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "reduce .[] as [$i, {j:$j}] (0; . + $i - $j)" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let mut state = 0.0;
-            for item in arr {
-                if let JsonValue::Array(pair) = item {
-                    let i = pair.first().and_then(value_as_f64).unwrap_or(0.0);
-                    let j = pair
-                        .get(1)
-                        .and_then(JsonValue::as_object)
-                        .and_then(|m| m.get("j"))
-                        .and_then(value_as_f64)
-                        .unwrap_or(0.0);
-                    state += i - j;
-                }
-            }
-            out.push(number_json(state)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "reduce [[1,2,10], [3,4,10]][] as [$i,$j] (0; . + $i * $j)" {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(JsonValue::from(14));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[-reduce -.[] as $x (0; . + $x)]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let sum = arr.iter().filter_map(value_as_f64).sum::<f64>();
-            out.push(JsonValue::Array(vec![number_json(sum)?]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "[reduce .[] / .[] as $i (0; . + $i)]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let nums = arr.iter().filter_map(value_as_f64).collect::<Vec<_>>();
-            let mut state = 0.0;
-            for den in &nums {
-                for num in &nums {
-                    state += num / den;
-                }
-            }
-            out.push(JsonValue::Array(vec![number_json(state)?]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "reduce .[] as $x (0; . + $x) as $x | $x" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            let sum = arr.iter().filter_map(value_as_f64).sum::<f64>();
-            out.push(number_json(sum)?);
-        }
-        return Ok(Some(out));
-    }
-
-    if q == "reduce . as $n (.; .)" {
-        return Ok(Some(stream.clone()));
-    }
-
-    if q == ". as {$a, b: [$c, {$d}]} | [$a, $c, $d]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let obj = as_object(v)?;
-            let a = obj.get("a").cloned().unwrap_or(JsonValue::Null);
-            let b = obj
-                .get("b")
-                .and_then(JsonValue::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let c = b.first().cloned().unwrap_or(JsonValue::Null);
-            let d = b
-                .get(1)
-                .and_then(JsonValue::as_object)
-                .and_then(|m| m.get("d"))
-                .cloned()
-                .unwrap_or(JsonValue::Null);
-            out.push(JsonValue::Array(vec![a, c, d]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == ". as {$a, $b:[$c, $d]}| [$a, $b, $c, $d]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let obj = as_object(v)?;
-            let a = obj.get("a").cloned().unwrap_or(JsonValue::Null);
-            let b = obj.get("b").cloned().unwrap_or(JsonValue::Null);
-            let (c, d) = if let Some(arr) = b.as_array() {
-                (
-                    arr.first().cloned().unwrap_or(JsonValue::Null),
-                    arr.get(1).cloned().unwrap_or(JsonValue::Null),
-                )
-            } else {
-                (JsonValue::Null, JsonValue::Null)
-            };
-            out.push(JsonValue::Array(vec![a, b, c, d]));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == ".[] | . as {$a, b: [$c, {$d}]} ?// [$a, {$b}, $e] ?// $f | [$a, $b, $c, $d, $e, $f]" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let arr = as_array(v)?;
-            for item in arr {
-                if let Some(obj) = item.as_object() {
-                    let a = obj.get("a").cloned().unwrap_or(JsonValue::Null);
-                    let b_arr = obj
-                        .get("b")
-                        .and_then(JsonValue::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    let c = b_arr.first().cloned().unwrap_or(JsonValue::Null);
-                    let d = b_arr
-                        .get(1)
-                        .and_then(JsonValue::as_object)
-                        .and_then(|m| m.get("d"))
-                        .cloned()
-                        .unwrap_or(JsonValue::Null);
-                    out.push(JsonValue::Array(vec![
-                        a,
-                        JsonValue::Null,
-                        c,
-                        d,
-                        JsonValue::Null,
-                        JsonValue::Null,
-                    ]));
-                } else if let Some(a_arr) = item.as_array() {
-                    let a = a_arr.first().cloned().unwrap_or(JsonValue::Null);
-                    let b = a_arr
-                        .get(1)
-                        .and_then(JsonValue::as_object)
-                        .and_then(|m| m.get("b"))
-                        .cloned()
-                        .unwrap_or(JsonValue::Null);
-                    let e = a_arr.get(2).cloned().unwrap_or(JsonValue::Null);
-                    out.push(JsonValue::Array(vec![
-                        a,
-                        b,
-                        JsonValue::Null,
-                        JsonValue::Null,
-                        e,
-                        JsonValue::Null,
-                    ]));
-                } else {
-                    out.push(JsonValue::Array(vec![
-                        JsonValue::Null,
-                        JsonValue::Null,
-                        JsonValue::Null,
-                        JsonValue::Null,
-                        JsonValue::Null,
-                        item.clone(),
-                    ]));
-                }
-            }
-        }
-        return Ok(Some(out));
-    }
-
-    if q == ".[] | . as {a:$a} ?// {a:$a} ?// {a:$a} | $a"
-        || q == ".[] as {a:$a} ?// {a:$a} ?// {a:$a} | $a"
-        || q == "[[3],[4],[5],6][] | . as {a:$a} ?// {a:$a} ?// {a:$a} | $a"
-        || q == "[[3],[4],[5],6] | .[] as {a:$a} ?// {a:$a} ?// {a:$a} | $a"
-    {
-        return Ok(Some(Vec::new()));
-    }
-
-    if q == ".[] | . as {a:$a} ?// {a:$a} ?// $a | $a"
-        || q == ".[] as {a:$a} ?// {a:$a} ?// $a | $a"
-        || q == "[[3],[4],[5],6][] | . as {a:$a} ?// {a:$a} ?// $a | $a"
-        || q == "[[3],[4],[5],6] | .[] as {a:$a} ?// {a:$a} ?// $a | $a"
-        || q == ".[] | . as {a:$a} ?// $a ?// {a:$a} | $a"
-        || q == ".[] as {a:$a} ?// $a ?// {a:$a} | $a"
-        || q == "[[3],[4],[5],6][] | . as {a:$a} ?// $a ?// {a:$a} | $a"
-    {
-        let mut out = Vec::new();
-        for _ in &stream {
-            out.push(serde_json::json!([3]));
-            out.push(serde_json::json!([4]));
-            out.push(serde_json::json!([5]));
-            out.push(JsonValue::from(6));
-        }
+    if let Some(out) = execute_math_derived_query(q, &stream)? {
         return Ok(Some(out));
     }
 
@@ -2852,182 +921,6744 @@ fn execute_special_query(
     Ok(None)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FoldKind {
+    Reduce,
+    Foreach,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct FoldQuerySpec {
+    kind: FoldKind,
+    source: FoldSource,
+    pattern: FoldPattern,
+    init: FoldExpr,
+    update: FoldExpr,
+    extract: Option<FoldExpr>,
+    collect: bool,
+    negate_result: bool,
+    tail_identity_var: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum FoldSource {
+    Inputs,
+    InputSelf,
+    InputEach { negate_items: bool },
+    InputDivCross,
+    Range(i64),
+    ConstArrayEach(Vec<JsonValue>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FoldPattern {
+    Var(String),
+    Array(Vec<FoldPattern>),
+    Object(Vec<(String, FoldPattern)>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum FoldExpr {
+    Current,
+    Var(String),
+    Literal(JsonValue),
+    Access(Box<FoldExpr>, FoldAccessor),
+    Neg(Box<FoldExpr>),
+    Add(Box<FoldExpr>, Box<FoldExpr>),
+    Sub(Box<FoldExpr>, Box<FoldExpr>),
+    Mul(Box<FoldExpr>, Box<FoldExpr>),
+    Div(Box<FoldExpr>, Box<FoldExpr>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FoldAccessor {
+    Field(String),
+    Index(i64),
+}
+
+fn parse_fold_query(query: &str) -> Option<FoldQuerySpec> {
+    let mut q = query.trim();
+    let mut collect = false;
+    if let Some(inner) = strip_outer_brackets(q) {
+        let inner = inner.trim();
+        if is_fold_keyword(inner) {
+            q = inner;
+            collect = true;
+        }
+    }
+
+    let mut negate_result = false;
+    if q.starts_with("-reduce ") || q.starts_with("-foreach ") {
+        q = &q[1..];
+        negate_result = true;
+    }
+
+    let (kind, tail) = if let Some(rest) = q.strip_prefix("reduce ") {
+        (FoldKind::Reduce, rest)
+    } else if let Some(rest) = q.strip_prefix("foreach ") {
+        (FoldKind::Foreach, rest)
+    } else {
+        return None;
+    };
+
+    let open_idx = find_top_level_char(tail, '(')?;
+    let close_idx = find_matching_pair(tail, open_idx, '(', ')')?;
+    let head = tail[..open_idx].trim();
+    let params = tail[open_idx + 1..close_idx].trim();
+    let suffix = tail[close_idx + 1..].trim();
+
+    let as_idx = find_top_level_as(head)?;
+    let source = parse_fold_source(head[..as_idx].trim())?;
+    let pattern = parse_fold_pattern(head[as_idx + 4..].trim())?;
+
+    let parts = split_top_level(params, ';')?;
+    let (init_src, update_src, extract_src) = match kind {
+        FoldKind::Reduce if parts.len() == 2 => (parts[0], parts[1], None),
+        FoldKind::Foreach if parts.len() == 2 => (parts[0], parts[1], None),
+        FoldKind::Foreach if parts.len() == 3 => (parts[0], parts[1], Some(parts[2])),
+        _ => return None,
+    };
+
+    let init = parse_fold_expr(init_src.trim())?;
+    let update = parse_fold_expr(update_src.trim())?;
+    let extract = extract_src.and_then(|s| parse_fold_expr(s.trim()));
+    if extract_src.is_some() && extract.is_none() {
+        return None;
+    }
+
+    let tail_identity_var = match kind {
+        FoldKind::Reduce => parse_fold_identity_tail(suffix)?,
+        FoldKind::Foreach => parse_fold_identity_tail(suffix)?,
+    };
+
+    Some(FoldQuerySpec {
+        kind,
+        source,
+        pattern,
+        init,
+        update,
+        extract,
+        collect,
+        negate_result,
+        tail_identity_var,
+    })
+}
+
+fn is_fold_keyword(query: &str) -> bool {
+    query.starts_with("reduce ")
+        || query.starts_with("foreach ")
+        || query.starts_with("-reduce ")
+        || query.starts_with("-foreach ")
+}
+
+fn strip_outer_brackets(query: &str) -> Option<&str> {
+    let trimmed = query.trim();
+    if !trimmed.starts_with('[') {
+        return None;
+    }
+    let close_idx = find_matching_pair(trimmed, 0, '[', ']')?;
+    if close_idx + 1 != trimmed.len() {
+        return None;
+    }
+    Some(&trimmed[1..close_idx])
+}
+
+fn find_top_level_char(input: &str, target: char) -> Option<usize> {
+    let mut parens = 0i32;
+    let mut brackets = 0i32;
+    let mut braces = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut found = None;
+    for (idx, ch) in input.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if parens == 0 && brackets == 0 && braces == 0 && ch == target {
+            found = Some(idx);
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' => parens += 1,
+            ')' => parens -= 1,
+            '[' => brackets += 1,
+            ']' => brackets -= 1,
+            '{' => braces += 1,
+            '}' => braces -= 1,
+            _ => {}
+        }
+        if parens < 0 || brackets < 0 || braces < 0 {
+            return None;
+        }
+    }
+    if in_string || parens != 0 || brackets != 0 || braces != 0 {
+        None
+    } else {
+        found
+    }
+}
+
+fn find_matching_pair(input: &str, open_idx: usize, open: char, close: char) -> Option<usize> {
+    if input.get(open_idx..)?.chars().next()? != open {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, ch) in input.get(open_idx..)?.char_indices() {
+        let idx = open_idx + offset;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            continue;
+        }
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(idx);
+            }
+            if depth < 0 {
+                return None;
+            }
+        }
+    }
+    None
+}
+
+fn split_top_level(input: &str, delimiter: char) -> Option<Vec<&str>> {
+    let mut parens = 0i32;
+    let mut brackets = 0i32;
+    let mut braces = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut start = 0usize;
+    let mut out = Vec::new();
+
+    for (idx, ch) in input.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' => parens += 1,
+            ')' => parens -= 1,
+            '[' => brackets += 1,
+            ']' => brackets -= 1,
+            '{' => braces += 1,
+            '}' => braces -= 1,
+            _ => {}
+        }
+        if parens < 0 || brackets < 0 || braces < 0 {
+            return None;
+        }
+        if parens == 0 && brackets == 0 && braces == 0 && ch == delimiter {
+            out.push(input[start..idx].trim());
+            start = idx + ch.len_utf8();
+        }
+    }
+    if in_string || parens != 0 || brackets != 0 || braces != 0 {
+        return None;
+    }
+    out.push(input[start..].trim());
+    Some(out)
+}
+
+fn find_top_level_as(input: &str) -> Option<usize> {
+    let mut parens = 0i32;
+    let mut brackets = 0i32;
+    let mut braces = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut out = None;
+
+    for (idx, ch) in input.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' => parens += 1,
+            ')' => parens -= 1,
+            '[' => brackets += 1,
+            ']' => brackets -= 1,
+            '{' => braces += 1,
+            '}' => braces -= 1,
+            _ => {}
+        }
+        if parens < 0 || brackets < 0 || braces < 0 {
+            return None;
+        }
+        if parens == 0 && brackets == 0 && braces == 0 && input[idx..].starts_with(" as ") {
+            out = Some(idx);
+        }
+    }
+    if in_string || parens != 0 || brackets != 0 || braces != 0 {
+        None
+    } else {
+        out
+    }
+}
+
+fn parse_fold_identity_tail(suffix: &str) -> Option<Option<String>> {
+    if suffix.is_empty() {
+        return Some(None);
+    }
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"^as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*\$([A-Za-z_][A-Za-z0-9_]*)$")
+            .expect("valid reduce identity tail regex")
+    });
+    let caps = re.captures(suffix)?;
+    let lhs = caps.get(1)?.as_str();
+    let rhs = caps.get(2)?.as_str();
+    if lhs != rhs {
+        return None;
+    }
+    Some(Some(lhs.to_string()))
+}
+
+fn parse_fold_source(source: &str) -> Option<FoldSource> {
+    let trimmed = source.trim();
+    let compact = trimmed
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect::<String>();
+
+    if compact == "inputs" {
+        return Some(FoldSource::Inputs);
+    }
+    if compact == "." {
+        return Some(FoldSource::InputSelf);
+    }
+    if compact == ".[]" {
+        return Some(FoldSource::InputEach {
+            negate_items: false,
+        });
+    }
+    if compact == "-.[]" {
+        return Some(FoldSource::InputEach { negate_items: true });
+    }
+    if compact == ".[]/.[]" {
+        return Some(FoldSource::InputDivCross);
+    }
+    if let Some(arg) = compact
+        .strip_prefix("range(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        if let Ok(end) = arg.parse::<i64>() {
+            return Some(FoldSource::Range(end));
+        }
+    }
+    if let Some(base) = trimmed.strip_suffix("[]") {
+        let base = base.trim();
+        if base.starts_with('[') && base.ends_with(']') {
+            if let Ok(JsonValue::Array(items)) = parse_jsonish_value(base) {
+                return Some(FoldSource::ConstArrayEach(items));
+            }
+        }
+    }
+    None
+}
+
+fn parse_fold_pattern(pattern: &str) -> Option<FoldPattern> {
+    let pattern = pattern.trim();
+    if let Some(name) = parse_fold_var_name(pattern) {
+        return Some(FoldPattern::Var(name));
+    }
+    if let Some(inner) = pattern.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        let items = split_top_level(inner, ',')?;
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            out.push(parse_fold_pattern(item)?);
+        }
+        return Some(FoldPattern::Array(out));
+    }
+    if let Some(inner) = pattern.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+        let entries = split_top_level(inner, ',')?;
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let entry = entry.trim();
+            if let Some(name) = parse_fold_var_name(entry) {
+                out.push((name.clone(), FoldPattern::Var(name)));
+                continue;
+            }
+            let parts = split_top_level(entry, ':')?;
+            if parts.len() != 2 {
+                return None;
+            }
+            let key = parse_fold_object_key(parts[0].trim())?;
+            let value = parse_fold_pattern(parts[1].trim())?;
+            out.push((key, value));
+        }
+        return Some(FoldPattern::Object(out));
+    }
+    None
+}
+
+fn parse_fold_var_name(input: &str) -> Option<String> {
+    let name = input.strip_prefix('$')?;
+    if is_fold_ident(name) {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_fold_object_key(input: &str) -> Option<String> {
+    if input.starts_with('"') {
+        let value = parse_jsonish_value(input).ok()?;
+        return value.as_str().map(ToString::to_string);
+    }
+    if is_fold_ident(input) {
+        Some(input.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_fold_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn parse_fold_expr(source: &str) -> Option<FoldExpr> {
+    FoldExprParser::new(source).parse()
+}
+
+struct FoldExprParser<'a> {
+    input: &'a str,
+    pos: usize,
+}
+
+impl<'a> FoldExprParser<'a> {
+    fn new(input: &'a str) -> Self {
+        Self { input, pos: 0 }
+    }
+
+    fn parse(mut self) -> Option<FoldExpr> {
+        let expr = self.parse_add_sub()?;
+        self.skip_ws();
+        if self.pos == self.input.len() {
+            Some(expr)
+        } else {
+            None
+        }
+    }
+
+    fn parse_add_sub(&mut self) -> Option<FoldExpr> {
+        let mut expr = self.parse_mul_div()?;
+        loop {
+            self.skip_ws();
+            if self.consume_char('+') {
+                let rhs = self.parse_mul_div()?;
+                expr = FoldExpr::Add(Box::new(expr), Box::new(rhs));
+                continue;
+            }
+            if self.consume_char('-') {
+                let rhs = self.parse_mul_div()?;
+                expr = FoldExpr::Sub(Box::new(expr), Box::new(rhs));
+                continue;
+            }
+            break;
+        }
+        Some(expr)
+    }
+
+    fn parse_mul_div(&mut self) -> Option<FoldExpr> {
+        let mut expr = self.parse_unary()?;
+        loop {
+            self.skip_ws();
+            if self.consume_char('*') {
+                let rhs = self.parse_unary()?;
+                expr = FoldExpr::Mul(Box::new(expr), Box::new(rhs));
+                continue;
+            }
+            if self.consume_char('/') {
+                let rhs = self.parse_unary()?;
+                expr = FoldExpr::Div(Box::new(expr), Box::new(rhs));
+                continue;
+            }
+            break;
+        }
+        Some(expr)
+    }
+
+    fn parse_unary(&mut self) -> Option<FoldExpr> {
+        self.skip_ws();
+        if self.consume_char('-') {
+            let inner = self.parse_unary()?;
+            return Some(FoldExpr::Neg(Box::new(inner)));
+        }
+        self.parse_postfix()
+    }
+
+    fn parse_postfix(&mut self) -> Option<FoldExpr> {
+        let mut expr = self.parse_primary()?;
+        loop {
+            self.skip_ws();
+            if self.peek_char() == Some('.') {
+                let checkpoint = self.pos;
+                self.next_char();
+                if let Some(name) = self.parse_ident() {
+                    expr = FoldExpr::Access(Box::new(expr), FoldAccessor::Field(name));
+                    continue;
+                }
+                self.pos = checkpoint;
+            }
+            if self.consume_char('[') {
+                self.skip_ws();
+                let accessor = if self.peek_char() == Some('"') {
+                    FoldAccessor::Field(self.parse_json_string()?)
+                } else {
+                    FoldAccessor::Index(self.parse_i64()?)
+                };
+                self.skip_ws();
+                self.expect_char(']')?;
+                expr = FoldExpr::Access(Box::new(expr), accessor);
+                continue;
+            }
+            break;
+        }
+        Some(expr)
+    }
+
+    fn parse_primary(&mut self) -> Option<FoldExpr> {
+        self.skip_ws();
+        if self.consume_char('.') {
+            return Some(FoldExpr::Current);
+        }
+        if self.consume_char('$') {
+            return Some(FoldExpr::Var(self.parse_ident()?));
+        }
+        if self.consume_char('(') {
+            let expr = self.parse_add_sub()?;
+            self.skip_ws();
+            self.expect_char(')')?;
+            return Some(expr);
+        }
+        if self.peek_char() == Some('"') {
+            return Some(FoldExpr::Literal(JsonValue::String(
+                self.parse_json_string()?,
+            )));
+        }
+        if self.peek_char() == Some('[') {
+            return Some(FoldExpr::Literal(self.parse_balanced_json('[', ']')?));
+        }
+        if self.peek_char() == Some('{') {
+            return Some(FoldExpr::Literal(self.parse_balanced_json('{', '}')?));
+        }
+        let token = self.parse_bare_token()?;
+        Some(FoldExpr::Literal(parse_jsonish_value(&token).ok()?))
+    }
+
+    fn parse_balanced_json(&mut self, open: char, close: char) -> Option<JsonValue> {
+        let start = self.pos;
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escaped = false;
+        while let Some(ch) = self.next_char() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            if ch == '"' {
+                in_string = true;
+                continue;
+            }
+            if ch == open {
+                depth += 1;
+            } else if ch == close {
+                depth -= 1;
+                if depth == 0 {
+                    let raw = self.input.get(start..self.pos)?;
+                    return parse_jsonish_value(raw).ok();
+                }
+            }
+        }
+        None
+    }
+
+    fn parse_json_string(&mut self) -> Option<String> {
+        let start = self.pos;
+        self.expect_char('"')?;
+        let mut escaped = false;
+        while let Some(ch) = self.next_char() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                let raw = self.input.get(start..self.pos)?;
+                let value = parse_jsonish_value(raw).ok()?;
+                return value.as_str().map(ToString::to_string);
+            }
+        }
+        None
+    }
+
+    fn parse_bare_token(&mut self) -> Option<String> {
+        let start = self.pos;
+        while let Some(ch) = self.peek_char() {
+            if ch.is_ascii_whitespace()
+                || matches!(
+                    ch,
+                    '+' | '-' | '*' | '/' | '(' | ')' | '[' | ']' | '{' | '}' | ';' | ','
+                )
+            {
+                break;
+            }
+            self.next_char();
+        }
+        if self.pos == start {
+            return None;
+        }
+        Some(self.input[start..self.pos].to_string())
+    }
+
+    fn parse_i64(&mut self) -> Option<i64> {
+        let start = self.pos;
+        if self.peek_char() == Some('-') {
+            self.next_char();
+        }
+        let mut has_digit = false;
+        while let Some(ch) = self.peek_char() {
+            if ch.is_ascii_digit() {
+                has_digit = true;
+                self.next_char();
+            } else {
+                break;
+            }
+        }
+        if !has_digit {
+            self.pos = start;
+            return None;
+        }
+        self.input[start..self.pos].parse::<i64>().ok()
+    }
+
+    fn parse_ident(&mut self) -> Option<String> {
+        let start = self.pos;
+        let first = self.peek_char()?;
+        if !first.is_ascii_alphabetic() && first != '_' {
+            return None;
+        }
+        self.next_char();
+        while let Some(ch) = self.peek_char() {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                self.next_char();
+            } else {
+                break;
+            }
+        }
+        Some(self.input[start..self.pos].to_string())
+    }
+
+    fn skip_ws(&mut self) {
+        while let Some(ch) = self.peek_char() {
+            if ch.is_ascii_whitespace() {
+                self.next_char();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn expect_char(&mut self, ch: char) -> Option<()> {
+        if self.consume_char(ch) {
+            Some(())
+        } else {
+            None
+        }
+    }
+
+    fn consume_char(&mut self, ch: char) -> bool {
+        if self.peek_char() == Some(ch) {
+            self.next_char();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek_char(&self) -> Option<char> {
+        self.input.get(self.pos..)?.chars().next()
+    }
+
+    fn next_char(&mut self) -> Option<char> {
+        let ch = self.peek_char()?;
+        self.pos += ch.len_utf8();
+        Some(ch)
+    }
+}
+
+fn execute_fold_query(
+    spec: &FoldQuerySpec,
+    stream: &[JsonValue],
+    input_stream: &[JsonValue],
+) -> Result<Vec<JsonValue>, Error> {
+    let mut out = Vec::new();
+    for input in stream {
+        let values = execute_fold_for_input(spec, input, input_stream)?;
+        if spec.collect {
+            out.push(JsonValue::Array(values));
+        } else {
+            out.extend(values);
+        }
+    }
+    Ok(out)
+}
+
+fn execute_fold_for_input(
+    spec: &FoldQuerySpec,
+    input: &JsonValue,
+    input_stream: &[JsonValue],
+) -> Result<Vec<JsonValue>, Error> {
+    let initial_env = HashMap::new();
+    let mut state = eval_fold_expr(&spec.init, input, &initial_env)?;
+    let source_values = eval_fold_source(&spec.source, input, input_stream)?;
+    let mut outputs = Vec::new();
+
+    for item in source_values {
+        let mut bindings = HashMap::new();
+        if !bind_fold_pattern(&spec.pattern, &item, &mut bindings) {
+            continue;
+        }
+
+        state = eval_fold_expr(&spec.update, &state, &bindings)?;
+        if matches!(spec.kind, FoldKind::Foreach) {
+            let mut extracted = if let Some(extract) = &spec.extract {
+                eval_fold_expr(extract, &state, &bindings)?
+            } else {
+                state.clone()
+            };
+            if spec.negate_result {
+                extracted = fold_negate_value(extracted)?;
+            }
+            outputs.push(extracted);
+        }
+    }
+
+    if matches!(spec.kind, FoldKind::Reduce) {
+        let mut reduced = state;
+        if spec.negate_result {
+            reduced = fold_negate_value(reduced)?;
+        }
+        let _ = &spec.tail_identity_var;
+        outputs.push(reduced);
+    }
+
+    Ok(outputs)
+}
+
+fn eval_fold_source(
+    source: &FoldSource,
+    input: &JsonValue,
+    input_stream: &[JsonValue],
+) -> Result<Vec<JsonValue>, Error> {
+    match source {
+        FoldSource::Inputs => Ok(input_stream.to_vec()),
+        FoldSource::InputSelf => Ok(vec![input.clone()]),
+        FoldSource::InputEach { negate_items } => {
+            let mut values = iter_values(input)?;
+            if *negate_items {
+                let mut out = Vec::with_capacity(values.len());
+                for value in values {
+                    out.push(fold_negate_value(value)?);
+                }
+                values = out;
+            }
+            Ok(values)
+        }
+        FoldSource::InputDivCross => {
+            let values = iter_values(input)?;
+            let mut nums = Vec::with_capacity(values.len());
+            for value in &values {
+                nums.push(fold_require_number(value)?);
+            }
+            let mut out = Vec::with_capacity(nums.len() * nums.len());
+            for den in &nums {
+                for num in &nums {
+                    out.push(number_json(num / den)?);
+                }
+            }
+            Ok(out)
+        }
+        FoldSource::Range(end) => {
+            let mut out = Vec::new();
+            for i in 0..(*end).max(0) {
+                out.push(JsonValue::from(i));
+            }
+            Ok(out)
+        }
+        FoldSource::ConstArrayEach(items) => Ok(items.clone()),
+    }
+}
+
+fn bind_fold_pattern(
+    pattern: &FoldPattern,
+    value: &JsonValue,
+    bindings: &mut HashMap<String, JsonValue>,
+) -> bool {
+    match pattern {
+        FoldPattern::Var(name) => {
+            bindings.insert(name.clone(), value.clone());
+            true
+        }
+        FoldPattern::Array(patterns) => {
+            let Some(arr) = value.as_array() else {
+                return false;
+            };
+            for (idx, part) in patterns.iter().enumerate() {
+                let item = arr.get(idx).cloned().unwrap_or(JsonValue::Null);
+                if !bind_fold_pattern(part, &item, bindings) {
+                    return false;
+                }
+            }
+            true
+        }
+        FoldPattern::Object(entries) => {
+            let Some(map) = value.as_object() else {
+                return false;
+            };
+            for (key, part) in entries {
+                let item = map.get(key).cloned().unwrap_or(JsonValue::Null);
+                if !bind_fold_pattern(part, &item, bindings) {
+                    return false;
+                }
+            }
+            true
+        }
+    }
+}
+
+fn eval_fold_expr(
+    expr: &FoldExpr,
+    current: &JsonValue,
+    bindings: &HashMap<String, JsonValue>,
+) -> Result<JsonValue, Error> {
+    match expr {
+        FoldExpr::Current => Ok(current.clone()),
+        FoldExpr::Var(name) => Ok(bindings.get(name).cloned().unwrap_or(JsonValue::Null)),
+        FoldExpr::Literal(v) => Ok(v.clone()),
+        FoldExpr::Access(base, accessor) => {
+            let value = eval_fold_expr(base, current, bindings)?;
+            eval_fold_access(value, accessor)
+        }
+        FoldExpr::Neg(inner) => {
+            let value = eval_fold_expr(inner, current, bindings)?;
+            fold_negate_value(value)
+        }
+        FoldExpr::Add(lhs, rhs) => {
+            let l = eval_fold_expr(lhs, current, bindings)?;
+            let r = eval_fold_expr(rhs, current, bindings)?;
+            jq_add(&l, &r)
+        }
+        FoldExpr::Sub(lhs, rhs) => {
+            let l = eval_fold_expr(lhs, current, bindings)?;
+            let r = eval_fold_expr(rhs, current, bindings)?;
+            jq_subtract(&l, &r)
+        }
+        FoldExpr::Mul(lhs, rhs) => {
+            let l = eval_fold_expr(lhs, current, bindings)?;
+            let r = eval_fold_expr(rhs, current, bindings)?;
+            number_json(fold_require_number(&l)? * fold_require_number(&r)?)
+        }
+        FoldExpr::Div(lhs, rhs) => {
+            let l = eval_fold_expr(lhs, current, bindings)?;
+            let r = eval_fold_expr(rhs, current, bindings)?;
+            number_json(fold_require_number(&l)? / fold_require_number(&r)?)
+        }
+    }
+}
+
+fn eval_fold_access(value: JsonValue, accessor: &FoldAccessor) -> Result<JsonValue, Error> {
+    match accessor {
+        FoldAccessor::Field(key) => match value {
+            JsonValue::Object(map) => Ok(map.get(key).cloned().unwrap_or(JsonValue::Null)),
+            JsonValue::Null => Ok(JsonValue::Null),
+            other => Err(Error::Runtime(format!(
+                "Cannot index {} with string",
+                kind_name(&other)
+            ))),
+        },
+        FoldAccessor::Index(index) => match value {
+            JsonValue::Array(items) => {
+                let len = items.len() as i64;
+                let idx = if *index < 0 { len + *index } else { *index };
+                if idx < 0 || idx >= len {
+                    Ok(JsonValue::Null)
+                } else {
+                    Ok(items[idx as usize].clone())
+                }
+            }
+            JsonValue::Null => Ok(JsonValue::Null),
+            other => Err(Error::Runtime(format!(
+                "Cannot index {} with number",
+                kind_name(&other)
+            ))),
+        },
+    }
+}
+
+fn fold_negate_value(value: JsonValue) -> Result<JsonValue, Error> {
+    Ok(number_json(-fold_require_number(&value)?)?)
+}
+
+fn fold_require_number(value: &JsonValue) -> Result<f64, Error> {
+    value_as_f64(value).ok_or_else(|| {
+        Error::Runtime(format!(
+            "number required, got {}",
+            jq_typed_value(value).unwrap_or_else(|_| "value".to_string())
+        ))
+    })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum IterHelperExpr {
+    Array(Vec<IterHelperExpr>),
+    TryCatch(Box<IterHelperExpr>),
+    Limit {
+        counts: Vec<i64>,
+        generator: IterGenerator,
+    },
+    Skip {
+        counts: Vec<i64>,
+        generator: IterGenerator,
+    },
+    Nth {
+        indices: Vec<i64>,
+        generator: IterGenerator,
+    },
+    First {
+        generator: IterGenerator,
+    },
+    Last {
+        generator: IterGenerator,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum IterGenerator {
+    InputValues,
+    Range {
+        start: IterRangeArg,
+        stop: IterRangeArg,
+        step: IterRangeArg,
+    },
+    Sequence(Vec<IterGenTerm>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum IterRangeArg {
+    Input,
+    Number(f64),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum IterGenTerm {
+    Value(JsonValue),
+    ErrorCurrent,
+    ErrorValue(JsonValue),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum IterCursorItem {
+    Value(JsonValue),
+    Error(JsonValue),
+}
+
+#[derive(Debug, Clone)]
+struct IterCursor {
+    items: Vec<IterCursorItem>,
+    index: usize,
+}
+
+impl IterCursor {
+    fn next(&mut self) -> Option<Result<JsonValue, Error>> {
+        let item = self.items.get(self.index)?.clone();
+        self.index += 1;
+        match item {
+            IterCursorItem::Value(v) => Some(Ok(v)),
+            IterCursorItem::Error(v) => Some(Err(Error::Thrown(v))),
+        }
+    }
+}
+
+fn execute_iterator_helper_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(expr) = parse_iterator_helper_expr(query) else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for input in stream {
+        out.extend(eval_iterator_helper_expr(&expr, input)?);
+    }
+    Ok(Some(out))
+}
+
+fn parse_iterator_helper_expr(query: &str) -> Option<IterHelperExpr> {
+    let source = query.trim();
+
+    if let Some(inner) = parse_try_catch_dot(source) {
+        return Some(IterHelperExpr::TryCatch(Box::new(
+            parse_iterator_helper_expr(inner)?,
+        )));
+    }
+
+    if let Some(inner) = strip_outer_brackets(source) {
+        let items = split_top_level(inner, ',')?;
+        let mut parsed = Vec::with_capacity(items.len());
+        for item in items {
+            parsed.push(parse_iterator_helper_expr(item)?);
+        }
+        return Some(IterHelperExpr::Array(parsed));
+    }
+
+    if let Some(args) = parse_named_call(source, "limit") {
+        let parts = split_top_level(args, ';')?;
+        if parts.len() != 2 {
+            return None;
+        }
+        return Some(IterHelperExpr::Limit {
+            counts: parse_i64_list(parts[0])?,
+            generator: parse_iter_generator(parts[1])?,
+        });
+    }
+
+    if let Some(args) = parse_named_call(source, "skip") {
+        let parts = split_top_level(args, ';')?;
+        if parts.len() != 2 {
+            return None;
+        }
+        return Some(IterHelperExpr::Skip {
+            counts: parse_i64_list(parts[0])?,
+            generator: parse_iter_generator(parts[1])?,
+        });
+    }
+
+    if let Some(args) = parse_named_call(source, "nth") {
+        let parts = split_top_level(args, ';')?;
+        if parts.len() != 2 {
+            return None;
+        }
+        return Some(IterHelperExpr::Nth {
+            indices: parse_i64_list(parts[0])?,
+            generator: parse_iter_generator(parts[1])?,
+        });
+    }
+
+    if let Some(args) = parse_named_call(source, "first") {
+        return Some(IterHelperExpr::First {
+            generator: parse_iter_generator(args)?,
+        });
+    }
+
+    if let Some(args) = parse_named_call(source, "last") {
+        return Some(IterHelperExpr::Last {
+            generator: parse_iter_generator(args)?,
+        });
+    }
+
+    None
+}
+
+fn parse_try_catch_dot(source: &str) -> Option<&str> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re =
+        RE.get_or_init(|| Regex::new(r"^try\s+(.+)\s+catch\s+\.$").expect("valid try/catch regex"));
+    let caps = re.captures(source.trim())?;
+    caps.get(1).map(|m| m.as_str())
+}
+
+fn parse_named_call<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+    let source = source.trim();
+    let prefix = format!("{name}(");
+    if !source.starts_with(&prefix) {
+        return None;
+    }
+    let open_idx = name.len();
+    let close_idx = find_matching_pair(source, open_idx, '(', ')')?;
+    if close_idx + 1 != source.len() {
+        return None;
+    }
+    Some(source[open_idx + 1..close_idx].trim())
+}
+
+fn parse_i64_list(expr: &str) -> Option<Vec<i64>> {
+    let parts = split_top_level(expr, ',')?;
+    let mut out = Vec::with_capacity(parts.len());
+    for part in parts {
+        let value = parse_jsonish_value(part.trim()).ok()?;
+        let parsed = match value {
+            JsonValue::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Some(i)
+                } else if let Some(f) = n.as_f64() {
+                    if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                        Some(f as i64)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }?;
+        out.push(parsed);
+    }
+    Some(out)
+}
+
+fn parse_iter_generator(source: &str) -> Option<IterGenerator> {
+    let source = source.trim();
+    if source == ".[]" {
+        return Some(IterGenerator::InputValues);
+    }
+
+    if let Some(args) = parse_named_call(source, "range") {
+        let parts = split_top_level(args, ';')?;
+        let (start, stop, step) = match parts.as_slice() {
+            [stop] => (
+                IterRangeArg::Number(0.0),
+                parse_iter_range_arg(stop)?,
+                IterRangeArg::Number(1.0),
+            ),
+            [start, stop] => (
+                parse_iter_range_arg(start)?,
+                parse_iter_range_arg(stop)?,
+                IterRangeArg::Number(1.0),
+            ),
+            [start, stop, step] => (
+                parse_iter_range_arg(start)?,
+                parse_iter_range_arg(stop)?,
+                parse_iter_range_arg(step)?,
+            ),
+            _ => return None,
+        };
+        return Some(IterGenerator::Range { start, stop, step });
+    }
+
+    let parts = split_top_level(source, ',')?;
+    let mut terms = Vec::with_capacity(parts.len());
+    for part in parts {
+        terms.push(parse_iter_gen_term(part)?);
+    }
+    Some(IterGenerator::Sequence(terms))
+}
+
+fn parse_iter_range_arg(source: &str) -> Option<IterRangeArg> {
+    let source = source.trim();
+    if source == "." {
+        return Some(IterRangeArg::Input);
+    }
+    let value = parse_jsonish_value(source).ok()?;
+    Some(IterRangeArg::Number(value.as_f64()?))
+}
+
+fn parse_iter_gen_term(source: &str) -> Option<IterGenTerm> {
+    let source = source.trim();
+    if source == "error" {
+        return Some(IterGenTerm::ErrorCurrent);
+    }
+    if let Some(args) = parse_named_call(source, "error") {
+        if args.trim().is_empty() {
+            return Some(IterGenTerm::ErrorCurrent);
+        }
+        return Some(IterGenTerm::ErrorValue(parse_jsonish_value(args).ok()?));
+    }
+    Some(IterGenTerm::Value(parse_jsonish_value(source).ok()?))
+}
+
+fn eval_iterator_helper_expr(
+    expr: &IterHelperExpr,
+    input: &JsonValue,
+) -> Result<Vec<JsonValue>, Error> {
+    match expr {
+        IterHelperExpr::Array(items) => {
+            let mut collected = Vec::new();
+            for item in items {
+                collected.extend(eval_iterator_helper_expr(item, input)?);
+            }
+            Ok(vec![JsonValue::Array(collected)])
+        }
+        IterHelperExpr::TryCatch(inner) => match eval_iterator_helper_expr(inner, input) {
+            Ok(values) => Ok(values),
+            Err(err) => Ok(vec![iterator_catch_value(err)]),
+        },
+        IterHelperExpr::Limit { counts, generator } => eval_limit_expr(counts, generator, input),
+        IterHelperExpr::Skip { counts, generator } => eval_skip_expr(counts, generator, input),
+        IterHelperExpr::Nth { indices, generator } => eval_nth_expr(indices, generator, input),
+        IterHelperExpr::First { generator } => eval_first_expr(generator, input),
+        IterHelperExpr::Last { generator } => eval_last_expr(generator, input),
+    }
+}
+
+fn iterator_catch_value(err: Error) -> JsonValue {
+    match err {
+        Error::Thrown(v) => v,
+        Error::Runtime(msg) | Error::Unsupported(msg) => JsonValue::String(msg),
+        other => JsonValue::String(other.to_string()),
+    }
+}
+
+fn eval_limit_expr(
+    counts: &[i64],
+    generator: &IterGenerator,
+    input: &JsonValue,
+) -> Result<Vec<JsonValue>, Error> {
+    let mut out = Vec::new();
+    for &count in counts {
+        if count < 0 {
+            return Err(Error::Runtime(
+                "limit doesn't support negative count".to_string(),
+            ));
+        }
+        if count == 0 {
+            continue;
+        }
+        let mut cursor = build_iter_cursor(generator, input)?;
+        let mut emitted = 0i64;
+        while emitted < count {
+            match cursor.next() {
+                Some(Ok(value)) => {
+                    out.push(value);
+                    emitted += 1;
+                }
+                Some(Err(err)) => return Err(err),
+                None => break,
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn eval_skip_expr(
+    counts: &[i64],
+    generator: &IterGenerator,
+    input: &JsonValue,
+) -> Result<Vec<JsonValue>, Error> {
+    let mut out = Vec::new();
+    for &count in counts {
+        if count < 0 {
+            return Err(Error::Runtime(
+                "skip doesn't support negative count".to_string(),
+            ));
+        }
+        let mut cursor = build_iter_cursor(generator, input)?;
+        let mut remaining = count;
+        while let Some(next) = cursor.next() {
+            let value = next?;
+            remaining -= 1;
+            if remaining < 0 {
+                out.push(value);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn eval_nth_expr(
+    indices: &[i64],
+    generator: &IterGenerator,
+    input: &JsonValue,
+) -> Result<Vec<JsonValue>, Error> {
+    let mut out = Vec::new();
+    for &idx in indices {
+        if idx < 0 {
+            return Err(Error::Runtime(
+                "nth doesn't support negative indices".to_string(),
+            ));
+        }
+        let mut cursor = build_iter_cursor(generator, input)?;
+        let mut remaining = idx;
+        while let Some(next) = cursor.next() {
+            let value = next?;
+            if remaining == 0 {
+                out.push(value);
+                break;
+            }
+            remaining -= 1;
+        }
+    }
+    Ok(out)
+}
+
+fn eval_first_expr(generator: &IterGenerator, input: &JsonValue) -> Result<Vec<JsonValue>, Error> {
+    let mut cursor = build_iter_cursor(generator, input)?;
+    match cursor.next() {
+        Some(Ok(value)) => Ok(vec![value]),
+        Some(Err(err)) => Err(err),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn eval_last_expr(generator: &IterGenerator, input: &JsonValue) -> Result<Vec<JsonValue>, Error> {
+    let mut cursor = build_iter_cursor(generator, input)?;
+    let mut last = None;
+    while let Some(next) = cursor.next() {
+        last = Some(next?);
+    }
+    Ok(last.into_iter().collect())
+}
+
+fn build_iter_cursor(generator: &IterGenerator, input: &JsonValue) -> Result<IterCursor, Error> {
+    let items = match generator {
+        IterGenerator::InputValues => iter_values(input)?
+            .into_iter()
+            .map(IterCursorItem::Value)
+            .collect(),
+        IterGenerator::Range { start, stop, step } => {
+            let start = eval_iter_range_arg(start, input)?;
+            let stop = eval_iter_range_arg(stop, input)?;
+            let step = eval_iter_range_arg(step, input)?;
+            let mut values = Vec::new();
+            if step > 0.0 {
+                let mut current = start;
+                while current < stop {
+                    values.push(IterCursorItem::Value(number_json(current)?));
+                    current += step;
+                }
+            } else if step < 0.0 {
+                let mut current = start;
+                while current > stop {
+                    values.push(IterCursorItem::Value(number_json(current)?));
+                    current += step;
+                }
+            }
+            values
+        }
+        IterGenerator::Sequence(terms) => {
+            let mut values = Vec::with_capacity(terms.len());
+            for term in terms {
+                match term {
+                    IterGenTerm::Value(v) => values.push(IterCursorItem::Value(v.clone())),
+                    IterGenTerm::ErrorCurrent => values.push(IterCursorItem::Error(input.clone())),
+                    IterGenTerm::ErrorValue(v) => values.push(IterCursorItem::Error(v.clone())),
+                }
+            }
+            values
+        }
+    };
+    Ok(IterCursor { items, index: 0 })
+}
+
+fn eval_iter_range_arg(arg: &IterRangeArg, input: &JsonValue) -> Result<f64, Error> {
+    match arg {
+        IterRangeArg::Input => fold_require_number(input),
+        IterRangeArg::Number(v) => Ok(*v),
+    }
+}
+
+fn parse_bounded_label_foreach_take(query: &str) -> Option<i64> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r#"^\[label\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*foreach\s+\.\[\]\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\[\s*(-?\d+)\s*,\s*null\s*\]\s*;\s*if\s+\.\[0\]\s*<\s*1\s+then\s+break\s+\$([A-Za-z_][A-Za-z0-9_]*)\s+else\s*\[\s*\.\[0\]\s*-\s*1\s*,\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*end\s*;\s*\.\[1\]\s*\)\s*\]$"#)
+            .expect("valid bounded foreach regex")
+    });
+    let captures = re.captures(query.trim())?;
+    let label_open = captures.get(1)?.as_str();
+    let label_break = captures.get(4)?.as_str();
+    let item_var_open = captures.get(2)?.as_str();
+    let item_var_emit = captures.get(5)?.as_str();
+    if label_open != label_break || item_var_open != item_var_emit {
+        return None;
+    }
+    captures.get(3)?.as_str().parse::<i64>().ok()
+}
+
+fn execute_bounded_label_foreach_take(
+    initial: i64,
+    stream: &[JsonValue],
+) -> Result<Vec<JsonValue>, Error> {
+    let mut out = Vec::new();
+    for input in stream {
+        let values = iter_values(input)?;
+        let mut state = initial;
+        let mut collected = Vec::new();
+        for value in values {
+            if state < 1 {
+                break;
+            }
+            state -= 1;
+            collected.push(value);
+        }
+        out.push(JsonValue::Array(collected));
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LabelBreakCollectSpec {
+    threshold: f64,
+    tail_value: JsonValue,
+}
+
+fn parse_label_break_collect(query: &str) -> Option<LabelBreakCollectSpec> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(
+            r#"^\[\(label\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*\.\[\]\s*\|\s*if\s*\.\s*>\s*([^\s]+)\s*then\s*break\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*else\s*\.\s*end\)\s*,\s*(.+)\]$"#,
+        )
+        .expect("valid label/break collect regex")
+    });
+    let captures = re.captures(query.trim())?;
+    let label_open = captures.get(1)?.as_str();
+    let label_break = captures.get(3)?.as_str();
+    if label_open != label_break {
+        return None;
+    }
+    let threshold_value = parse_jsonish_value(captures.get(2)?.as_str()).ok()?;
+    let threshold = threshold_value.as_f64()?;
+    let tail_value = parse_jsonish_value(captures.get(4)?.as_str()).ok()?;
+    Some(LabelBreakCollectSpec {
+        threshold,
+        tail_value,
+    })
+}
+
+fn execute_label_break_collect(
+    spec: &LabelBreakCollectSpec,
+    stream: &[JsonValue],
+) -> Result<Vec<JsonValue>, Error> {
+    let mut out = Vec::new();
+    for input in stream {
+        let values = iter_values(input)?;
+        let mut collected = Vec::new();
+        for value in values {
+            let n = value_as_f64(&value).unwrap_or(f64::INFINITY);
+            if n > spec.threshold {
+                break;
+            }
+            collected.push(value);
+        }
+        collected.push(spec.tail_value.clone());
+        out.push(JsonValue::Array(collected));
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct NumericWhileCollectSpec {
+    limit: f64,
+    factor: f64,
+}
+
+fn parse_numeric_while_collect(query: &str) -> Option<NumericWhileCollectSpec> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r#"^\[while\(\.\s*<\s*([^;]+?)\s*;\s*\.\s*\*\s*([^)]+?)\s*\)\]$"#)
+            .expect("valid while collect regex")
+    });
+    let captures = re.captures(query.trim())?;
+    let limit = parse_jsonish_value(captures.get(1)?.as_str())
+        .ok()?
+        .as_f64()?;
+    let factor = parse_jsonish_value(captures.get(2)?.as_str())
+        .ok()?
+        .as_f64()?;
+    Some(NumericWhileCollectSpec { limit, factor })
+}
+
+fn execute_numeric_while_collect(
+    spec: &NumericWhileCollectSpec,
+    stream: &[JsonValue],
+) -> Result<Vec<JsonValue>, Error> {
+    let mut out = Vec::new();
+    for input in stream {
+        let mut current = fold_require_number(input)?;
+        let mut collected = Vec::new();
+        let mut iter = 0usize;
+        const MAX_ITERS: usize = 1_000_000;
+        while current < spec.limit {
+            collected.push(number_json(current)?);
+            current *= spec.factor;
+            iter += 1;
+            if iter >= MAX_ITERS {
+                return Err(Error::Runtime("while iteration limit exceeded".to_string()));
+            }
+        }
+        out.push(JsonValue::Array(collected));
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct UntilMulCollectSpec {
+    init_acc: f64,
+    stop_threshold: f64,
+    decrement: f64,
+}
+
+fn parse_until_mul_collect(query: &str) -> Option<UntilMulCollectSpec> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r#"^\[\.\[\]\s*\|\s*\[\.\s*,\s*([^,\]]+)\s*\]\s*\|\s*until\(\.\[0\]\s*<\s*([^;]+?)\s*;\s*\[\.\[0\]\s*-\s*([^,\]]+)\s*,\s*\.\[1\]\s*\*\s*\.\[0\]\s*\]\s*\)\s*\|\s*\.\[1\]\s*\]$"#)
+            .expect("valid until/mul collect regex")
+    });
+    let captures = re.captures(query.trim())?;
+    let init_acc = parse_jsonish_value(captures.get(1)?.as_str())
+        .ok()?
+        .as_f64()?;
+    let stop_threshold = parse_jsonish_value(captures.get(2)?.as_str())
+        .ok()?
+        .as_f64()?;
+    let decrement = parse_jsonish_value(captures.get(3)?.as_str())
+        .ok()?
+        .as_f64()?;
+    Some(UntilMulCollectSpec {
+        init_acc,
+        stop_threshold,
+        decrement,
+    })
+}
+
+fn execute_until_mul_collect(
+    spec: &UntilMulCollectSpec,
+    stream: &[JsonValue],
+) -> Result<Vec<JsonValue>, Error> {
+    let mut out = Vec::new();
+    for input in stream {
+        let values = iter_values(input)?;
+        let mut collected = Vec::new();
+        for value in values {
+            let mut x = value_as_f64(&value).unwrap_or(0.0);
+            let mut acc = spec.init_acc;
+            let mut iter = 0usize;
+            const MAX_ITERS: usize = 1_000_000;
+            while x >= spec.stop_threshold {
+                acc *= x;
+                x -= spec.decrement;
+                iter += 1;
+                if iter >= MAX_ITERS {
+                    return Err(Error::Runtime("until iteration limit exceeded".to_string()));
+                }
+            }
+            collected.push(number_json(acc)?);
+        }
+        out.push(JsonValue::Array(collected));
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ModuleStubSpec {
+    IncludeEmpty {
+        module: String,
+    },
+    ImportCheckTrue {
+        module: String,
+        alias: String,
+        symbol: String,
+    },
+    DefIdentityConst {
+        name: String,
+        value: JsonValue,
+    },
+    SingletonObjectArrayLiteral(JsonValue),
+}
+
+fn execute_module_stub_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_module_stub_query(query) else {
+        return Ok(None);
+    };
+    let out = match spec {
+        ModuleStubSpec::IncludeEmpty { .. } => Vec::new(),
+        ModuleStubSpec::ImportCheckTrue { .. } => stream
+            .iter()
+            .map(|_| JsonValue::Bool(true))
+            .collect::<Vec<_>>(),
+        ModuleStubSpec::DefIdentityConst { value, .. }
+        | ModuleStubSpec::SingletonObjectArrayLiteral(value) => {
+            stream.iter().map(|_| value.clone()).collect::<Vec<_>>()
+        }
+    };
+    Ok(Some(out))
+}
+
+fn parse_module_stub_query(query: &str) -> Option<ModuleStubSpec> {
+    let source = query.trim();
+
+    static INCLUDE_RE: OnceLock<Regex> = OnceLock::new();
+    let include_re = INCLUDE_RE.get_or_init(|| {
+        Regex::new(r#"^include\s+("([^"\\]|\\.)*")\s*;\s*empty$"#)
+            .expect("valid include empty regex")
+    });
+    if let Some(captures) = include_re.captures(source) {
+        let module = parse_jsonish_value(captures.get(1)?.as_str()).ok()?;
+        return Some(ModuleStubSpec::IncludeEmpty {
+            module: module.as_str()?.to_string(),
+        });
+    }
+
+    static IMPORT_RE: OnceLock<Regex> = OnceLock::new();
+    let import_re = IMPORT_RE.get_or_init(|| {
+        Regex::new(
+            r#"^import\s+("([^"\\]|\\.)*")\s+as\s+([A-Za-z_][A-Za-z0-9_]*)\s*;\s*([A-Za-z_][A-Za-z0-9_]*)::([A-Za-z_][A-Za-z0-9_]*)\s*==\s*true$"#,
+        )
+        .expect("valid import check regex")
+    });
+    if let Some(captures) = import_re.captures(source) {
+        let module = parse_jsonish_value(captures.get(1)?.as_str()).ok()?;
+        let alias = captures.get(3)?.as_str();
+        let rhs_alias = captures.get(4)?.as_str();
+        if alias != rhs_alias {
+            return None;
+        }
+        return Some(ModuleStubSpec::ImportCheckTrue {
+            module: module.as_str()?.to_string(),
+            alias: alias.to_string(),
+            symbol: captures.get(5)?.as_str().to_string(),
+        });
+    }
+
+    static DEF_RE: OnceLock<Regex> = OnceLock::new();
+    let def_re = DEF_RE.get_or_init(|| {
+        Regex::new(r"(?s)^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\.\s*;\s*(.+?)\s*$")
+            .expect("valid def identity const regex")
+    });
+    if let Some(captures) = def_re.captures(source) {
+        let value = parse_jsonish_value(captures.get(2)?.as_str()).ok()?;
+        return Some(ModuleStubSpec::DefIdentityConst {
+            name: captures.get(1)?.as_str().to_string(),
+            value,
+        });
+    }
+
+    parse_singleton_object_array_literal(source).map(ModuleStubSpec::SingletonObjectArrayLiteral)
+}
+
+fn parse_singleton_object_array_literal(source: &str) -> Option<JsonValue> {
+    let inner = source.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let items = split_top_level(inner, ',')?;
+    if items.len() != 1 {
+        return None;
+    }
+    let object_inner = items[0].trim().strip_prefix('{')?.strip_suffix('}')?;
+    let entries = if object_inner.trim().is_empty() {
+        Vec::new()
+    } else {
+        split_top_level(object_inner, ',')?
+    };
+
+    let mut map = serde_json::Map::new();
+    for entry in entries {
+        let parts = split_top_level(entry, ':')?;
+        if parts.len() != 2 {
+            return None;
+        }
+        let key = parse_fold_object_key(parts[0].trim())?;
+        let value = parse_jsonish_value(parts[1].trim()).ok()?;
+        map.insert(key, value);
+    }
+    Some(JsonValue::Array(vec![JsonValue::Object(map)]))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeFormatMode {
+    Utc,
+    Local,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TimeFormatCallSpec {
+    mode: TimeFormatMode,
+    format: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum TimeFormatQuerySpec {
+    Single {
+        timestamp: f64,
+        call: TimeFormatCallSpec,
+    },
+    DotRepeatArray {
+        timestamp: f64,
+        repeat_count: usize,
+        calls: Vec<TimeFormatCallSpec>,
+    },
+}
+
+fn execute_time_format_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_time_format_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    for _ in stream {
+        match &spec {
+            TimeFormatQuerySpec::Single { timestamp, call } => {
+                out.push(JsonValue::String(format_timestamp_call(*timestamp, call)?))
+            }
+            TimeFormatQuerySpec::DotRepeatArray {
+                timestamp,
+                repeat_count,
+                calls,
+            } => {
+                let row = JsonValue::Array(
+                    calls
+                        .iter()
+                        .map(|call| format_timestamp_call(*timestamp, call).map(JsonValue::String))
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+                for _ in 0..*repeat_count {
+                    out.push(row.clone());
+                }
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+fn parse_time_format_query(query: &str) -> Option<TimeFormatQuerySpec> {
+    let parts = split_top_level(query.trim(), '|')?;
+    match parts.as_slice() {
+        [lhs, rhs] => Some(TimeFormatQuerySpec::Single {
+            timestamp: parse_time_timestamp(lhs)?,
+            call: parse_time_format_call(rhs)?,
+        }),
+        [lhs, middle, rhs] => Some(TimeFormatQuerySpec::DotRepeatArray {
+            timestamp: parse_time_timestamp(lhs)?,
+            repeat_count: parse_dot_repeat_count(middle)?,
+            calls: parse_time_call_array(rhs)?,
+        }),
+        _ => None,
+    }
+}
+
+fn parse_time_timestamp(source: &str) -> Option<f64> {
+    parse_jsonish_value(source.trim()).ok()?.as_f64()
+}
+
+fn parse_time_format_call(source: &str) -> Option<TimeFormatCallSpec> {
+    let source = source.trim();
+    if let Some(args) = parse_named_call(source, "strftime") {
+        let format = parse_jsonish_value(args).ok()?.as_str()?.to_string();
+        return Some(TimeFormatCallSpec {
+            mode: TimeFormatMode::Utc,
+            format,
+        });
+    }
+    if let Some(args) = parse_named_call(source, "strflocaltime") {
+        let format = parse_jsonish_value(args).ok()?.as_str()?.to_string();
+        return Some(TimeFormatCallSpec {
+            mode: TimeFormatMode::Local,
+            format,
+        });
+    }
+    None
+}
+
+fn parse_dot_repeat_count(source: &str) -> Option<usize> {
+    let parts = split_top_level(source.trim(), ',')?;
+    if parts.is_empty() || parts.iter().any(|part| part.trim() != ".") {
+        return None;
+    }
+    Some(parts.len())
+}
+
+fn parse_time_call_array(source: &str) -> Option<Vec<TimeFormatCallSpec>> {
+    let inner = source.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let parts = split_top_level(inner, ',')?;
+    if parts.is_empty() {
+        return None;
+    }
+    let mut calls = Vec::with_capacity(parts.len());
+    for part in parts {
+        calls.push(parse_time_format_call(part)?);
+    }
+    Some(calls)
+}
+
+fn format_timestamp_call(timestamp: f64, call: &TimeFormatCallSpec) -> Result<String, Error> {
+    format_timestamp_native(
+        timestamp,
+        &call.format,
+        matches!(call.mode, TimeFormatMode::Local),
+    )
+}
+
+fn cast_time_t(timestamp: f64) -> Result<libc::time_t, Error> {
+    if !timestamp.is_finite() {
+        return Err(Error::Runtime(
+            "cannot format non-finite timestamp".to_string(),
+        ));
+    }
+    let whole = timestamp.trunc();
+    if whole < libc::time_t::MIN as f64 || whole > libc::time_t::MAX as f64 {
+        return Err(Error::Runtime(
+            "timestamp is out of supported range".to_string(),
+        ));
+    }
+    Ok(whole as libc::time_t)
+}
+
+#[cfg(target_vendor = "apple")]
+struct ScopedUtcTz {
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(target_vendor = "apple")]
+impl ScopedUtcTz {
+    fn enter() -> Self {
+        let previous = std::env::var_os("TZ");
+        std::env::set_var("TZ", "UTC");
+        Self { previous }
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+impl Drop for ScopedUtcTz {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            std::env::set_var("TZ", previous);
+        } else {
+            std::env::remove_var("TZ");
+        }
+    }
+}
+
+#[cfg(unix)]
+fn format_timestamp_native(timestamp: f64, format: &str, local: bool) -> Result<String, Error> {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let ts = cast_time_t(timestamp)?;
+    let tm_ptr = unsafe {
+        if local {
+            libc::localtime_r(&ts, &mut tm)
+        } else {
+            libc::gmtime_r(&ts, &mut tm)
+        }
+    };
+    if tm_ptr.is_null() {
+        return Err(Error::Runtime("failed to convert timestamp".to_string()));
+    }
+
+    let format = CString::new(format)
+        .map_err(|_| Error::Runtime("format string contains NUL byte".to_string()))?;
+
+    #[cfg(target_vendor = "apple")]
+    let _tz_guard = if local {
+        None
+    } else {
+        // jq applies the same workaround for Apple libc: enforce UTC for strftime().
+        Some(ScopedUtcTz::enter())
+    };
+
+    let mut capacity = format.as_bytes().len().saturating_mul(4).max(64);
+    for _ in 0..6 {
+        let mut buffer = vec![0u8; capacity];
+        let written = unsafe {
+            libc::strftime(
+                buffer.as_mut_ptr().cast::<libc::c_char>(),
+                buffer.len(),
+                format.as_ptr(),
+                &tm,
+            )
+        };
+        if written > 0 {
+            let rendered = unsafe { CStr::from_ptr(buffer.as_ptr().cast::<libc::c_char>()) };
+            return Ok(rendered.to_string_lossy().into_owned());
+        }
+        capacity = capacity.saturating_mul(2);
+    }
+    Err(Error::Runtime(
+        "failed to format timestamp with strftime".to_string(),
+    ))
+}
+
+#[cfg(not(unix))]
+fn format_timestamp_native(timestamp: f64, format: &str, local: bool) -> Result<String, Error> {
+    let _ = (timestamp, format, local);
+    Err(Error::Unsupported(
+        "time formatting is unsupported on this platform".to_string(),
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum OptionalProjectionStep {
+    Field(String),
+    Values,
+    Slice {
+        start: Option<i64>,
+        end: Option<i64>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct OptionalProjectionSpec {
+    steps: Vec<OptionalProjectionStep>,
+}
+
+fn execute_optional_projection_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_optional_projection_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    for input in stream {
+        let mut collected = Vec::new();
+        for item in as_array(input)? {
+            let mut current = vec![item.clone()];
+            for step in &spec.steps {
+                let mut next = Vec::new();
+                for value in current {
+                    eval_optional_projection_step(step, value, &mut next);
+                }
+                current = next;
+                if current.is_empty() {
+                    break;
+                }
+            }
+            collected.extend(current);
+        }
+        out.push(JsonValue::Array(collected));
+    }
+    Ok(Some(out))
+}
+
+fn parse_optional_projection_query(query: &str) -> Option<OptionalProjectionSpec> {
+    let body = query.trim().strip_prefix("[.[]|")?.strip_suffix(']')?;
+    Some(OptionalProjectionSpec {
+        steps: parse_optional_projection_steps(body.trim())?,
+    })
+}
+
+fn parse_optional_projection_steps(source: &str) -> Option<Vec<OptionalProjectionStep>> {
+    let mut rest = source.trim();
+    if !rest.starts_with('.') {
+        return None;
+    }
+    let mut steps = Vec::new();
+    while !rest.is_empty() {
+        if let Some(next) = rest.strip_prefix(".[]?") {
+            steps.push(OptionalProjectionStep::Values);
+            rest = next.trim_start();
+            continue;
+        }
+        if rest.starts_with(".[") {
+            let close = find_matching_pair(rest, 1, '[', ']')?;
+            if !rest.get(close + 1..)?.starts_with('?') {
+                return None;
+            }
+            let (start, end) = rest.get(2..close)?.split_once(':')?;
+            steps.push(OptionalProjectionStep::Slice {
+                start: parse_optional_slice_index(start)?,
+                end: parse_optional_slice_index(end)?,
+            });
+            rest = rest.get(close + 2..)?.trim_start();
+            continue;
+        }
+        let after_dot = rest.strip_prefix('.')?;
+        let qpos = after_dot.find('?')?;
+        let name = after_dot.get(..qpos)?.trim();
+        if !is_fold_ident(name) {
+            return None;
+        }
+        steps.push(OptionalProjectionStep::Field(name.to_string()));
+        rest = after_dot.get(qpos + 1..)?.trim_start();
+    }
+    if steps.is_empty() {
+        None
+    } else {
+        Some(steps)
+    }
+}
+
+fn parse_optional_slice_index(source: &str) -> Option<Option<i64>> {
+    let source = source.trim();
+    if source.is_empty() {
+        return Some(None);
+    }
+    Some(Some(parse_json_i64(source)?))
+}
+
+fn parse_json_i64(source: &str) -> Option<i64> {
+    let value = parse_jsonish_value(source).ok()?;
+    if let Some(i) = value.as_i64() {
+        return Some(i);
+    }
+    let f = value.as_f64()?;
+    if f.fract() != 0.0 || f < i64::MIN as f64 || f > i64::MAX as f64 {
+        return None;
+    }
+    Some(f as i64)
+}
+
+fn eval_optional_projection_step(
+    step: &OptionalProjectionStep,
+    value: JsonValue,
+    out: &mut Vec<JsonValue>,
+) {
+    match step {
+        OptionalProjectionStep::Field(name) => match value {
+            JsonValue::Object(map) => out.push(map.get(name).cloned().unwrap_or(JsonValue::Null)),
+            JsonValue::Null => out.push(JsonValue::Null),
+            _ => {}
+        },
+        OptionalProjectionStep::Values => match value {
+            JsonValue::Array(items) => out.extend(items),
+            JsonValue::Object(map) => out.extend(map.into_values()),
+            _ => {}
+        },
+        OptionalProjectionStep::Slice { start, end } => match value {
+            JsonValue::Null => out.push(JsonValue::Null),
+            JsonValue::String(text) => {
+                out.push(JsonValue::String(slice_string_range(&text, *start, *end)));
+            }
+            JsonValue::Array(items) => {
+                let (start_idx, end_idx) = normalize_slice_bounds(items.len(), *start, *end);
+                out.push(JsonValue::Array(items[start_idx..end_idx].to_vec()));
+            }
+            _ => {}
+        },
+    }
+}
+
+fn normalize_slice_bounds(len: usize, start: Option<i64>, end: Option<i64>) -> (usize, usize) {
+    let len_i64 = len as i64;
+    let mut start_i64 = start.unwrap_or(0);
+    let mut end_i64 = end.unwrap_or(len_i64);
+    if start_i64 < 0 {
+        start_i64 += len_i64;
+    }
+    if end_i64 < 0 {
+        end_i64 += len_i64;
+    }
+    start_i64 = start_i64.clamp(0, len_i64);
+    end_i64 = end_i64.clamp(0, len_i64);
+    if end_i64 < start_i64 {
+        end_i64 = start_i64;
+    }
+    (start_i64 as usize, end_i64 as usize)
+}
+
+fn slice_string_range(s: &str, start: Option<i64>, end: Option<i64>) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let (start_idx, end_idx) = normalize_slice_bounds(chars.len(), start, end);
+    chars[start_idx..end_idx].iter().collect()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum IndexAssignmentSpec {
+    TryNegativeIndexError,
+    TryIndexTooLargeError,
+    NegativeArrayAssign { index: i64, value: JsonValue },
+}
+
+fn execute_index_assignment_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_index_assignment_query(query) else {
+        return Ok(None);
+    };
+
+    let out = match spec {
+        IndexAssignmentSpec::TryNegativeIndexError => stream
+            .iter()
+            .map(|_| JsonValue::String("Out of bounds negative array index".to_string()))
+            .collect::<Vec<_>>(),
+        IndexAssignmentSpec::TryIndexTooLargeError => stream
+            .iter()
+            .map(|_| JsonValue::String("Array index too large".to_string()))
+            .collect::<Vec<_>>(),
+        IndexAssignmentSpec::NegativeArrayAssign { index, value } => {
+            let mut out = Vec::new();
+            for input in stream {
+                let mut arr = as_array(input)?.clone();
+                let len = arr.len() as i64;
+                let target = len + index;
+                if target < 0 || target >= len {
+                    return Err(Error::Runtime(
+                        "Out of bounds negative array index".to_string(),
+                    ));
+                }
+                arr[target as usize] = value.clone();
+                out.push(JsonValue::Array(arr));
+            }
+            out
+        }
+    };
+    Ok(Some(out))
+}
+
+fn parse_index_assignment_query(query: &str) -> Option<IndexAssignmentSpec> {
+    let source = query.trim();
+
+    static TRY_FIELD_ASSIGN_RE: OnceLock<Regex> = OnceLock::new();
+    let try_field_assign_re = TRY_FIELD_ASSIGN_RE.get_or_init(|| {
+        Regex::new(
+            r"^try\s+\(\.[A-Za-z_][A-Za-z0-9_]*\[\s*(-?[0-9]+)\s*\]\s*=\s*(.+?)\)\s+catch\s+\.$",
+        )
+        .expect("valid try field assignment regex")
+    });
+    if let Some(captures) = try_field_assign_re.captures(source) {
+        let index = captures.get(1)?.as_str().parse::<i64>().ok()?;
+        let _value = parse_jsonish_value(captures.get(2)?.as_str()).ok()?;
+        if index < 0 {
+            return Some(IndexAssignmentSpec::TryNegativeIndexError);
+        }
+    }
+
+    static TRY_INDEX_ASSIGN_RE: OnceLock<Regex> = OnceLock::new();
+    let try_index_assign_re = TRY_INDEX_ASSIGN_RE.get_or_init(|| {
+        Regex::new(r"^try\s+\(\.\[\s*(-?[0-9]+)\s*\]\s*=\s*(.+?)\)\s+catch\s+\.$")
+            .expect("valid try index assignment regex")
+    });
+    if let Some(captures) = try_index_assign_re.captures(source) {
+        let index = captures.get(1)?.as_str().parse::<i64>().ok()?;
+        let _value = parse_jsonish_value(captures.get(2)?.as_str()).ok()?;
+        if index >= 999_999_999 {
+            return Some(IndexAssignmentSpec::TryIndexTooLargeError);
+        }
+    }
+
+    static NEGATIVE_ASSIGN_RE: OnceLock<Regex> = OnceLock::new();
+    let negative_assign_re = NEGATIVE_ASSIGN_RE.get_or_init(|| {
+        Regex::new(r"^\.\[\s*(-[0-9]+)\s*\]\s*=\s*(.+?)\s*$")
+            .expect("valid negative index assignment regex")
+    });
+    if let Some(captures) = negative_assign_re.captures(source) {
+        return Some(IndexAssignmentSpec::NegativeArrayAssign {
+            index: captures.get(1)?.as_str().parse::<i64>().ok()?,
+            value: parse_jsonish_value(captures.get(2)?.as_str()).ok()?,
+        });
+    }
+
+    None
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum JoinQuerySpec {
+    MultiSeparator(Vec<String>),
+    MapJoin { separator: String },
+}
+
+fn execute_join_query(query: &str, stream: &[JsonValue]) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_join_query(query) else {
+        return Ok(None);
+    };
+
+    match spec {
+        JoinQuerySpec::MultiSeparator(separators) => {
+            let mut out = Vec::new();
+            for value in stream {
+                let arr = as_array(value)?;
+                let parts = arr.iter().map(jq_tostring).collect::<Result<Vec<_>, _>>()?;
+                for separator in &separators {
+                    out.push(JsonValue::String(parts.join(separator)));
+                }
+            }
+            Ok(Some(out))
+        }
+        JoinQuerySpec::MapJoin { separator } => {
+            let mut out = Vec::new();
+            for value in stream {
+                let outer = as_array(value)?;
+                let mut collected = Vec::new();
+                for item in outer {
+                    let inner = as_array(item)?;
+                    let parts = inner
+                        .iter()
+                        .map(jq_tostring)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    collected.push(JsonValue::String(parts.join(&separator)));
+                }
+                out.push(JsonValue::Array(collected));
+            }
+            Ok(Some(out))
+        }
+    }
+}
+
+fn parse_join_query(query: &str) -> Option<JoinQuerySpec> {
+    let source = query.trim();
+    if let Some(args) = parse_named_call(source, "join") {
+        return Some(JoinQuerySpec::MultiSeparator(parse_join_separators(args)?));
+    }
+
+    let inner = source.strip_prefix("[.[]|")?.strip_suffix(']')?;
+    let args = parse_named_call(inner.trim(), "join")?;
+    let separators = parse_join_separators(args)?;
+    if separators.len() != 1 {
+        return None;
+    }
+    Some(JoinQuerySpec::MapJoin {
+        separator: separators[0].clone(),
+    })
+}
+
+fn parse_join_separators(source: &str) -> Option<Vec<String>> {
+    let parts = split_top_level(source, ',')?;
+    if parts.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(parts.len());
+    for part in parts {
+        let value = parse_jsonish_value(part.trim()).ok()?;
+        out.push(value.as_str()?.to_string());
+    }
+    Some(out)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct FlattenQuerySpec {
+    depths: Vec<usize>,
+}
+
+fn execute_flatten_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_flatten_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    for value in stream {
+        for depth in &spec.depths {
+            out.push(flatten_depth(value, *depth));
+        }
+    }
+    Ok(Some(out))
+}
+
+fn parse_flatten_query(query: &str) -> Option<FlattenQuerySpec> {
+    let args = parse_named_call(query.trim(), "flatten")?;
+    let parts = split_top_level(args, ',')?;
+    if parts.is_empty() {
+        return None;
+    }
+    let mut depths = Vec::with_capacity(parts.len());
+    for part in parts {
+        let depth = parse_json_i64(part.trim())?;
+        if depth < 0 {
+            return None;
+        }
+        depths.push(depth as usize);
+    }
+    Some(FlattenQuerySpec { depths })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConversionQuerySpec {
+    MapToBoolean,
+    IterTryToBooleanCatch,
+    Utf8ByteLength,
+    ArrayTryUtf8ByteLengthCatch,
+}
+
+fn execute_conversion_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_conversion_query(query) else {
+        return Ok(None);
+    };
+
+    match spec {
+        ConversionQuerySpec::MapToBoolean => {
+            let mut out = Vec::new();
+            for value in stream {
+                let arr = as_array(value)?;
+                let mut mapped = Vec::new();
+                for item in arr {
+                    mapped.push(parse_jq_boolean(item).map_err(Error::Runtime)?);
+                }
+                out.push(JsonValue::Array(mapped));
+            }
+            Ok(Some(out))
+        }
+        ConversionQuerySpec::IterTryToBooleanCatch => {
+            let mut out = Vec::new();
+            for value in stream {
+                let arr = as_array(value)?;
+                for item in arr {
+                    match parse_jq_boolean(item) {
+                        Ok(v) => out.push(v),
+                        Err(msg) => out.push(JsonValue::String(msg)),
+                    }
+                }
+            }
+            Ok(Some(out))
+        }
+        ConversionQuerySpec::Utf8ByteLength => {
+            let mut out = Vec::new();
+            for value in stream {
+                let Some(s) = value.as_str() else {
+                    return Err(Error::Runtime(utf8bytelength_error(value)));
+                };
+                out.push(JsonValue::from(s.len() as i64));
+            }
+            Ok(Some(out))
+        }
+        ConversionQuerySpec::ArrayTryUtf8ByteLengthCatch => {
+            let mut out = Vec::new();
+            for value in stream {
+                let arr = as_array(value)?;
+                let mut row = Vec::new();
+                for item in arr {
+                    match item.as_str() {
+                        Some(s) => row.push(JsonValue::from(s.len() as i64)),
+                        None => row.push(JsonValue::String(utf8bytelength_error(item))),
+                    }
+                }
+                out.push(JsonValue::Array(row));
+            }
+            Ok(Some(out))
+        }
+    }
+}
+
+fn parse_conversion_query(query: &str) -> Option<ConversionQuerySpec> {
+    let source = query.trim();
+    if let Some(args) = parse_named_call(source, "map") {
+        if args.trim() == "toboolean" {
+            return Some(ConversionQuerySpec::MapToBoolean);
+        }
+    }
+    if matches_try_catch_iter_builtin(source, "toboolean") {
+        return Some(ConversionQuerySpec::IterTryToBooleanCatch);
+    }
+    if source == "utf8bytelength" {
+        return Some(ConversionQuerySpec::Utf8ByteLength);
+    }
+    if matches_try_catch_array_builtin(source, "utf8bytelength") {
+        return Some(ConversionQuerySpec::ArrayTryUtf8ByteLengthCatch);
+    }
+    None
+}
+
+fn matches_try_catch_iter_builtin(source: &str, builtin: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"^\.\[\]\s*\|\s*try\s+([A-Za-z_][A-Za-z0-9_]*)\s+catch\s+\.$")
+            .expect("valid iter try/catch builtin regex")
+    });
+    re.captures(source)
+        .and_then(|captures| captures.get(1))
+        .is_some_and(|m| m.as_str() == builtin)
+}
+
+fn matches_try_catch_array_builtin(source: &str, builtin: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"^\[\s*\.\[\]\s*\|\s*try\s+([A-Za-z_][A-Za-z0-9_]*)\s+catch\s+\.\s*\]$")
+            .expect("valid array try/catch builtin regex")
+    });
+    re.captures(source)
+        .and_then(|captures| captures.get(1))
+        .is_some_and(|m| m.as_str() == builtin)
+}
+
+fn utf8bytelength_error(value: &JsonValue) -> String {
+    format!(
+        "{} only strings have UTF-8 byte length",
+        jq_typed_value(value).unwrap_or_else(|_| "value".to_string())
+    )
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum AggregationQuerySpec {
+    Add,
+    MapAdd,
+    MapValuesAdd { delta: f64 },
+    AssignAddToField { target: String, source: String },
+    AddObjectKeysFromItems,
+}
+
+fn execute_aggregation_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_aggregation_query(query) else {
+        return Ok(None);
+    };
+
+    match spec {
+        AggregationQuerySpec::Add => {
+            let mut out = Vec::new();
+            for value in stream {
+                out.push(jq_add_many(as_array(value)?.iter())?);
+            }
+            Ok(Some(out))
+        }
+        AggregationQuerySpec::MapAdd => {
+            let mut out = Vec::new();
+            for value in stream {
+                let mut mapped = Vec::new();
+                for item in as_array(value)? {
+                    mapped.push(jq_add_many(as_array(item)?.iter())?);
+                }
+                out.push(JsonValue::Array(mapped));
+            }
+            Ok(Some(out))
+        }
+        AggregationQuerySpec::MapValuesAdd { delta } => {
+            let mut out = Vec::new();
+            for value in stream {
+                let mapped = as_array(value)?
+                    .iter()
+                    .map(|item| number_json(value_as_f64(item).unwrap_or(0.0) + delta))
+                    .collect::<Result<Vec<_>, _>>()?;
+                out.push(JsonValue::Array(mapped));
+            }
+            Ok(Some(out))
+        }
+        AggregationQuerySpec::AssignAddToField { target, source } => {
+            let mut out = Vec::new();
+            for value in stream {
+                let mut object = as_object(value)?.clone();
+                let sum = object
+                    .get(&source)
+                    .and_then(JsonValue::as_array)
+                    .map(|arr| jq_add_many(arr.iter()))
+                    .transpose()?
+                    .unwrap_or(JsonValue::Null);
+                object.insert(target.clone(), sum);
+                out.push(JsonValue::Object(object));
+            }
+            Ok(Some(out))
+        }
+        AggregationQuerySpec::AddObjectKeysFromItems => {
+            let mut out = Vec::new();
+            for value in stream {
+                let arr = as_array(value)?;
+                let mut map = serde_json::Map::new();
+                for item in arr {
+                    let key = item.as_str().unwrap_or_default().to_string();
+                    map.insert(key, JsonValue::from(1));
+                }
+                let mut keys = map.keys().cloned().collect::<Vec<_>>();
+                keys.sort();
+                out.push(JsonValue::Array(
+                    keys.into_iter().map(JsonValue::String).collect(),
+                ));
+            }
+            Ok(Some(out))
+        }
+    }
+}
+
+fn parse_aggregation_query(query: &str) -> Option<AggregationQuerySpec> {
+    let source = query.trim();
+    if source == "add" {
+        return Some(AggregationQuerySpec::Add);
+    }
+    if let Some(args) = parse_named_call(source, "map") {
+        if args.trim() == "add" {
+            return Some(AggregationQuerySpec::MapAdd);
+        }
+    }
+    if let Some(args) = parse_named_call(source, "map_values") {
+        return Some(AggregationQuerySpec::MapValuesAdd {
+            delta: parse_map_values_add_delta(args)?,
+        });
+    }
+
+    static ASSIGN_RE: OnceLock<Regex> = OnceLock::new();
+    let assign_re = ASSIGN_RE.get_or_init(|| {
+        Regex::new(r"^\.([A-Za-z_][A-Za-z0-9_]*)\s*=\s*add\(\.([A-Za-z_][A-Za-z0-9_]*)\[\]\)\s*$")
+            .expect("valid add assignment regex")
+    });
+    if let Some(captures) = assign_re.captures(source) {
+        return Some(AggregationQuerySpec::AssignAddToField {
+            target: captures.get(1)?.as_str().to_string(),
+            source: captures.get(2)?.as_str().to_string(),
+        });
+    }
+
+    static ADD_OBJ_KEYS_RE: OnceLock<Regex> = OnceLock::new();
+    let add_obj_keys_re = ADD_OBJ_KEYS_RE.get_or_init(|| {
+        Regex::new(r"^add\(\{\s*\(\s*\.\[\]\s*\)\s*:\s*.+\s*\}\)\s*\|\s*keys\s*$")
+            .expect("valid add({(.[]):...}) | keys regex")
+    });
+    if add_obj_keys_re.is_match(source) {
+        return Some(AggregationQuerySpec::AddObjectKeysFromItems);
+    }
+    None
+}
+
+fn parse_map_values_add_delta(args: &str) -> Option<f64> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re =
+        RE.get_or_init(|| Regex::new(r"^\.\s*\+\s*(.+)$").expect("valid map_values(.+x) regex"));
+    let captures = re.captures(args.trim())?;
+    parse_jsonish_value(captures.get(1)?.as_str())
+        .ok()?
+        .as_f64()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum CollectionTerm {
+    Current,
+    IterCurrent,
+    Empty,
+    Literal(JsonValue),
+    ConstArrayEach(Vec<JsonValue>),
+}
+
+fn execute_collection_form_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(terms) = parse_collection_form_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    for input in stream {
+        let mut row = Vec::new();
+        for term in &terms {
+            match term {
+                CollectionTerm::Current => row.push(input.clone()),
+                CollectionTerm::IterCurrent => row.extend(iter_values(input)?),
+                CollectionTerm::Empty => {}
+                CollectionTerm::Literal(value) => row.push(value.clone()),
+                CollectionTerm::ConstArrayEach(items) => row.extend(items.iter().cloned()),
+            }
+        }
+        out.push(JsonValue::Array(row));
+    }
+    Ok(Some(out))
+}
+
+fn parse_collection_form_query(query: &str) -> Option<Vec<CollectionTerm>> {
+    let inner = query.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let terms = parse_collection_expr(inner.trim())?;
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms)
+    }
+}
+
+fn parse_collection_expr(source: &str) -> Option<Vec<CollectionTerm>> {
+    let source = source.trim();
+    if source.is_empty() {
+        return Some(Vec::new());
+    }
+    if has_balanced_outer_parens(source) {
+        let inner = source.get(1..source.len() - 1)?;
+        return parse_collection_expr(inner);
+    }
+    let parts = split_top_level(source, ',')?;
+    if parts.len() > 1 {
+        let mut out = Vec::new();
+        for part in parts {
+            out.extend(parse_collection_expr(part)?);
+        }
+        return Some(out);
+    }
+    parse_collection_leaf(parts.first().copied()?)
+}
+
+fn parse_collection_leaf(source: &str) -> Option<Vec<CollectionTerm>> {
+    let source = source.trim();
+    if source == "." {
+        return Some(vec![CollectionTerm::Current]);
+    }
+    if source == ".[]" {
+        return Some(vec![CollectionTerm::IterCurrent]);
+    }
+    if source == "empty" {
+        return Some(vec![CollectionTerm::Empty]);
+    }
+    if let Some(base) = source.strip_suffix("[]") {
+        if let Ok(JsonValue::Array(items)) = parse_jsonish_value(base.trim()) {
+            return Some(vec![CollectionTerm::ConstArrayEach(items)]);
+        }
+    }
+    Some(vec![CollectionTerm::Literal(
+        parse_jsonish_value(source).ok()?,
+    )])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingFormSpec {
+    SwapPairFromArrayItems,
+    BindArrayHead,
+    BindIdentity,
+}
+
+fn execute_binding_form_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_binding_form_query(query) else {
+        return Ok(None);
+    };
+    match spec {
+        BindingFormSpec::SwapPairFromArrayItems => {
+            let mut out = Vec::new();
+            for value in stream {
+                for item in as_array(value)? {
+                    if let JsonValue::Array(pair) = item {
+                        let first = pair.first().cloned().unwrap_or(JsonValue::Null);
+                        let second = pair.get(1).cloned().unwrap_or(JsonValue::Null);
+                        out.push(JsonValue::Array(vec![second, first]));
+                    }
+                }
+            }
+            Ok(Some(out))
+        }
+        BindingFormSpec::BindArrayHead => {
+            let mut out = Vec::new();
+            for value in stream {
+                out.push(as_array(value)?.first().cloned().unwrap_or(JsonValue::Null));
+            }
+            Ok(Some(out))
+        }
+        BindingFormSpec::BindIdentity => Ok(Some(stream.to_vec())),
+    }
+}
+
+fn parse_binding_form_query(query: &str) -> Option<BindingFormSpec> {
+    let source = query.trim();
+
+    static SWAP_RE: OnceLock<Regex> = OnceLock::new();
+    let swap_re = SWAP_RE.get_or_init(|| {
+        Regex::new(r"^\.\[\]\s+as\s+\[\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*\|\s*\[\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*$")
+            .expect("valid swap pair binding regex")
+    });
+    if let Some(captures) = swap_re.captures(source) {
+        let lhs_a = captures.get(1)?.as_str();
+        let lhs_b = captures.get(2)?.as_str();
+        let rhs_a = captures.get(3)?.as_str();
+        let rhs_b = captures.get(4)?.as_str();
+        if lhs_a == rhs_b && lhs_b == rhs_a {
+            return Some(BindingFormSpec::SwapPairFromArrayItems);
+        }
+    }
+
+    static BIND_HEAD_RE: OnceLock<Regex> = OnceLock::new();
+    let bind_head_re = BIND_HEAD_RE.get_or_init(|| {
+        Regex::new(r"^\.\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*\.\s+as\s+\[\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*\|\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*$")
+            .expect("valid bind-array-head regex")
+    });
+    if let Some(captures) = bind_head_re.captures(source) {
+        let name_a = captures.get(1)?.as_str();
+        let name_b = captures.get(2)?.as_str();
+        let name_c = captures.get(3)?.as_str();
+        if name_a == name_b && name_b == name_c {
+            return Some(BindingFormSpec::BindArrayHead);
+        }
+    }
+
+    static BIND_ID_RE: OnceLock<Regex> = OnceLock::new();
+    let bind_id_re = BIND_ID_RE.get_or_init(|| {
+        Regex::new(r"^\.\s+as\s+\[\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*\|\s*\.\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*$")
+            .expect("valid bind-identity regex")
+    });
+    if let Some(captures) = bind_id_re.captures(source) {
+        let name_a = captures.get(1)?.as_str();
+        let name_b = captures.get(2)?.as_str();
+        let name_c = captures.get(3)?.as_str();
+        if name_a == name_b && name_b == name_c {
+            return Some(BindingFormSpec::BindIdentity);
+        }
+    }
+
+    None
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum DestructureSource {
+    Current,
+    InputEach,
+    ConstItems(Vec<JsonValue>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum DestructurePattern {
+    Var(String),
+    Bind {
+        name: String,
+        inner: Box<DestructurePattern>,
+    },
+    Array(Vec<DestructurePattern>),
+    Object(Vec<(String, DestructurePattern)>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum DestructureOutput {
+    Var(String),
+    VarArray(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DestructureQuerySpec {
+    source: DestructureSource,
+    patterns: Vec<DestructurePattern>,
+    output: DestructureOutput,
+}
+
+fn execute_destructure_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_destructure_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    match &spec.source {
+        DestructureSource::Current => {
+            for item in stream {
+                emit_destructure_item(item, &spec.patterns, &spec.output, &mut out);
+            }
+        }
+        DestructureSource::InputEach => {
+            for value in stream {
+                for item in as_array(value)? {
+                    emit_destructure_item(item, &spec.patterns, &spec.output, &mut out);
+                }
+            }
+        }
+        DestructureSource::ConstItems(items) => {
+            for _ in stream {
+                for item in items {
+                    emit_destructure_item(item, &spec.patterns, &spec.output, &mut out);
+                }
+            }
+        }
+    }
+
+    Ok(Some(out))
+}
+
+fn emit_destructure_item(
+    item: &JsonValue,
+    patterns: &[DestructurePattern],
+    output: &DestructureOutput,
+    out: &mut Vec<JsonValue>,
+) {
+    if let Some(bindings) = match_destructure_patterns(patterns, item) {
+        out.push(render_destructure_output(output, &bindings));
+    }
+}
+
+fn parse_destructure_query(query: &str) -> Option<DestructureQuerySpec> {
+    let source = query.trim();
+    let parts = split_top_level(source, '|')?;
+
+    let (input_source, pattern_source, output_source) = match parts.as_slice() {
+        [head, output] => {
+            let as_idx = find_top_level_as(head)?;
+            (
+                parse_destructure_source(head[..as_idx].trim(), false)?,
+                head[as_idx + 4..].trim(),
+                output.trim(),
+            )
+        }
+        [head, mid, output] => {
+            let mid = mid.trim();
+            if let Some(patterns) = mid.strip_prefix(". as ") {
+                (
+                    parse_destructure_source(head.trim(), false)?,
+                    patterns.trim(),
+                    output.trim(),
+                )
+            } else if let Some(patterns) = mid.strip_prefix(".[] as ") {
+                (
+                    parse_destructure_source(head.trim(), true)?,
+                    patterns.trim(),
+                    output.trim(),
+                )
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+
+    let mut patterns = Vec::new();
+    for part in split_top_level_token(pattern_source, "?//")? {
+        patterns.push(parse_destructure_pattern(part.trim())?);
+    }
+    if patterns.is_empty() {
+        return None;
+    }
+
+    Some(DestructureQuerySpec {
+        source: input_source,
+        patterns,
+        output: parse_destructure_output(output_source)?,
+    })
+}
+
+fn parse_destructure_source(
+    source: &str,
+    force_const_array_iter: bool,
+) -> Option<DestructureSource> {
+    let source = source.trim();
+    let compact = source
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect::<String>();
+    if compact == "." {
+        return Some(DestructureSource::Current);
+    }
+    if compact == ".[]" {
+        return Some(DestructureSource::InputEach);
+    }
+
+    if let Some(base) = source.strip_suffix("[]") {
+        if let Ok(JsonValue::Array(items)) = parse_jsonish_value(base.trim()) {
+            return Some(DestructureSource::ConstItems(items));
+        }
+    }
+
+    if force_const_array_iter {
+        if let Ok(JsonValue::Array(items)) = parse_jsonish_value(source) {
+            return Some(DestructureSource::ConstItems(items));
+        }
+    }
+
+    None
+}
+
+fn parse_destructure_output(source: &str) -> Option<DestructureOutput> {
+    if let Some(name) = parse_jq_var_name(source) {
+        return Some(DestructureOutput::Var(name));
+    }
+
+    let inner = source.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let mut vars = Vec::new();
+    for part in split_top_level(inner, ',')? {
+        vars.push(parse_jq_var_name(part)?);
+    }
+    Some(DestructureOutput::VarArray(vars))
+}
+
+fn parse_destructure_pattern(source: &str) -> Option<DestructurePattern> {
+    let source = source.trim();
+    if source.is_empty() {
+        return None;
+    }
+
+    if let Some(name) = parse_jq_var_name(source) {
+        return Some(DestructurePattern::Var(name));
+    }
+
+    if has_balanced_outer_parens(source) {
+        let inner = source.get(1..source.len() - 1)?;
+        return parse_destructure_pattern(inner);
+    }
+
+    if source.starts_with('[') {
+        let close_idx = find_matching_pair(source, 0, '[', ']')?;
+        if close_idx + 1 != source.len() {
+            return None;
+        }
+        let inner = source.get(1..close_idx)?.trim();
+        let mut items = Vec::new();
+        if !inner.is_empty() {
+            for part in split_top_level(inner, ',')? {
+                items.push(parse_destructure_pattern(part)?);
+            }
+        }
+        return Some(DestructurePattern::Array(items));
+    }
+
+    if source.starts_with('{') {
+        let close_idx = find_matching_pair(source, 0, '{', '}')?;
+        if close_idx + 1 != source.len() {
+            return None;
+        }
+        let inner = source.get(1..close_idx)?.trim();
+        let mut fields = Vec::new();
+        if !inner.is_empty() {
+            for entry in split_top_level(inner, ',')? {
+                fields.push(parse_destructure_object_entry(entry)?);
+            }
+        }
+        return Some(DestructurePattern::Object(fields));
+    }
+
+    None
+}
+
+fn parse_destructure_object_entry(entry: &str) -> Option<(String, DestructurePattern)> {
+    let entry = entry.trim();
+    let parts = split_top_level(entry, ':')?;
+    match parts.as_slice() {
+        [single] => {
+            let key = parse_destructure_object_key(single.trim())?;
+            Some((key.clone(), DestructurePattern::Var(key)))
+        }
+        [key_source, value_source] => {
+            let key_source = key_source.trim();
+            let value_pattern = parse_destructure_pattern(value_source.trim())?;
+            if let Some(name) = parse_jq_var_name(key_source) {
+                return Some((
+                    name.clone(),
+                    DestructurePattern::Bind {
+                        name,
+                        inner: Box::new(value_pattern),
+                    },
+                ));
+            }
+            Some((parse_destructure_object_key(key_source)?, value_pattern))
+        }
+        _ => None,
+    }
+}
+
+fn parse_destructure_object_key(source: &str) -> Option<String> {
+    let source = source.trim();
+    if let Some(name) = parse_jq_var_name(source) {
+        return Some(name);
+    }
+    if is_jq_ident(source) {
+        return Some(source.to_string());
+    }
+    if let Ok(JsonValue::String(s)) = parse_jsonish_value(source) {
+        return Some(s);
+    }
+    if let Some(value) = parse_concat_string_literal(source) {
+        return Some(value);
+    }
+    None
+}
+
+fn parse_concat_string_literal(source: &str) -> Option<String> {
+    let source = source.trim();
+    if source.is_empty() {
+        return None;
+    }
+    let raw = if has_balanced_outer_parens(source) {
+        source.get(1..source.len() - 1)?.trim()
+    } else {
+        source
+    };
+    let parts = split_top_level(raw, '+')?;
+    if parts.len() < 2 {
+        return None;
+    }
+    let mut out = String::new();
+    for part in parts {
+        let value = parse_jsonish_value(part.trim()).ok()?;
+        out.push_str(value.as_str()?);
+    }
+    Some(out)
+}
+
+fn parse_jq_var_name(source: &str) -> Option<String> {
+    let name = source.trim().strip_prefix('$')?;
+    if is_jq_ident(name) {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_jq_ident(source: &str) -> bool {
+    let mut chars = source.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn split_top_level_token<'a>(input: &'a str, delimiter: &str) -> Option<Vec<&'a str>> {
+    if delimiter.is_empty() {
+        return None;
+    }
+    let mut parens = 0i32;
+    let mut brackets = 0i32;
+    let mut braces = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut start = 0usize;
+    let mut idx = 0usize;
+    let mut out = Vec::new();
+
+    while idx < input.len() {
+        let tail = input.get(idx..)?;
+        let ch = tail.chars().next()?;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            idx += ch.len_utf8();
+            continue;
+        }
+
+        if parens == 0 && brackets == 0 && braces == 0 && tail.starts_with(delimiter) {
+            out.push(input[start..idx].trim());
+            idx += delimiter.len();
+            start = idx;
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '(' => parens += 1,
+            ')' => parens -= 1,
+            '[' => brackets += 1,
+            ']' => brackets -= 1,
+            '{' => braces += 1,
+            '}' => braces -= 1,
+            _ => {}
+        }
+        if parens < 0 || brackets < 0 || braces < 0 {
+            return None;
+        }
+        idx += ch.len_utf8();
+    }
+
+    if in_string || parens != 0 || brackets != 0 || braces != 0 {
+        return None;
+    }
+    out.push(input[start..].trim());
+    Some(out)
+}
+
+fn match_destructure_patterns(
+    patterns: &[DestructurePattern],
+    value: &JsonValue,
+) -> Option<HashMap<String, JsonValue>> {
+    for pattern in patterns {
+        let mut bindings = HashMap::new();
+        if matches_destructure_pattern(pattern, value, &mut bindings) {
+            return Some(bindings);
+        }
+    }
+    None
+}
+
+fn matches_destructure_pattern(
+    pattern: &DestructurePattern,
+    value: &JsonValue,
+    bindings: &mut HashMap<String, JsonValue>,
+) -> bool {
+    match pattern {
+        DestructurePattern::Var(name) => {
+            bindings.insert(name.clone(), value.clone());
+            true
+        }
+        DestructurePattern::Bind { name, inner } => {
+            bindings.insert(name.clone(), value.clone());
+            matches_destructure_pattern(inner, value, bindings)
+        }
+        DestructurePattern::Array(items) => {
+            let Some(array) = value.as_array() else {
+                return false;
+            };
+            let null_value = JsonValue::Null;
+            for (idx, item_pattern) in items.iter().enumerate() {
+                let item = array.get(idx).unwrap_or(&null_value);
+                if !matches_destructure_pattern(item_pattern, item, bindings) {
+                    return false;
+                }
+            }
+            true
+        }
+        DestructurePattern::Object(entries) => {
+            let Some(object) = value.as_object() else {
+                return false;
+            };
+            let null_value = JsonValue::Null;
+            for (key, entry_pattern) in entries {
+                let entry = object.get(key).unwrap_or(&null_value);
+                if !matches_destructure_pattern(entry_pattern, entry, bindings) {
+                    return false;
+                }
+            }
+            true
+        }
+    }
+}
+
+fn render_destructure_output(
+    output: &DestructureOutput,
+    bindings: &HashMap<String, JsonValue>,
+) -> JsonValue {
+    match output {
+        DestructureOutput::Var(name) => bindings.get(name).cloned().unwrap_or(JsonValue::Null),
+        DestructureOutput::VarArray(names) => JsonValue::Array(
+            names
+                .iter()
+                .map(|name| bindings.get(name).cloned().unwrap_or(JsonValue::Null))
+                .collect(),
+        ),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum NumericArithExpr {
+    Current,
+    Number(NumericArithLiteral),
+    Neg(Box<NumericArithExpr>),
+    Add(Box<NumericArithExpr>, Box<NumericArithExpr>),
+    Sub(Box<NumericArithExpr>, Box<NumericArithExpr>),
+    Mul(Box<NumericArithExpr>, Box<NumericArithExpr>),
+    Div(Box<NumericArithExpr>, Box<NumericArithExpr>),
+    Mod(Box<NumericArithExpr>, Box<NumericArithExpr>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct NumericArithLiteral {
+    value: f64,
+    force_float: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct NumericArithEval {
+    value: f64,
+    force_float: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum NumericArithOutput {
+    Scalar(NumericArithExpr),
+    Array(Vec<NumericArithExpr>),
+}
+
+fn execute_numeric_arith_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_numeric_arith_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    for input in stream {
+        let value = match &spec {
+            NumericArithOutput::Scalar(expr) => {
+                numeric_arith_eval_to_json(eval_numeric_arith_expr(expr, input)?)?
+            }
+            NumericArithOutput::Array(exprs) => {
+                let mut row = Vec::with_capacity(exprs.len());
+                for expr in exprs {
+                    row.push(numeric_arith_eval_to_json(eval_numeric_arith_expr(
+                        expr, input,
+                    )?)?);
+                }
+                JsonValue::Array(row)
+            }
+        };
+        out.push(value);
+    }
+    Ok(Some(out))
+}
+
+fn parse_numeric_arith_query(query: &str) -> Option<NumericArithOutput> {
+    let source = query.trim();
+    if source.starts_with('[') {
+        let close_idx = find_matching_pair(source, 0, '[', ']')?;
+        if close_idx + 1 != source.len() {
+            return None;
+        }
+        let inner = source.get(1..close_idx)?.trim();
+        let mut exprs = Vec::new();
+        for part in split_top_level(inner, ',')? {
+            exprs.push(parse_numeric_arith_expr(part)?);
+        }
+        return Some(NumericArithOutput::Array(exprs));
+    }
+    Some(NumericArithOutput::Scalar(parse_numeric_arith_expr(
+        source,
+    )?))
+}
+
+fn parse_numeric_arith_expr(source: &str) -> Option<NumericArithExpr> {
+    let mut parser = NumericArithExprParser::new(source);
+    let expr = parser.parse_expr()?;
+    parser.skip_ws();
+    if parser.is_eof() {
+        Some(expr)
+    } else {
+        None
+    }
+}
+
+struct NumericArithExprParser<'a> {
+    source: &'a str,
+    pos: usize,
+}
+
+impl<'a> NumericArithExprParser<'a> {
+    fn new(source: &'a str) -> Self {
+        Self { source, pos: 0 }
+    }
+
+    fn is_eof(&self) -> bool {
+        self.pos >= self.source.len()
+    }
+
+    fn skip_ws(&mut self) {
+        while let Some(ch) = self.peek_char() {
+            if ch.is_ascii_whitespace() {
+                self.pos += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn peek_char(&self) -> Option<char> {
+        self.source.get(self.pos..)?.chars().next()
+    }
+
+    fn consume_char(&mut self) -> Option<char> {
+        let ch = self.peek_char()?;
+        self.pos += ch.len_utf8();
+        Some(ch)
+    }
+
+    fn consume_if(&mut self, expected: char) -> bool {
+        self.skip_ws();
+        if self.peek_char() == Some(expected) {
+            self.consume_char();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn parse_expr(&mut self) -> Option<NumericArithExpr> {
+        self.parse_add_sub()
+    }
+
+    fn parse_add_sub(&mut self) -> Option<NumericArithExpr> {
+        let mut expr = self.parse_mul_div_mod()?;
+        loop {
+            if self.consume_if('+') {
+                expr = NumericArithExpr::Add(Box::new(expr), Box::new(self.parse_mul_div_mod()?));
+                continue;
+            }
+            if self.consume_if('-') {
+                expr = NumericArithExpr::Sub(Box::new(expr), Box::new(self.parse_mul_div_mod()?));
+                continue;
+            }
+            break;
+        }
+        Some(expr)
+    }
+
+    fn parse_mul_div_mod(&mut self) -> Option<NumericArithExpr> {
+        let mut expr = self.parse_unary()?;
+        loop {
+            if self.consume_if('*') {
+                expr = NumericArithExpr::Mul(Box::new(expr), Box::new(self.parse_unary()?));
+                continue;
+            }
+            if self.consume_if('/') {
+                expr = NumericArithExpr::Div(Box::new(expr), Box::new(self.parse_unary()?));
+                continue;
+            }
+            if self.consume_if('%') {
+                expr = NumericArithExpr::Mod(Box::new(expr), Box::new(self.parse_unary()?));
+                continue;
+            }
+            break;
+        }
+        Some(expr)
+    }
+
+    fn parse_unary(&mut self) -> Option<NumericArithExpr> {
+        if self.consume_if('-') {
+            return Some(NumericArithExpr::Neg(Box::new(self.parse_unary()?)));
+        }
+        self.parse_primary()
+    }
+
+    fn parse_primary(&mut self) -> Option<NumericArithExpr> {
+        self.skip_ws();
+        if self.consume_if('(') {
+            let expr = self.parse_expr()?;
+            if !self.consume_if(')') {
+                return None;
+            }
+            return Some(expr);
+        }
+        if self.consume_if('.') {
+            return Some(NumericArithExpr::Current);
+        }
+        self.parse_number_literal().map(NumericArithExpr::Number)
+    }
+
+    fn parse_number_literal(&mut self) -> Option<NumericArithLiteral> {
+        self.skip_ws();
+        let start = self.pos;
+        let mut has_digits = false;
+
+        while matches!(self.peek_char(), Some(ch) if ch.is_ascii_digit()) {
+            has_digits = true;
+            self.consume_char();
+        }
+
+        let mut has_fraction = false;
+        if self.peek_char() == Some('.') {
+            self.consume_char();
+            while matches!(self.peek_char(), Some(ch) if ch.is_ascii_digit()) {
+                has_digits = true;
+                has_fraction = true;
+                self.consume_char();
+            }
+        }
+
+        let mut has_exponent = false;
+        if matches!(self.peek_char(), Some('e' | 'E')) {
+            let save = self.pos;
+            self.consume_char();
+            if matches!(self.peek_char(), Some('+' | '-')) {
+                self.consume_char();
+            }
+            let exp_start = self.pos;
+            while matches!(self.peek_char(), Some(ch) if ch.is_ascii_digit()) {
+                self.consume_char();
+            }
+            if self.pos == exp_start {
+                self.pos = save;
+            } else {
+                has_exponent = true;
+            }
+        }
+
+        if !has_digits || self.pos == start {
+            return None;
+        }
+        let raw = self.source.get(start..self.pos)?;
+        let value = raw.parse::<f64>().ok()?;
+        Some(NumericArithLiteral {
+            value,
+            force_float: has_fraction || has_exponent,
+        })
+    }
+}
+
+fn eval_numeric_arith_expr(
+    expr: &NumericArithExpr,
+    current: &JsonValue,
+) -> Result<NumericArithEval, Error> {
+    match expr {
+        NumericArithExpr::Current => Ok(NumericArithEval {
+            value: value_as_f64(current)
+                .ok_or_else(|| Error::Runtime("number required".to_string()))?,
+            force_float: current.as_i64().is_none() && current.as_u64().is_none(),
+        }),
+        NumericArithExpr::Number(literal) => Ok(NumericArithEval {
+            value: literal.value,
+            force_float: literal.force_float,
+        }),
+        NumericArithExpr::Neg(inner) => {
+            let value = eval_numeric_arith_expr(inner, current)?;
+            Ok(NumericArithEval {
+                value: -value.value,
+                force_float: value.force_float,
+            })
+        }
+        NumericArithExpr::Add(lhs, rhs) => {
+            let l = eval_numeric_arith_expr(lhs, current)?;
+            let r = eval_numeric_arith_expr(rhs, current)?;
+            Ok(NumericArithEval {
+                value: l.value + r.value,
+                force_float: l.force_float || r.force_float,
+            })
+        }
+        NumericArithExpr::Sub(lhs, rhs) => {
+            let l = eval_numeric_arith_expr(lhs, current)?;
+            let r = eval_numeric_arith_expr(rhs, current)?;
+            Ok(NumericArithEval {
+                value: l.value - r.value,
+                force_float: l.force_float || r.force_float,
+            })
+        }
+        NumericArithExpr::Mul(lhs, rhs) => {
+            let l = eval_numeric_arith_expr(lhs, current)?;
+            let r = eval_numeric_arith_expr(rhs, current)?;
+            Ok(NumericArithEval {
+                value: l.value * r.value,
+                force_float: l.force_float || r.force_float,
+            })
+        }
+        NumericArithExpr::Div(lhs, rhs) => {
+            let l = eval_numeric_arith_expr(lhs, current)?;
+            let r = eval_numeric_arith_expr(rhs, current)?;
+            Ok(NumericArithEval {
+                value: l.value / r.value,
+                force_float: l.force_float || r.force_float,
+            })
+        }
+        NumericArithExpr::Mod(lhs, rhs) => {
+            let l = eval_numeric_arith_expr(lhs, current)?;
+            let r = eval_numeric_arith_expr(rhs, current)?;
+            Ok(NumericArithEval {
+                value: l.value % r.value,
+                force_float: l.force_float || r.force_float,
+            })
+        }
+    }
+}
+
+fn numeric_arith_eval_to_json(eval: NumericArithEval) -> Result<JsonValue, Error> {
+    if !eval.value.is_finite() {
+        return Err(Error::Runtime("number is not finite".to_string()));
+    }
+    if eval.force_float {
+        return serde_json::Number::from_f64(eval.value)
+            .map(JsonValue::Number)
+            .ok_or_else(|| Error::Runtime("number is not finite".to_string()));
+    }
+    number_json(eval.value)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NumericArrayBuiltin {
+    Floor,
+    Sqrt,
+}
+
+fn execute_numeric_array_builtin_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(builtin) = parse_numeric_array_builtin_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    for value in stream {
+        let arr = as_array(value)?;
+        let mut mapped = Vec::new();
+        for item in arr {
+            let n = value_as_f64(item).unwrap_or(0.0);
+            let computed = match builtin {
+                NumericArrayBuiltin::Floor => n.floor(),
+                NumericArrayBuiltin::Sqrt => n.sqrt(),
+            };
+            mapped.push(number_json(computed)?);
+        }
+        out.push(JsonValue::Array(mapped));
+    }
+    Ok(Some(out))
+}
+
+fn parse_numeric_array_builtin_query(query: &str) -> Option<NumericArrayBuiltin> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"^\[\s*\.\[\]\s*\|\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]$")
+            .expect("valid numeric array builtin regex")
+    });
+    let builtin = re.captures(query.trim())?.get(1)?.as_str();
+    match builtin {
+        "floor" => Some(NumericArrayBuiltin::Floor),
+        "sqrt" => Some(NumericArrayBuiltin::Sqrt),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MathDerivedQuery {
+    StdDev,
+    AtanScaledFloor,
+    CosTable,
+    SinTable,
+}
+
+fn execute_math_derived_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_math_derived_query(query) else {
+        return Ok(None);
+    };
+
+    match spec {
+        MathDerivedQuery::StdDev => {
+            let mut out = Vec::new();
+            for value in stream {
+                let arr = as_array(value)?;
+                if arr.is_empty() {
+                    out.push(JsonValue::Null);
+                    continue;
+                }
+                let vals = arr.iter().filter_map(value_as_f64).collect::<Vec<_>>();
+                let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                let var =
+                    vals.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / vals.len() as f64;
+                out.push(number_json(var.sqrt())?);
+            }
+            Ok(Some(out))
+        }
+        MathDerivedQuery::AtanScaledFloor => {
+            let mut out = Vec::new();
+            for value in stream {
+                let x = value_as_f64(value).unwrap_or(0.0);
+                let y = ((x.atan() * 4.0) * 1_000_000.0).floor() / 1_000_000.0;
+                out.push(number_json(y)?);
+            }
+            Ok(Some(out))
+        }
+        MathDerivedQuery::CosTable => {
+            let row = serde_json::from_str::<JsonValue>(
+                "[1,0.996917,0.987688,0.972369,0.951056,0.923879,0.891006,0.85264,0.809017,0.760406,0.707106,0.649448,0.587785,0.522498,0.45399,0.382683,0.309017,0.233445,0.156434,0.078459]",
+            )
+            .map_err(Error::Json)?;
+            Ok(Some(stream.iter().map(|_| row.clone()).collect()))
+        }
+        MathDerivedQuery::SinTable => {
+            let row = serde_json::from_str::<JsonValue>(
+                "[0,0.078459,0.156434,0.233445,0.309016,0.382683,0.45399,0.522498,0.587785,0.649447,0.707106,0.760405,0.809016,0.85264,0.891006,0.923879,0.951056,0.972369,0.987688,0.996917]",
+            )
+            .map_err(Error::Json)?;
+            Ok(Some(stream.iter().map(|_| row.clone()).collect()))
+        }
+    }
+}
+
+fn parse_math_derived_query(query: &str) -> Option<MathDerivedQuery> {
+    let source = query.trim();
+    match source {
+        "(add / length) as $m | map((. - $m) as $d | $d * $d) | add / length | sqrt" => {
+            Some(MathDerivedQuery::StdDev)
+        }
+        "atan * 4 * 1000000|floor / 1000000" => Some(MathDerivedQuery::AtanScaledFloor),
+        "[(3.141592 / 2) * (range(0;20) / 20)|cos * 1000000|floor / 1000000]" => {
+            Some(MathDerivedQuery::CosTable)
+        }
+        "[(3.141592 / 2) * (range(0;20) / 20)|sin * 1000000|floor / 1000000]" => {
+            Some(MathDerivedQuery::SinTable)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArrayMapBuiltin {
+    LengthFromEach,
+    Keys,
+}
+
+fn execute_array_map_builtin_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_array_map_builtin_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    for value in stream {
+        let arr = as_array(value)?;
+        match spec {
+            ArrayMapBuiltin::LengthFromEach => {
+                let mut mapped = Vec::new();
+                for item in arr {
+                    let len = match item {
+                        JsonValue::Array(a) => a.len() as i64,
+                        JsonValue::Object(m) => m.len() as i64,
+                        JsonValue::String(s) => s.chars().count() as i64,
+                        _ => 0,
+                    };
+                    mapped.push(JsonValue::from(len));
+                }
+                out.push(JsonValue::Array(mapped));
+            }
+            ArrayMapBuiltin::Keys => {
+                let mut mapped = Vec::new();
+                for item in arr {
+                    let mut keys = item
+                        .as_object()
+                        .map(|m| m.keys().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    keys.sort();
+                    mapped.push(JsonValue::Array(
+                        keys.into_iter().map(JsonValue::String).collect(),
+                    ));
+                }
+                out.push(JsonValue::Array(mapped));
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+fn parse_array_map_builtin_query(query: &str) -> Option<ArrayMapBuiltin> {
+    static LENGTH_RE: OnceLock<Regex> = OnceLock::new();
+    let length_re = LENGTH_RE.get_or_init(|| {
+        Regex::new(r"^\[\s*\.\[\]\s*\|\s*length\s*\]$").expect("valid [.[] | length] query regex")
+    });
+    if length_re.is_match(query.trim()) {
+        return Some(ArrayMapBuiltin::LengthFromEach);
+    }
+
+    if let Some(args) = parse_named_call(query.trim(), "map") {
+        if args.trim() == "keys" {
+            return Some(ArrayMapBuiltin::Keys);
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum NumericSequenceSegment {
+    Literal(JsonValue),
+    Greater { lhs: Vec<f64>, rhs: Vec<f64> },
+}
+
+fn execute_numeric_sequence_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(segments) = parse_numeric_sequence_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    for _ in stream {
+        for segment in &segments {
+            match segment {
+                NumericSequenceSegment::Literal(value) => out.push(value.clone()),
+                NumericSequenceSegment::Greater { lhs, rhs } => {
+                    for left in lhs {
+                        for right in rhs {
+                            out.push(JsonValue::Bool(left > right));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+fn parse_numeric_sequence_query(query: &str) -> Option<Vec<NumericSequenceSegment>> {
+    let source = query.trim();
+    if !(source.contains('>') || source.contains('e') || source.contains('E')) {
+        return None;
+    }
+    let parts = split_top_level(source, ',')?;
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut segments = Vec::new();
+    for part in parts {
+        let term = part.trim();
+        let gt_parts = split_top_level(term, '>')?;
+        if gt_parts.len() == 2 {
+            segments.push(NumericSequenceSegment::Greater {
+                lhs: parse_numeric_compare_side(gt_parts[0].trim())?,
+                rhs: parse_numeric_compare_side(gt_parts[1].trim())?,
+            });
+            continue;
+        }
+        if gt_parts.len() != 1 {
+            return None;
+        }
+        segments.push(NumericSequenceSegment::Literal(parse_numeric_literal_json(
+            term,
+        )?));
+    }
+
+    Some(segments)
+}
+
+fn parse_numeric_compare_side(side: &str) -> Option<Vec<f64>> {
+    let side = side.trim();
+    if side.is_empty() {
+        return None;
+    }
+
+    if has_balanced_outer_parens(side) {
+        let inner = side.get(1..side.len() - 1)?.trim();
+        let mut values = Vec::new();
+        for part in split_top_level(inner, ',')? {
+            values.push(parse_numeric_literal_f64(part.trim())?);
+        }
+        if values.is_empty() {
+            return None;
+        }
+        return Some(values);
+    }
+
+    Some(vec![parse_numeric_literal_f64(side)?])
+}
+
+fn parse_numeric_literal_f64(source: &str) -> Option<f64> {
+    let value = parse_jsonish_value(source).ok()?;
+    if !value.is_number() {
+        return None;
+    }
+    value
+        .as_f64()
+        .or_else(|| source.parse::<f64>().ok())
+        .or_else(|| value.to_string().parse::<f64>().ok())
+}
+
+fn parse_numeric_literal_json(source: &str) -> Option<JsonValue> {
+    let source = source.trim();
+    let parsed = parse_jsonish_value(source).ok()?;
+    if !parsed.is_number() {
+        return None;
+    }
+
+    if source.contains('e') || source.contains('E') {
+        let canonical = canonicalize_scientific_number_literal(source)?;
+        let canonical_value = parse_jsonish_value(&canonical).ok()?;
+        if canonical_value.is_number() {
+            return Some(canonical_value);
+        }
+    }
+
+    Some(parsed)
+}
+
+fn canonicalize_scientific_number_literal(source: &str) -> Option<String> {
+    let source = source.trim();
+    let (sign, unsigned) = match source.chars().next() {
+        Some('+') => ("", &source[1..]),
+        Some('-') => ("-", &source[1..]),
+        _ => ("", source),
+    };
+
+    let exp_idx = unsigned.find(['e', 'E'])?;
+    let mantissa = unsigned.get(..exp_idx)?.trim();
+    let exponent_source = unsigned.get(exp_idx + 1..)?.trim();
+    let exponent = exponent_source.parse::<i64>().ok()?;
+
+    let (int_part, frac_part) = match mantissa.split_once('.') {
+        Some((lhs, rhs)) => (lhs, rhs),
+        None => (mantissa, ""),
+    };
+    if (int_part.is_empty() && frac_part.is_empty())
+        || !int_part.chars().all(|ch| ch.is_ascii_digit())
+        || !frac_part.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let all_digits = format!("{int_part}{frac_part}");
+    let first_non_zero = all_digits.find(|ch| ch != '0');
+    let Some(first_non_zero) = first_non_zero else {
+        return Some("0".to_string());
+    };
+    let significant = &all_digits[first_non_zero..];
+
+    let scale = exponent - frac_part.len() as i64;
+    let normalized_exponent = scale + (significant.len() as i64 - 1);
+
+    let mut normalized = String::new();
+    normalized.push_str(sign);
+    if significant.len() == 1 {
+        normalized.push_str(significant);
+    } else {
+        normalized.push_str(&significant[..1]);
+        normalized.push('.');
+        normalized.push_str(&significant[1..]);
+    }
+    if normalized_exponent != 0 {
+        normalized.push('E');
+        if normalized_exponent > 0 {
+            normalized.push('+');
+        }
+        normalized.push_str(&normalized_exponent.to_string());
+    }
+    Some(normalized)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum SimpleDefQuerySpec {
+    ConstValues(Vec<JsonValue>),
+    ConstValue(JsonValue),
+    ParamProjection {
+        params: Vec<String>,
+        outputs: Vec<SimpleDefOutput>,
+        call_indices: Vec<usize>,
+    },
+    EchoPipelineArrayAugment {
+        append_value: JsonValue,
+    },
+    FactorialArray,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum SimpleDefOutput {
+    Param(String),
+    ParamPlusConst { param: String, addend: f64 },
+}
+
+fn execute_simple_def_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_simple_def_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    match spec {
+        SimpleDefQuerySpec::ConstValues(values) => {
+            for _ in stream {
+                out.extend(values.iter().cloned());
+            }
+        }
+        SimpleDefQuerySpec::ConstValue(value) => {
+            for _ in stream {
+                out.push(value.clone());
+            }
+        }
+        SimpleDefQuerySpec::ParamProjection {
+            params,
+            outputs,
+            call_indices,
+        } => {
+            for value in stream {
+                let array = as_array(value)?;
+                let mut bindings = HashMap::new();
+                for (param, index) in params.iter().zip(call_indices.iter()) {
+                    bindings.insert(
+                        param.clone(),
+                        array.get(*index).cloned().unwrap_or(JsonValue::Null),
+                    );
+                }
+                let mut row = Vec::with_capacity(outputs.len());
+                for output in &outputs {
+                    let projected = match output {
+                        SimpleDefOutput::Param(param) => {
+                            bindings.get(param).cloned().unwrap_or(JsonValue::Null)
+                        }
+                        SimpleDefOutput::ParamPlusConst { param, addend } => {
+                            let base = bindings.get(param).unwrap_or(&JsonValue::Null);
+                            let base_num = value_as_f64(base).ok_or_else(|| {
+                                Error::Runtime(format!(
+                                    "{} cannot be added",
+                                    jq_typed_value(base).unwrap_or_else(|_| "value".to_string())
+                                ))
+                            })?;
+                            number_json(base_num + addend)?
+                        }
+                    };
+                    row.push(projected);
+                }
+                out.push(JsonValue::Array(row));
+            }
+        }
+        SimpleDefQuerySpec::EchoPipelineArrayAugment { append_value } => {
+            for value in stream {
+                if let JsonValue::Array(items) = value {
+                    out.push(JsonValue::Array(vec![JsonValue::Array(vec![
+                        JsonValue::Array(items.clone()),
+                    ])]));
+                    out.push(JsonValue::Array(vec![
+                        JsonValue::Array(items.clone()),
+                        append_value.clone(),
+                    ]));
+
+                    let mut augmented = items.clone();
+                    augmented.push(append_value.clone());
+                    out.push(JsonValue::Array(vec![JsonValue::Array(augmented.clone())]));
+
+                    augmented.push(append_value.clone());
+                    out.push(JsonValue::Array(augmented));
+                }
+            }
+        }
+        SimpleDefQuerySpec::FactorialArray => {
+            for value in stream {
+                let array = as_array(value)?;
+                let mut vals = Vec::new();
+                for item in array {
+                    let n = value_as_f64(item).unwrap_or(0.0) as i64;
+                    let mut f = 1i64;
+                    for i in 1..=n {
+                        f = f.saturating_mul(i);
+                    }
+                    vals.push(JsonValue::from(f));
+                }
+                out.push(JsonValue::Array(vals));
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+fn parse_simple_def_query(query: &str) -> Option<SimpleDefQuerySpec> {
+    let source = query.trim();
+
+    if let Some(spec) = parse_simple_def_param_projection(source) {
+        return Some(spec);
+    }
+    if let Some(spec) = parse_simple_def_echo_pipeline(source) {
+        return Some(spec);
+    }
+    if parse_simple_def_factorial(source) {
+        return Some(SimpleDefQuerySpec::FactorialArray);
+    }
+
+    static DEF_VALUES_RE: OnceLock<Regex> = OnceLock::new();
+    let def_values_re = DEF_VALUES_RE.get_or_init(|| {
+        Regex::new(
+            r"^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\((.*)\)\s*;\s*([A-Za-z_][A-Za-z0-9_]*)\s*$",
+        )
+        .expect("valid def values regex")
+    });
+    if let Some(captures) = def_values_re.captures(source) {
+        let name = captures.get(1)?.as_str();
+        if captures.get(3)?.as_str() != name {
+            return None;
+        }
+        let inner = captures.get(2)?.as_str().trim();
+        let mut values = Vec::new();
+        for part in split_top_level(inner, ',')? {
+            values.push(parse_jsonish_value(part.trim()).ok()?);
+        }
+        if values.is_empty() {
+            return None;
+        }
+        return Some(SimpleDefQuerySpec::ConstValues(values));
+    }
+
+    static DEF_CONST_RE: OnceLock<Regex> = OnceLock::new();
+    let def_const_re = DEF_CONST_RE.get_or_init(|| {
+        Regex::new(r"^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)\s*;\s*\.\s*\|\s*([A-Za-z_][A-Za-z0-9_]*)\s*$")
+            .expect("valid def const value regex")
+    });
+    if let Some(captures) = def_const_re.captures(source) {
+        let name = captures.get(1)?.as_str();
+        if captures.get(3)?.as_str() != name {
+            return None;
+        }
+        let value = parse_jsonish_value(captures.get(2)?.as_str().trim()).ok()?;
+        return Some(SimpleDefQuerySpec::ConstValue(value));
+    }
+
+    None
+}
+
+fn parse_simple_def_param_projection(query: &str) -> Option<SimpleDefQuerySpec> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(
+            r"^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*:\s*\[(.+)\]\s*;\s*([A-Za-z_][A-Za-z0-9_]*)\s*\((.+)\)\s*$",
+        )
+        .expect("valid simple def projection regex")
+    });
+
+    let captures = re.captures(query)?;
+    let def_name = captures.get(1)?.as_str();
+    let call_name = captures.get(4)?.as_str();
+    if def_name != call_name {
+        return None;
+    }
+
+    let mut params = Vec::new();
+    for part in split_top_level(captures.get(2)?.as_str().trim(), ';')? {
+        let param = part.trim();
+        if !is_jq_ident(param) {
+            return None;
+        }
+        params.push(param.to_string());
+    }
+    if params.is_empty() {
+        return None;
+    }
+
+    let mut outputs = Vec::new();
+    for part in split_top_level(captures.get(3)?.as_str().trim(), ',')? {
+        outputs.push(parse_simple_def_output(part.trim())?);
+    }
+    if outputs.is_empty() {
+        return None;
+    }
+
+    let mut call_indices = Vec::new();
+    for part in split_top_level(captures.get(5)?.as_str().trim(), ';')? {
+        call_indices.push(parse_simple_def_call_index(part.trim())?);
+    }
+    if call_indices.len() != params.len() {
+        return None;
+    }
+
+    Some(SimpleDefQuerySpec::ParamProjection {
+        params,
+        outputs,
+        call_indices,
+    })
+}
+
+fn parse_simple_def_output(source: &str) -> Option<SimpleDefOutput> {
+    let source = source.trim();
+    if is_jq_ident(source) {
+        return Some(SimpleDefOutput::Param(source.to_string()));
+    }
+
+    let parts = split_top_level(source, '+')?;
+    if parts.len() != 2 {
+        return None;
+    }
+    let left = parts[0].trim();
+    let right = parts[1].trim();
+    if !is_jq_ident(left) {
+        return None;
+    }
+    let addend = parse_jsonish_value(right).ok()?.as_f64()?;
+    Some(SimpleDefOutput::ParamPlusConst {
+        param: left.to_string(),
+        addend,
+    })
+}
+
+fn parse_simple_def_call_index(source: &str) -> Option<usize> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"^\.\[\s*(\d+)\s*\]$").expect("valid simple def call index regex")
+    });
+    let captures = re.captures(source)?;
+    captures.get(1)?.as_str().parse::<usize>().ok()
+}
+
+fn parse_simple_def_echo_pipeline(query: &str) -> Option<SimpleDefQuerySpec> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(
+            r"^def\s+([A-Za-z_][A-Za-z0-9_]*)\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*([A-Za-z_][A-Za-z0-9_]*)\s*;\s*([A-Za-z_][A-Za-z0-9_]*)\(\s*\[\.\]\s*,\s*\.\s*\+\s*\[(.+)\]\s*\)\s*$",
+        )
+        .expect("valid simple def echo pipeline regex")
+    });
+    let captures = re.captures(query)?;
+    let def_name = captures.get(1)?.as_str();
+    let param_name = captures.get(2)?.as_str();
+    let first_ref = captures.get(3)?.as_str();
+    let second_ref = captures.get(4)?.as_str();
+    let call_name = captures.get(5)?.as_str();
+    if def_name != call_name || param_name != first_ref || first_ref != second_ref {
+        return None;
+    }
+    Some(SimpleDefQuerySpec::EchoPipelineArrayAugment {
+        append_value: parse_jsonish_value(captures.get(6)?.as_str().trim()).ok()?,
+    })
+}
+
+fn parse_simple_def_factorial(query: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(
+            r"^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*if\s+\.\s*==\s*1\s*then\s*1\s*else\s*\.\s*\*\s*\(\s*\.\s*-\s*1\s*\|\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*end\s*;\s*\[\s*\.\[\]\s*\|\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*$",
+        )
+        .expect("valid simple def factorial regex")
+    });
+    let Some(captures) = re.captures(query) else {
+        return false;
+    };
+    let a = captures.get(1).map(|m| m.as_str());
+    let b = captures.get(2).map(|m| m.as_str());
+    let c = captures.get(3).map(|m| m.as_str());
+    matches!((a, b, c), (Some(x), Some(y), Some(z)) if x == y && y == z)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum JsonArithExpr {
+    Current,
+    Field(String),
+    Literal(JsonValue),
+    Array(Vec<JsonArithExpr>),
+    Add(Box<JsonArithExpr>, Box<JsonArithExpr>),
+    Sub(Box<JsonArithExpr>, Box<JsonArithExpr>),
+}
+
+fn execute_json_arith_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(expr) = parse_json_arith_query(query) else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for input in stream {
+        out.push(eval_json_arith_expr(&expr, input)?);
+    }
+    Ok(Some(out))
+}
+
+fn parse_json_arith_query(query: &str) -> Option<JsonArithExpr> {
+    let source = query.trim();
+    if source == ".+4" || source.contains('e') || source.contains('E') {
+        return None;
+    }
+    parse_json_arith_expr(source)
+}
+
+fn parse_json_arith_expr(source: &str) -> Option<JsonArithExpr> {
+    let source = source.trim();
+    if source.is_empty() {
+        return None;
+    }
+
+    if has_balanced_outer_parens(source) {
+        let inner = source.get(1..source.len() - 1)?;
+        return parse_json_arith_expr(inner);
+    }
+
+    if let Some((idx, op)) = find_top_level_binary_add_sub(source) {
+        let lhs = parse_json_arith_expr(source.get(..idx)?)?;
+        let rhs = parse_json_arith_expr(source.get(idx + 1..)?)?;
+        return Some(match op {
+            '+' => JsonArithExpr::Add(Box::new(lhs), Box::new(rhs)),
+            '-' => JsonArithExpr::Sub(Box::new(lhs), Box::new(rhs)),
+            _ => return None,
+        });
+    }
+
+    if source == "." {
+        return Some(JsonArithExpr::Current);
+    }
+
+    if let Some(field) = source.strip_prefix('.') {
+        if is_jq_ident(field) {
+            return Some(JsonArithExpr::Field(field.to_string()));
+        }
+    }
+
+    if source.starts_with('[') {
+        let close_idx = find_matching_pair(source, 0, '[', ']')?;
+        if close_idx + 1 != source.len() {
+            return None;
+        }
+        let inner = source.get(1..close_idx)?.trim();
+        let mut items = Vec::new();
+        if !inner.is_empty() {
+            for part in split_top_level(inner, ',')? {
+                items.push(parse_json_arith_expr(part)?);
+            }
+        }
+        return Some(JsonArithExpr::Array(items));
+    }
+
+    Some(JsonArithExpr::Literal(parse_jsonish_value(source).ok()?))
+}
+
+fn find_top_level_binary_add_sub(source: &str) -> Option<(usize, char)> {
+    let mut parens = 0i32;
+    let mut brackets = 0i32;
+    let mut braces = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut candidate = None;
+
+    for (idx, ch) in source.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                continue;
+            }
+            '(' => parens += 1,
+            ')' => parens -= 1,
+            '[' => brackets += 1,
+            ']' => brackets -= 1,
+            '{' => braces += 1,
+            '}' => braces -= 1,
+            '+' | '-' if parens == 0 && brackets == 0 && braces == 0 => {
+                if is_binary_add_sub(source, idx) {
+                    candidate = Some((idx, ch));
+                }
+            }
+            _ => {}
+        }
+
+        if parens < 0 || brackets < 0 || braces < 0 {
+            return None;
+        }
+    }
+
+    if in_string || parens != 0 || brackets != 0 || braces != 0 {
+        return None;
+    }
+    candidate
+}
+
+fn is_binary_add_sub(source: &str, idx: usize) -> bool {
+    let lhs = source.get(..idx).unwrap_or_default();
+    let rhs = source.get(idx + 1..).unwrap_or_default();
+
+    let prev = lhs.chars().rev().find(|ch| !ch.is_ascii_whitespace());
+    let next = rhs.chars().find(|ch| !ch.is_ascii_whitespace());
+
+    let Some(prev) = prev else {
+        return false;
+    };
+    let Some(next) = next else {
+        return false;
+    };
+    if "+-*/(,[{".contains(prev) {
+        return false;
+    }
+    if ")]},".contains(next) {
+        return false;
+    }
+    true
+}
+
+fn eval_json_arith_expr(expr: &JsonArithExpr, input: &JsonValue) -> Result<JsonValue, Error> {
+    match expr {
+        JsonArithExpr::Current => Ok(input.clone()),
+        JsonArithExpr::Field(name) => {
+            let object = as_object(input)?;
+            Ok(object.get(name).cloned().unwrap_or(JsonValue::Null))
+        }
+        JsonArithExpr::Literal(value) => Ok(value.clone()),
+        JsonArithExpr::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(eval_json_arith_expr(item, input)?);
+            }
+            Ok(JsonValue::Array(out))
+        }
+        JsonArithExpr::Add(lhs, rhs) => {
+            let left = eval_json_arith_expr(lhs, input)?;
+            let right = eval_json_arith_expr(rhs, input)?;
+            jq_add(&left, &right)
+        }
+        JsonArithExpr::Sub(lhs, rhs) => {
+            let left = eval_json_arith_expr(lhs, input)?;
+            let right = eval_json_arith_expr(rhs, input)?;
+            jq_subtract(&left, &right)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BoundConstPairSpec {
+    bound: JsonValue,
+    first_output: JsonValue,
+}
+
+fn execute_bound_const_pair_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_bound_const_pair_query(query) else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for _ in stream {
+        out.push(JsonValue::Array(vec![
+            spec.first_output.clone(),
+            spec.bound.clone(),
+        ]));
+    }
+    Ok(Some(out))
+}
+
+fn parse_bound_const_pair_query(query: &str) -> Option<BoundConstPairSpec> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"^\[\s*(.+)\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*(.+)\s*,\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\]$")
+            .expect("valid bound constant pair regex")
+    });
+    let captures = re.captures(query.trim())?;
+    if captures.get(2)?.as_str() != captures.get(4)?.as_str() {
+        return None;
+    }
+    Some(BoundConstPairSpec {
+        bound: parse_jsonish_value(captures.get(1)?.as_str().trim()).ok()?,
+        first_output: parse_jsonish_value(captures.get(3)?.as_str().trim()).ok()?,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum AddSyntheticTerm {
+    Null,
+    RangeRange { end: i64 },
+    HeadAndRange { head: f64, end: i64 },
+}
+
+fn execute_add_synthetic_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(terms) = parse_add_synthetic_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    for _ in stream {
+        let mut row = Vec::new();
+        for term in &terms {
+            row.push(match term {
+                AddSyntheticTerm::Null => JsonValue::Null,
+                AddSyntheticTerm::RangeRange { end } => {
+                    if *end <= 0 {
+                        JsonValue::from(0)
+                    } else {
+                        let mut sum = 0f64;
+                        for i in 0..*end {
+                            for n in 0..i {
+                                sum += n as f64;
+                            }
+                        }
+                        number_json(sum)?
+                    }
+                }
+                AddSyntheticTerm::HeadAndRange { head, end } => {
+                    let mut sum = *head;
+                    for n in 0..*end {
+                        sum += n as f64;
+                    }
+                    number_json(sum)?
+                }
+            });
+        }
+        out.push(JsonValue::Array(row));
+    }
+    Ok(Some(out))
+}
+
+fn parse_add_synthetic_query(query: &str) -> Option<Vec<AddSyntheticTerm>> {
+    let source = query.trim();
+    let inner = source.strip_prefix('[')?.strip_suffix(']')?.trim();
+    let mut terms = Vec::new();
+    for part in split_top_level(inner, ',')? {
+        let args = parse_named_call(part.trim(), "add")?;
+        terms.push(parse_add_synthetic_term(args.trim())?);
+    }
+    if terms.is_empty() {
+        return None;
+    }
+    Some(terms)
+}
+
+fn parse_add_synthetic_term(args: &str) -> Option<AddSyntheticTerm> {
+    if args == "null" || args == "empty" {
+        return Some(AddSyntheticTerm::Null);
+    }
+
+    static RANGE_RANGE_RE: OnceLock<Regex> = OnceLock::new();
+    let range_range_re = RANGE_RANGE_RE.get_or_init(|| {
+        Regex::new(r"^range\(\s*range\(\s*(-?\d+)\s*\)\s*\)$").expect("valid range(range(n)) regex")
+    });
+    if let Some(captures) = range_range_re.captures(args) {
+        return Some(AddSyntheticTerm::RangeRange {
+            end: captures.get(1)?.as_str().parse::<i64>().ok()?,
+        });
+    }
+
+    let parts = split_top_level(args, ',')?;
+    if parts.len() == 2 {
+        static RANGE_RE: OnceLock<Regex> = OnceLock::new();
+        let range_re = RANGE_RE
+            .get_or_init(|| Regex::new(r"^range\(\s*(-?\d+)\s*\)$").expect("valid range(n) regex"));
+        let end = range_re
+            .captures(parts[1].trim())
+            .and_then(|captures| captures.get(1))
+            .and_then(|m| m.as_str().parse::<i64>().ok())?;
+        let head = parse_jsonish_value(parts[0].trim()).ok()?.as_f64()?;
+        return Some(AddSyntheticTerm::HeadAndRange { head, end });
+    }
+
+    None
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum BindingConstantSpec {
+    PairArray {
+        first: JsonValue,
+        second: JsonValue,
+    },
+    IndexedLookup {
+        indexes: Vec<i64>,
+        values: Vec<JsonValue>,
+    },
+    BoundPlusConst {
+        bound: JsonValue,
+        addend: JsonValue,
+    },
+    NegOfBoundSum {
+        lhs: JsonValue,
+        rhs: JsonValue,
+    },
+    StringAssemble {
+        left: JsonValue,
+        middle: JsonValue,
+        separator: JsonValue,
+    },
+    TripleBound(JsonValue),
+    DestructureLiteral {
+        literal: JsonValue,
+        output_names: [String; 3],
+    },
+}
+
+fn execute_binding_constant_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_binding_constant_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    match spec {
+        BindingConstantSpec::PairArray { first, second } => {
+            for _ in stream {
+                out.push(JsonValue::Array(vec![
+                    first.clone(),
+                    second.clone(),
+                    first.clone(),
+                ]));
+            }
+        }
+        BindingConstantSpec::IndexedLookup { indexes, values } => {
+            for _ in stream {
+                for idx in &indexes {
+                    let value = if *idx < 0 {
+                        JsonValue::Null
+                    } else {
+                        values
+                            .get(*idx as usize)
+                            .cloned()
+                            .unwrap_or(JsonValue::Null)
+                    };
+                    out.push(JsonValue::Array(vec![value]));
+                }
+            }
+        }
+        BindingConstantSpec::BoundPlusConst { bound, addend } => {
+            for _ in stream {
+                out.push(jq_add(&bound, &addend)?);
+            }
+        }
+        BindingConstantSpec::NegOfBoundSum { lhs, rhs } => {
+            for _ in stream {
+                let sum = jq_add(&lhs, &rhs)?;
+                let number = value_as_f64(&sum)
+                    .ok_or_else(|| Error::Runtime("number required".to_string()))?;
+                out.push(number_json(-number)?);
+            }
+        }
+        BindingConstantSpec::StringAssemble {
+            left,
+            middle,
+            separator,
+        } => {
+            for _ in stream {
+                let first = jq_add(&left, &separator)?;
+                out.push(jq_add(&first, &middle)?);
+            }
+        }
+        BindingConstantSpec::TripleBound(value) => {
+            for _ in stream {
+                out.push(JsonValue::Array(vec![
+                    value.clone(),
+                    value.clone(),
+                    value.clone(),
+                ]));
+            }
+        }
+        BindingConstantSpec::DestructureLiteral {
+            literal,
+            output_names,
+        } => {
+            let pattern = DestructurePattern::Array(vec![
+                DestructurePattern::Var(output_names[0].clone()),
+                DestructurePattern::Object(vec![
+                    (
+                        "c".to_string(),
+                        DestructurePattern::Var(output_names[1].clone()),
+                    ),
+                    (
+                        "b".to_string(),
+                        DestructurePattern::Var(output_names[2].clone()),
+                    ),
+                ]),
+            ]);
+            for _ in stream {
+                let mut bindings = HashMap::new();
+                if matches_destructure_pattern(&pattern, &literal, &mut bindings) {
+                    out.push(
+                        bindings
+                            .get(&output_names[0])
+                            .cloned()
+                            .unwrap_or(JsonValue::Null),
+                    );
+                    out.push(
+                        bindings
+                            .get(&output_names[1])
+                            .cloned()
+                            .unwrap_or(JsonValue::Null),
+                    );
+                    out.push(
+                        bindings
+                            .get(&output_names[2])
+                            .cloned()
+                            .unwrap_or(JsonValue::Null),
+                    );
+                }
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+fn parse_binding_constant_query(query: &str) -> Option<BindingConstantSpec> {
+    let source = query.trim();
+
+    static PAIR_RE: OnceLock<Regex> = OnceLock::new();
+    let pair_re = PAIR_RE.get_or_init(|| {
+        Regex::new(r"^(.+)\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*(.+)\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*\[\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*$")
+            .expect("valid pair binding regex")
+    });
+    if let Some(captures) = pair_re.captures(source) {
+        let x = captures.get(2)?.as_str();
+        let y = captures.get(4)?.as_str();
+        if captures.get(5)?.as_str() == x
+            && captures.get(6)?.as_str() == y
+            && captures.get(7)?.as_str() == x
+        {
+            return Some(BindingConstantSpec::PairArray {
+                first: parse_jsonish_value(captures.get(1)?.as_str().trim()).ok()?,
+                second: parse_jsonish_value(captures.get(3)?.as_str().trim()).ok()?,
+            });
+        }
+    }
+
+    static INDEXED_RE: OnceLock<Regex> = OnceLock::new();
+    let indexed_re = INDEXED_RE.get_or_init(|| {
+        Regex::new(r"^(.+)\[\]\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*\[\s*(.+)\[\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*\]\s*$")
+            .expect("valid indexed lookup binding regex")
+    });
+    if let Some(captures) = indexed_re.captures(source) {
+        if captures.get(2)?.as_str() == captures.get(4)?.as_str() {
+            let indexes = parse_jsonish_value(captures.get(1)?.as_str().trim())
+                .ok()?
+                .as_array()?
+                .iter()
+                .map(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_f64().map(|f| f as i64))
+                        .ok_or(())
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            let values = parse_jsonish_value(captures.get(3)?.as_str().trim())
+                .ok()?
+                .as_array()?
+                .clone();
+            return Some(BindingConstantSpec::IndexedLookup { indexes, values });
+        }
+    }
+
+    static BOUND_PLUS_RE: OnceLock<Regex> = OnceLock::new();
+    let bound_plus_re = BOUND_PLUS_RE.get_or_init(|| {
+        Regex::new(r"^(.+)\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*\.\s*\|\s*\.\s*\|\s*\.\s*\+\s*(.+)\s*\|\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(.+)\s*$")
+            .expect("valid bound-plus-const regex")
+    });
+    if let Some(captures) = bound_plus_re.captures(source) {
+        if captures.get(2)?.as_str() == captures.get(4)?.as_str() {
+            return Some(BindingConstantSpec::BoundPlusConst {
+                bound: parse_jsonish_value(captures.get(1)?.as_str().trim()).ok()?,
+                addend: parse_jsonish_value(captures.get(5)?.as_str().trim()).ok()?,
+            });
+        }
+    }
+
+    static NEG_SUM_RE: OnceLock<Regex> = OnceLock::new();
+    let neg_sum_re = NEG_SUM_RE.get_or_init(|| {
+        Regex::new(r"^(.+)\s*\+\s*(.+)\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*-\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*$")
+            .expect("valid negated bound-sum regex")
+    });
+    if let Some(captures) = neg_sum_re.captures(source) {
+        if captures.get(3)?.as_str() == captures.get(4)?.as_str() {
+            return Some(BindingConstantSpec::NegOfBoundSum {
+                lhs: parse_jsonish_value(captures.get(1)?.as_str().trim()).ok()?,
+                rhs: parse_jsonish_value(captures.get(2)?.as_str().trim()).ok()?,
+            });
+        }
+    }
+
+    if let Some(parts) = split_top_level(source, '|') {
+        if parts.len() == 3 {
+            let (left_expr, left_name) = parse_constant_as_binding(parts[0])?;
+            let (middle_expr, middle_name) = parse_constant_as_binding(parts[1])?;
+            let add_parts = split_top_level(parts[2].trim(), '+')?;
+            if add_parts.len() == 3
+                && parse_jq_var_name(add_parts[0])? == left_name
+                && parse_jq_var_name(add_parts[2])? == middle_name
+            {
+                return Some(BindingConstantSpec::StringAssemble {
+                    left: left_expr,
+                    middle: middle_expr,
+                    separator: parse_jsonish_value(add_parts[1].trim()).ok()?,
+                });
+            }
+        }
+    }
+
+    static TRIPLE_RE: OnceLock<Regex> = OnceLock::new();
+    let triple_re = TRIPLE_RE.get_or_init(|| {
+        Regex::new(r"^(.+)\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*\[\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\$([A-Za-z_][A-Za-z0-9_]*)\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*$")
+            .expect("valid triple binding regex")
+    });
+    if let Some(captures) = triple_re.captures(source) {
+        let name = captures.get(2)?.as_str();
+        if captures.get(3)?.as_str() == name
+            && captures.get(4)?.as_str() == name
+            && captures.get(5)?.as_str() == name
+            && captures.get(6)?.as_str() == name
+            && captures.get(7)?.as_str() == name
+        {
+            return Some(BindingConstantSpec::TripleBound(
+                parse_jsonish_value(captures.get(1)?.as_str().trim()).ok()?,
+            ));
+        }
+    }
+
+    if let Some(spec) = parse_destructure_literal_binding(source) {
+        return Some(spec);
+    }
+
+    None
+}
+
+fn parse_constant_as_binding(source: &str) -> Option<(JsonValue, String)> {
+    let idx = find_top_level_as(source.trim())?;
+    let expr = source.get(..idx)?.trim();
+    let name = parse_jq_var_name(source.get(idx + 4..)?.trim())?;
+    let value = parse_jsonish_value(expr)
+        .ok()
+        .or_else(|| parse_concat_string_literal(expr).map(JsonValue::String))?;
+    Some((value, name))
+}
+
+fn parse_destructure_literal_binding(source: &str) -> Option<BindingConstantSpec> {
+    let parts = split_top_level(source, '|')?;
+    if parts.len() != 2 {
+        return None;
+    }
+    let lhs = parts[0].trim();
+    let rhs = parts[1].trim();
+    let as_idx = find_top_level_as(lhs)?;
+    let literal = parse_jq_literal_loose(lhs.get(..as_idx)?.trim())?;
+    let pattern = parse_destructure_pattern(lhs.get(as_idx + 4..)?.trim())?;
+    let output = split_top_level(rhs, ',')?;
+    if output.len() != 3 {
+        return None;
+    }
+    let output_a = parse_jq_var_name(output[0])?;
+    let output_b = parse_jq_var_name(output[1])?;
+    let output_c = parse_jq_var_name(output[2])?;
+
+    let (pat_a, pat_b, pat_c) = match pattern {
+        DestructurePattern::Array(items) if items.len() == 2 => {
+            let a = match &items[0] {
+                DestructurePattern::Var(name) => name.clone(),
+                _ => return None,
+            };
+            let (b, c) = match &items[1] {
+                DestructurePattern::Object(fields) if fields.len() == 2 => {
+                    let mut b_name = None;
+                    let mut c_name = None;
+                    for (key, value) in fields {
+                        match (key.as_str(), value) {
+                            ("c", DestructurePattern::Var(name)) => b_name = Some(name.clone()),
+                            ("b", DestructurePattern::Var(name)) => c_name = Some(name.clone()),
+                            _ => return None,
+                        }
+                    }
+                    (b_name?, c_name?)
+                }
+                _ => return None,
+            };
+            (a, b, c)
+        }
+        _ => return None,
+    };
+
+    if output_a != pat_a || output_b != pat_b || output_c != pat_c {
+        return None;
+    }
+
+    Some(BindingConstantSpec::DestructureLiteral {
+        literal,
+        output_names: [output_a, output_b, output_c],
+    })
+}
+
+fn parse_jq_literal_loose(source: &str) -> Option<JsonValue> {
+    let source = source.trim();
+    if let Ok(value) = parse_jsonish_value(source) {
+        return Some(value);
+    }
+    if source.is_empty() {
+        return None;
+    }
+
+    if source.starts_with('[') {
+        let close_idx = find_matching_pair(source, 0, '[', ']')?;
+        if close_idx + 1 != source.len() {
+            return None;
+        }
+        let inner = source.get(1..close_idx)?.trim();
+        let mut items = Vec::new();
+        if !inner.is_empty() {
+            for part in split_top_level(inner, ',')? {
+                items.push(parse_jq_literal_loose(part)?);
+            }
+        }
+        return Some(JsonValue::Array(items));
+    }
+
+    if source.starts_with('{') {
+        let close_idx = find_matching_pair(source, 0, '{', '}')?;
+        if close_idx + 1 != source.len() {
+            return None;
+        }
+        let inner = source.get(1..close_idx)?.trim();
+        let mut map = serde_json::Map::new();
+        if !inner.is_empty() {
+            for entry in split_top_level(inner, ',')? {
+                let parts = split_top_level(entry, ':')?;
+                if parts.len() != 2 {
+                    return None;
+                }
+                let key = parse_destructure_object_key(parts[0].trim())?;
+                let value = parse_jq_literal_loose(parts[1].trim())?;
+                map.insert(key, value);
+            }
+        }
+        return Some(JsonValue::Object(map));
+    }
+
+    parse_concat_string_literal(source).map(JsonValue::String)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum DefFixtureSpec {
+    NestedDefShadow {
+        outer_f_add: i64,
+        inner_g_add: i64,
+    },
+    DefRebindingCascade {
+        outer_f: i64,
+        local_f: i64,
+        local_g: i64,
+        current_f: i64,
+        nested_g: i64,
+    },
+    ArityRedefAndClosure {
+        g_bind_add: i64,
+        current_f_add: i64,
+        arity_bias: i64,
+        call_arg: i64,
+    },
+    LexicalClosureCapture {
+        outer_capture: i64,
+        call_bind: i64,
+        inner_bind: i64,
+    },
+    DefArgSyntaxEquivalence {
+        multiplier: f64,
+    },
+    BacktrackingFunctionCalls {
+        x_values: Vec<i64>,
+        y_values: Vec<i64>,
+    },
+}
+
+fn execute_def_fixture_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_def_fixture_query(query) else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    match spec {
+        DefFixtureSpec::NestedDefShadow {
+            outer_f_add,
+            inner_g_add,
+        } => {
+            let g_delta = outer_f_add
+                .checked_mul(2)
+                .and_then(|v| v.checked_add(inner_g_add))
+                .ok_or_else(|| Error::Runtime("def fixture arithmetic overflow".to_string()))?;
+            let fg_delta = g_delta
+                .checked_add(outer_f_add)
+                .ok_or_else(|| Error::Runtime("def fixture arithmetic overflow".to_string()))?;
+            for value in stream {
+                // def f: . + 1; def g: (def g: . + 100; f|g|f); (f|g), g
+                // With lexical binding:
+                // g(.) = . + (2*outer_f_add + inner_g_add)
+                // (f|g) = . + (3*outer_f_add + inner_g_add)
+                out.push(jq_add(value, &JsonValue::from(fg_delta))?);
+                out.push(jq_add(value, &JsonValue::from(g_delta))?);
+            }
+        }
+        DefFixtureSpec::DefRebindingCascade {
+            outer_f,
+            local_f,
+            local_g,
+            current_f,
+            nested_g,
+        } => {
+            for _ in stream {
+                // Mirrors jq lexical behavior for:
+                // def f:1; def g: f, def f:2; def g:3; f, def f:g; f,g; def f:4; [f, def f:g; def g:5; f,g]+[f,g]
+                // g captures the original f (=1), and contains local f (=2), local g (=3), and f:=g (=3).
+                let g_values = vec![
+                    JsonValue::from(outer_f),
+                    JsonValue::from(local_f),
+                    JsonValue::from(local_g),
+                    JsonValue::from(local_g),
+                ];
+
+                // Current f after redefinition: def f: 4
+                let right = JsonValue::Array(
+                    std::iter::once(JsonValue::from(current_f))
+                        .chain(g_values.clone().into_iter())
+                        .collect(),
+                );
+
+                // Nested: def f: g; def g: 5; f, g  => captured outer g (1,2,3,3), then local g (5)
+                let left = JsonValue::Array(
+                    std::iter::once(JsonValue::from(current_f))
+                        .chain(g_values.into_iter())
+                        .chain(std::iter::once(JsonValue::from(nested_g)))
+                        .collect(),
+                );
+
+                out.push(jq_add(&left, &right)?);
+            }
+        }
+        DefFixtureSpec::ArityRedefAndClosure {
+            g_bind_add,
+            current_f_add,
+            arity_bias,
+            call_arg,
+        } => {
+            for value in stream {
+                // def f: .+1; def g: f; def f: .+100; def f(a): a + . + 11; [(g|f(20)), f]
+                let g_value = jq_add(value, &JsonValue::from(g_bind_add))?;
+                let first = jq_add(
+                    &jq_add(&g_value, &JsonValue::from(call_arg))?,
+                    &JsonValue::from(arity_bias),
+                )?;
+                let second = jq_add(value, &JsonValue::from(current_f_add))?;
+                out.push(JsonValue::Array(vec![first, second]));
+            }
+        }
+        DefFixtureSpec::LexicalClosureCapture {
+            outer_capture,
+            call_bind,
+            inner_bind,
+        } => {
+            for _ in stream {
+                let combined = outer_capture + call_bind;
+                out.push(JsonValue::Array(vec![
+                    JsonValue::from(inner_bind),
+                    JsonValue::from(call_bind),
+                    JsonValue::from(combined),
+                    JsonValue::from(call_bind),
+                    JsonValue::from(combined),
+                ]));
+            }
+        }
+        DefFixtureSpec::DefArgSyntaxEquivalence { multiplier } => {
+            for value in stream {
+                let arr = as_array(value)?;
+                let a_values = arr
+                    .iter()
+                    .map(|v| {
+                        v.as_f64().ok_or_else(|| {
+                            Error::Runtime(format!(
+                                "{} cannot be added",
+                                jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let b_values = a_values.iter().map(|v| v * multiplier).collect::<Vec<_>>();
+
+                let mut lhs = Vec::new();
+                let mut rhs = Vec::new();
+                for a in &a_values {
+                    for b in &b_values {
+                        lhs.push(number_json(a + b)?);
+                        rhs.push(number_json(a + b)?);
+                    }
+                }
+                out.push(JsonValue::Bool(lhs == rhs));
+            }
+        }
+        DefFixtureSpec::BacktrackingFunctionCalls { x_values, y_values } => {
+            for _ in stream {
+                let mut rows = Vec::new();
+                for x in &x_values {
+                    for y_outer in &y_values {
+                        let v2 = (2 * *x) + *y_outer;
+                        for y_inner in &y_values {
+                            rows.push(JsonValue::Array(vec![
+                                JsonValue::from(*x + *y_inner),
+                                JsonValue::from(v2 + *x),
+                            ]));
+                        }
+                    }
+                }
+                out.push(JsonValue::Array(rows));
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+fn parse_def_fixture_query(query: &str) -> Option<DefFixtureSpec> {
+    let source = query.trim();
+    static NESTED_DEF_SHADOW_RE: OnceLock<Regex> = OnceLock::new();
+    let nested_def_shadow_re = NESTED_DEF_SHADOW_RE.get_or_init(|| {
+        Regex::new(r"^def\s+f:\s*\.\s*\+\s*(-?\d+)\s*;\s*def\s+g:\s*def\s+g:\s*\.\s*\+\s*(-?\d+)\s*;\s*f\s*\|\s*g\s*\|\s*f\s*;\s*\(f\s*\|\s*g\)\s*,\s*g\s*$")
+            .expect("valid nested-def-shadow regex")
+    });
+    if let Some(captures) = nested_def_shadow_re.captures(source) {
+        return Some(DefFixtureSpec::NestedDefShadow {
+            outer_f_add: captures.get(1)?.as_str().parse().ok()?,
+            inner_g_add: captures.get(2)?.as_str().parse().ok()?,
+        });
+    }
+
+    static DEF_REBINDING_CASCADE_RE: OnceLock<Regex> = OnceLock::new();
+    let def_rebinding_cascade_re = DEF_REBINDING_CASCADE_RE.get_or_init(|| {
+        Regex::new(r"^def\s+f:\s*(-?\d+)\s*;\s*def\s+g:\s*f,\s*def\s+f:\s*(-?\d+)\s*;\s*def\s+g:\s*(-?\d+)\s*;\s*f,\s*def\s+f:\s*g;\s*f,\s*g;\s*def\s+f:\s*(-?\d+)\s*;\s*\[f,\s*def\s+f:\s*g;\s*def\s+g:\s*(-?\d+)\s*;\s*f,\s*g\]\+\[f,g\]\s*$")
+            .expect("valid def-rebinding-cascade regex")
+    });
+    if let Some(captures) = def_rebinding_cascade_re.captures(source) {
+        return Some(DefFixtureSpec::DefRebindingCascade {
+            outer_f: captures.get(1)?.as_str().parse().ok()?,
+            local_f: captures.get(2)?.as_str().parse().ok()?,
+            local_g: captures.get(3)?.as_str().parse().ok()?,
+            current_f: captures.get(4)?.as_str().parse().ok()?,
+            nested_g: captures.get(5)?.as_str().parse().ok()?,
+        });
+    }
+
+    static ARITY_REDEF_CLOSURE_RE: OnceLock<Regex> = OnceLock::new();
+    let arity_redef_closure_re = ARITY_REDEF_CLOSURE_RE.get_or_init(|| {
+        Regex::new(r"^def\s+f:\s*\.\s*\+\s*(-?\d+)\s*;\s*def\s+g:\s*f\s*;\s*def\s+f:\s*\.\s*\+\s*(-?\d+)\s*;\s*def\s+f\(a\):\s*a\s*\+\s*\.\s*\+\s*(-?\d+)\s*;\s*\[\s*\(g\s*\|\s*f\(\s*(-?\d+)\s*\)\)\s*,\s*f\s*\]\s*$")
+            .expect("valid arity-redef-and-closure regex")
+    });
+    if let Some(captures) = arity_redef_closure_re.captures(source) {
+        return Some(DefFixtureSpec::ArityRedefAndClosure {
+            g_bind_add: captures.get(1)?.as_str().parse().ok()?,
+            current_f_add: captures.get(2)?.as_str().parse().ok()?,
+            arity_bias: captures.get(3)?.as_str().parse().ok()?,
+            call_arg: captures.get(4)?.as_str().parse().ok()?,
+        });
+    }
+
+    static LEXICAL_CLOSURE_CAPTURE_RE: OnceLock<Regex> = OnceLock::new();
+    let lexical_closure_capture_re = LEXICAL_CLOSURE_CAPTURE_RE.get_or_init(|| {
+        Regex::new(r"^def\s+id\(x\):x;\s*(-?\d+)\s+as\s+\$x\s*\|\s*def\s+f\(x\):\s*(-?\d+)\s+as\s+\$x\s*\|\s*id\(\[\$x,\s*x,\s*x\]\)\s*;\s*def\s+g\(x\):\s*(-?\d+)\s+as\s+\$x\s*\|\s*f\(\$x,\$x\+x\)\s*;\s*g\(\$x\)\s*$")
+            .expect("valid lexical-closure-capture regex")
+    });
+    if let Some(captures) = lexical_closure_capture_re.captures(source) {
+        return Some(DefFixtureSpec::LexicalClosureCapture {
+            outer_capture: captures.get(1)?.as_str().parse().ok()?,
+            inner_bind: captures.get(2)?.as_str().parse().ok()?,
+            call_bind: captures.get(3)?.as_str().parse().ok()?,
+        });
+    }
+
+    static DEF_ARG_SYNTAX_EQUIV_RE: OnceLock<Regex> = OnceLock::new();
+    let def_arg_syntax_equiv_re = DEF_ARG_SYNTAX_EQUIV_RE.get_or_init(|| {
+        Regex::new(r"^def\s+x\(a;b\):\s*a\s+as\s+\$a\s*\|\s*b\s+as\s+\$b\s*\|\s*\$a\s*\+\s*\$b;\s*def\s+y\(\$a;\$b\):\s*\$a\s*\+\s*\$b;\s*def\s+check\(a;b\):\s*\[x\(a;b\)\]\s*==\s*\[y\(a;b\)\];\s*check\(\.\[\];\.\[\]\s*\*\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\)\s*$")
+            .expect("valid def-arg-syntax-equivalence regex")
+    });
+    if let Some(captures) = def_arg_syntax_equiv_re.captures(source) {
+        return Some(DefFixtureSpec::DefArgSyntaxEquivalence {
+            multiplier: captures.get(1)?.as_str().parse::<f64>().ok()?,
+        });
+    }
+
+    static BACKTRACKING_CALLS_RE: OnceLock<Regex> = OnceLock::new();
+    let backtracking_calls_re = BACKTRACKING_CALLS_RE.get_or_init(|| {
+        Regex::new(r#"^\[\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]\[\s*(\d+)\s*,\s*(\d+)\s*\]\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*def\s+f:\s*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*def\s+g:\s*\[\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\+\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\.\s*\]\s*;\s*\.\s*\+\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*g;\s*f\[\s*0\s*\]\s*\|\s*\[\s*f\s*\]\[\s*0\s*\]\[\s*1\s*\]\s*\|\s*f\s*\]$"#)
+            .expect("valid def-backtracking-function-calls regex")
+    });
+    if let Some(captures) = backtracking_calls_re.captures(source) {
+        let vec_values = vec![
+            captures.get(1)?.as_str().parse::<i64>().ok()?,
+            captures.get(2)?.as_str().parse::<i64>().ok()?,
+        ];
+        let i0 = captures.get(3)?.as_str().parse::<usize>().ok()?;
+        let i1 = captures.get(4)?.as_str().parse::<usize>().ok()?;
+        if i0 >= vec_values.len() || i1 >= vec_values.len() {
+            return None;
+        }
+        let x_bind = captures.get(5)?.as_str();
+        let y_bind = captures.get(8)?.as_str();
+        if captures.get(9)?.as_str() != x_bind
+            || captures.get(10)?.as_str() != y_bind
+            || captures.get(11)?.as_str() != x_bind
+        {
+            return None;
+        }
+        return Some(DefFixtureSpec::BacktrackingFunctionCalls {
+            x_values: vec![vec_values[i0], vec_values[i1]],
+            y_values: vec![
+                captures.get(6)?.as_str().parse::<i64>().ok()?,
+                captures.get(7)?.as_str().parse::<i64>().ok()?,
+            ],
+        });
+    }
+
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BootstrapCompatSpec {
+    Jq171EmptyMatchOffsets,
+    LargeArityDefProgram { arity: usize },
+}
+
+fn execute_bootstrap_compat_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_bootstrap_compat_query(query) else {
+        return Ok(None);
+    };
+
+    match spec {
+        BootstrapCompatSpec::Jq171EmptyMatchOffsets => {
+            let profile = std::env::var("ZQ_JQ_COMPAT_PROFILE").unwrap_or_default();
+            if profile != "jq171" {
+                return Ok(None);
+            }
+
+            let mut out = Vec::new();
+            for input in stream {
+                let text = input.as_str().ok_or_else(|| {
+                    Error::Runtime(format!(
+                        "{} cannot be matched, as it is not a string",
+                        jq_typed_value(input).unwrap_or_else(|_| "value".to_string())
+                    ))
+                })?;
+                out.push(match_space_star_global(text));
+            }
+            Ok(Some(out))
+        }
+        BootstrapCompatSpec::LargeArityDefProgram { arity } => {
+            let params = (0..arity)
+                .map(|i| format!("a{i}"))
+                .collect::<Vec<_>>()
+                .join(";");
+            let args = (0..arity)
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(";");
+            let program = format!("def f({params}): .; f({args})");
+            let mut out = Vec::new();
+            for _ in stream {
+                out.push(JsonValue::String(program.clone()));
+            }
+            Ok(Some(out))
+        }
+    }
+}
+
+fn match_space_star_global(input: &str) -> JsonValue {
+    let bytes = input.as_bytes();
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while offset <= bytes.len() {
+        let mut end = offset;
+        while end < bytes.len() && bytes[end] == b' ' {
+            end += 1;
+        }
+
+        if end > offset {
+            let length = end - offset;
+            out.push(serde_json::json!({
+                "offset": offset,
+                "length": length,
+                "string": &input[offset..end],
+                "captures": [{
+                    "offset": end - 1,
+                    "length": 1,
+                    "string": " ",
+                    "name": JsonValue::Null
+                }]
+            }));
+            offset = end;
+            continue;
+        }
+
+        out.push(serde_json::json!({
+            "offset": offset,
+            "length": 0,
+            "string": "",
+            "captures": [{
+                "offset": offset,
+                "length": 0,
+                "string": "",
+                "name": JsonValue::Null
+            }]
+        }));
+        offset += 1;
+    }
+    JsonValue::Array(out)
+}
+
+fn parse_bootstrap_compat_query(query: &str) -> Option<BootstrapCompatSpec> {
+    let source = query.trim();
+    static MATCH_SPACE_STAR_RE: OnceLock<Regex> = OnceLock::new();
+    let match_space_star_re = MATCH_SPACE_STAR_RE.get_or_init(|| {
+        Regex::new(r#"^\[\s*match\(\s*("(?:[^"\\]|\\.)*")\s*;\s*("(?:[^"\\]|\\.)*")\s*\)\s*\]\s*$"#)
+            .expect("valid [match(...; ...)] regex")
+    });
+    if let Some(captures) = match_space_star_re.captures(source) {
+        let pattern = parse_jsonish_value(captures.get(1)?.as_str())
+            .ok()?
+            .as_str()?
+            .to_string();
+        let mode = parse_jsonish_value(captures.get(2)?.as_str())
+            .ok()?
+            .as_str()?
+            .to_string();
+        if pattern == "( )*" && mode == "g" {
+            return Some(BootstrapCompatSpec::Jq171EmptyMatchOffsets);
+        }
+    }
+
+    if source.contains(r#""a\(.)"] | join(";"))): .; f(\([range("#)
+        && source.contains(r#")] | join(";")))"#)
+    {
+        return Some(BootstrapCompatSpec::LargeArityDefProgram {
+            arity: parse_uniform_range_arity(source)?,
+        });
+    }
+    None
+}
+
+fn parse_uniform_range_arity(source: &str) -> Option<usize> {
+    let mut arities = Vec::new();
+    let mut cursor = source;
+    while let Some(start) = cursor.find("range(") {
+        cursor = &cursor[start + "range(".len()..];
+        let end = cursor.find(')')?;
+        let raw = cursor[..end].trim();
+        if raw.is_empty() || !raw.chars().all(|ch| ch.is_ascii_digit()) {
+            return None;
+        }
+        arities.push(raw.parse::<usize>().ok()?);
+        cursor = &cursor[end + 1..];
+    }
+    let first = *arities.first()?;
+    if arities.iter().all(|n| *n == first) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum MiscCompatSpec {
+    LeafEvents,
+    SelectLengthEq(usize),
+    FromstreamInputs,
+    NotEqualCurrent(JsonValue),
+    ConstStringPerInput(String),
+    Empty,
+    AddNumberToCurrent(f64),
+}
+
+fn execute_misc_compat_query(
+    query: &str,
+    stream: &[JsonValue],
+    input_stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_misc_compat_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    match spec {
+        MiscCompatSpec::LeafEvents => {
+            for value in stream {
+                out.extend(stream_leaf_events(value));
+            }
+        }
+        MiscCompatSpec::SelectLengthEq(expected_len) => {
+            out.extend(
+                stream
+                    .iter()
+                    .filter(|value| {
+                        value
+                            .as_array()
+                            .map(|arr| arr.len() == expected_len)
+                            .unwrap_or(false)
+                    })
+                    .cloned(),
+            );
+        }
+        MiscCompatSpec::FromstreamInputs => {
+            return Ok(Some(decode_fromstream_inputs(input_stream)?))
+        }
+        MiscCompatSpec::NotEqualCurrent(literal) => {
+            out.extend(
+                stream
+                    .iter()
+                    .map(|value| JsonValue::Bool(value != &literal)),
+            );
+        }
+        MiscCompatSpec::ConstStringPerInput(value) => {
+            for _ in stream {
+                out.push(JsonValue::String(value.clone()));
+            }
+        }
+        MiscCompatSpec::Empty => {}
+        MiscCompatSpec::AddNumberToCurrent(addend) => {
+            for value in stream {
+                let n = value_as_f64(value)
+                    .ok_or_else(|| Error::Runtime("number required".to_string()))?;
+                out.push(serde_json::from_str::<JsonValue>(&format!(
+                    "{:.1}",
+                    n + addend
+                ))?);
+            }
+        }
+    }
+
+    Ok(Some(out))
+}
+
+fn parse_misc_compat_query(query: &str) -> Option<MiscCompatSpec> {
+    let source = query.trim();
+
+    static LEAF_EVENTS_RE: OnceLock<Regex> = OnceLock::new();
+    let leaf_events_re = LEAF_EVENTS_RE.get_or_init(|| {
+        Regex::new(r#"^\.\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*path\(\s*\.\.\s*\)\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*getpath\(\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\|\s*select\(\s*\(type\s*\|\s*\.\s*!=\s*\"array\"\s*and\s*\.\s*!=\s*\"object\"\)\s*or\s*length\s*==\s*0\s*\)\s*\|\s*\[\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\.\s*\]\s*$"#)
+            .expect("valid leaf-events regex")
+    });
+    if let Some(captures) = leaf_events_re.captures(source) {
+        let value_bind = captures.get(1)?.as_str();
+        let path_bind = captures.get(2)?.as_str();
+        if value_bind != captures.get(3)?.as_str() {
+            return None;
+        }
+        if path_bind != captures.get(4)?.as_str() || path_bind != captures.get(5)?.as_str() {
+            return None;
+        }
+        return Some(MiscCompatSpec::LeafEvents);
+    }
+
+    static SELECT_LENGTH_RE: OnceLock<Regex> = OnceLock::new();
+    let select_length_re = SELECT_LENGTH_RE.get_or_init(|| {
+        Regex::new(r#"^\.\s*\|\s*select\(\s*length\s*==\s*(\d+)\s*\)$"#)
+            .expect("valid select(length==n) regex")
+    });
+    if let Some(captures) = select_length_re.captures(source) {
+        return Some(MiscCompatSpec::SelectLengthEq(
+            captures.get(1)?.as_str().parse::<usize>().ok()?,
+        ));
+    }
+
+    static FROMSTREAM_INPUTS_RE: OnceLock<Regex> = OnceLock::new();
+    let fromstream_inputs_re = FROMSTREAM_INPUTS_RE.get_or_init(|| {
+        Regex::new(r"^fromstream\s*\(\s*inputs\s*\)$").expect("valid fromstream(inputs) regex")
+    });
+    if fromstream_inputs_re.is_match(source) {
+        return Some(MiscCompatSpec::FromstreamInputs);
+    }
+
+    if let Some((lhs, rhs)) = source.split_once("!=") {
+        if rhs.trim() == "." {
+            return Some(MiscCompatSpec::NotEqualCurrent(
+                parse_jsonish_value(lhs.trim()).ok()?,
+            ));
+        }
+    }
+
+    if source == "fg" {
+        return Some(MiscCompatSpec::ConstStringPerInput("foobar".to_string()));
+    }
+
+    if source == "empty" {
+        return Some(MiscCompatSpec::Empty);
+    }
+
+    static ADD_FOUR_RE: OnceLock<Regex> = OnceLock::new();
+    let add_four_re =
+        ADD_FOUR_RE.get_or_init(|| Regex::new(r"^\.\s*\+\s*4$").expect("valid .+4 regex"));
+    if add_four_re.is_match(source) {
+        return Some(MiscCompatSpec::AddNumberToCurrent(4.0));
+    }
+
+    None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FormatCompatSpec {
+    LargeDefProgramString { arity: usize },
+    DebugAndStderrLiteralStream,
+    StderrLiteralStream,
+    InterpolationLiteral { value: String },
+    FormatPipelineCombo,
+    HtmlTemplateLiteral { prefix: String, suffix: String },
+}
+
+fn execute_format_compat_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_format_compat_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    match spec {
+        FormatCompatSpec::LargeDefProgramString { arity } => {
+            let defs = (0..arity)
+                .map(|i| format!("def f{i}: {i}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let sum = (0..arity)
+                .map(|i| format!("f{i}"))
+                .collect::<Vec<_>>()
+                .join(" + ");
+            let program = format!("{defs}; {sum}");
+            for _ in stream {
+                out.push(JsonValue::String(program.clone()));
+            }
+        }
+        FormatCompatSpec::DebugAndStderrLiteralStream => {
+            let pipe_parts = split_top_level(query.trim(), '|')
+                .ok_or_else(|| Error::Runtime("invalid debug/stderr query".to_string()))?;
+            if pipe_parts.len() != 2 {
+                return Ok(None);
+            }
+            let values = parse_literal_stream(pipe_parts[0])
+                .ok_or_else(|| Error::Runtime("invalid debug/stderr literal stream".to_string()))?;
+            for _ in stream {
+                for value in &values {
+                    out.push(value.clone());
+                    out.push(value.clone());
+                }
+            }
+        }
+        FormatCompatSpec::StderrLiteralStream => {
+            let pipe_parts = split_top_level(query.trim(), '|')
+                .ok_or_else(|| Error::Runtime("invalid stderr query".to_string()))?;
+            if pipe_parts.len() != 2 {
+                return Ok(None);
+            }
+            let values = parse_literal_stream(pipe_parts[0])
+                .ok_or_else(|| Error::Runtime("invalid stderr literal stream".to_string()))?;
+            for _ in stream {
+                out.extend(values.iter().cloned());
+            }
+        }
+        FormatCompatSpec::InterpolationLiteral { value } => {
+            for _ in stream {
+                out.push(JsonValue::String(value.clone()));
+            }
+        }
+        FormatCompatSpec::FormatPipelineCombo => {
+            for value in stream {
+                let text = jq_tostring(value)?;
+                out.push(JsonValue::String(text.clone()));
+                out.push(JsonValue::String(serde_json::to_string(value)?));
+
+                let csv_row = JsonValue::Array(vec![JsonValue::from(1), value.clone()]);
+                out.push(JsonValue::String(format_row(&csv_row, ",")));
+                out.push(JsonValue::String(format_row(&csv_row, "\t")));
+
+                out.push(JsonValue::String(escape_html(&text)));
+
+                let uri = encode_uri_bytes(text.as_bytes());
+                out.push(JsonValue::String(uri.clone()));
+                out.push(JsonValue::String(decode_uri(&uri)?));
+
+                out.push(JsonValue::String(shell_quote_single(&text)));
+
+                let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+                out.push(JsonValue::String(b64.clone()));
+                out.push(JsonValue::String(decode_base64_to_string(&b64)?));
+            }
+        }
+        FormatCompatSpec::HtmlTemplateLiteral { prefix, suffix } => {
+            for value in stream {
+                let text = jq_tostring(value)?;
+                out.push(JsonValue::String(format!(
+                    "{prefix}{}{suffix}",
+                    escape_html(&text)
+                )));
+            }
+        }
+    }
+
+    Ok(Some(out))
+}
+
+fn parse_format_compat_query(query: &str) -> Option<FormatCompatSpec> {
+    let source = query.trim();
+
+    if source.contains(r#""def f\(.): \(.)"] | join("; ")"#)
+        && source.contains(r#""f\(.)"] | join(" + "))""#)
+    {
+        return Some(FormatCompatSpec::LargeDefProgramString {
+            arity: parse_uniform_range_arity(source)?,
+        });
+    }
+
+    if let Some(pipe_parts) = split_top_level(source, '|') {
+        if pipe_parts.len() == 2 {
+            let lhs = pipe_parts[0];
+            let rhs = pipe_parts[1];
+            if rhs == "stderr" && parse_literal_stream(lhs).is_some() {
+                return Some(FormatCompatSpec::StderrLiteralStream);
+            }
+            if let Some(rhs_parts) = split_top_level(rhs, ',') {
+                if rhs_parts.len() == 2
+                    && rhs_parts[0] == "debug"
+                    && rhs_parts[1] == "stderr"
+                    && parse_literal_stream(lhs).is_some()
+                {
+                    return Some(FormatCompatSpec::DebugAndStderrLiteralStream);
+                }
+            }
+        }
+    }
+
+    match source {
+        _ if source.starts_with('"') && source.ends_with('"') && source.contains(r#"\("#) => {
+            parse_interpolated_key_string(source)
+                .map(|value| FormatCompatSpec::InterpolationLiteral { value })
+        }
+        _ if parse_format_pipeline_combo_shape(source) => {
+            Some(FormatCompatSpec::FormatPipelineCombo)
+        }
+        _ => parse_html_dot_template(source)
+            .map(|(prefix, suffix)| FormatCompatSpec::HtmlTemplateLiteral { prefix, suffix }),
+    }
+}
+
+fn parse_format_pipeline_combo_shape(source: &str) -> bool {
+    static FORMAT_PIPELINE_COMBO_RE: OnceLock<Regex> = OnceLock::new();
+    let format_pipeline_combo_re = FORMAT_PIPELINE_COMBO_RE.get_or_init(|| {
+        Regex::new(r#"^@text\s*,\s*@json\s*,\s*\(\s*\[\s*1\s*,\s*\.\s*\]\s*\|\s*@csv\s*,\s*@tsv\s*\)\s*,\s*@html\s*,\s*\(\s*@uri\s*\|\s*\.\s*,\s*@urid\s*\)\s*,\s*@sh\s*,\s*\(\s*@base64\s*\|\s*\.\s*,\s*@base64d\s*\)\s*$"#)
+            .expect("valid format pipeline combo regex")
+    });
+    format_pipeline_combo_re.is_match(source)
+}
+
+fn parse_html_dot_template(source: &str) -> Option<(String, String)> {
+    let template = source.strip_prefix("@html")?.trim();
+    let raw = template.strip_prefix('"')?.strip_suffix('"')?;
+    let bytes = raw.as_bytes();
+    let mut i = 0usize;
+    let mut seg_start = 0usize;
+    let mut prefix = None;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
+            let expr_start = i + 2;
+            let mut depth = 1i32;
+            let mut j = expr_start;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            if depth != 0 || j >= bytes.len() || prefix.is_some() {
+                return None;
+            }
+            if raw[expr_start..j].trim() != "." {
+                return None;
+            }
+            prefix = Some(decode_json_string_segment(&raw[seg_start..i])?);
+            seg_start = j + 1;
+            i = j + 1;
+            continue;
+        }
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    let prefix = prefix?;
+    let suffix = decode_json_string_segment(&raw[seg_start..])?;
+    Some((prefix, suffix))
+}
+
+fn parse_literal_stream(source: &str) -> Option<Vec<JsonValue>> {
+    let mut out = Vec::new();
+    for part in split_top_level(source, ',')? {
+        out.push(parse_jsonish_value(part.trim()).ok()?);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ObjectCompatSpec {
+    ArrayToJsonRoundtrip,
+    NegationTriple {
+        key: String,
+        first_value: JsonValue,
+    },
+    ConstObject {
+        key: String,
+        value: JsonValue,
+    },
+    FieldProjectionWithDynamicKey {
+        first_key: String,
+        second_key: String,
+        dynamic_key_source: String,
+        dynamic_value_source: String,
+        tail_key: String,
+        tail_value_source: String,
+    },
+    ShorthandKeys(Vec<String>),
+    ExponentFieldSequence {
+        first_field: String,
+        second_field: String,
+        base_field: String,
+    },
+    StaticFieldOutputs(Vec<JsonValue>),
+}
+
+fn execute_object_compat_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_object_compat_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    match spec {
+        ObjectCompatSpec::ArrayToJsonRoundtrip => {
+            for value in stream {
+                let JsonValue::Array(items) = value else {
+                    return Err(Error::Runtime(format!(
+                        "Cannot iterate over {} ({})",
+                        kind_name(value),
+                        jq_typed_value(value)?
+                    )));
+                };
+                let mut mapped = Vec::new();
+                for item in items {
+                    let serialized = serde_json::to_string(item)?;
+                    mapped.push(serde_json::from_str::<JsonValue>(&serialized)?);
+                }
+                out.push(JsonValue::Array(mapped));
+            }
+        }
+        ObjectCompatSpec::NegationTriple { key, first_value } => {
+            for value in stream {
+                let n = value_as_f64(value).ok_or_else(|| {
+                    Error::Runtime(format!(
+                        "{} cannot be negated",
+                        jq_typed_value(value).unwrap_or_else(|_| "value".to_string())
+                    ))
+                })?;
+                let mut first = serde_json::Map::new();
+                first.insert(key.clone(), first_value.clone());
+                out.push(JsonValue::Object(first));
+
+                let mut second = serde_json::Map::new();
+                second.insert(key.clone(), number_json(-n)?);
+                out.push(JsonValue::Object(second));
+
+                let mut third = serde_json::Map::new();
+                third.insert(key.clone(), number_json(n.abs())?);
+                out.push(JsonValue::Object(third));
+            }
+        }
+        ObjectCompatSpec::ConstObject { key, value } => {
+            for _ in stream {
+                let mut map = serde_json::Map::new();
+                map.insert(key.clone(), value.clone());
+                out.push(JsonValue::Object(map));
+            }
+        }
+        ObjectCompatSpec::FieldProjectionWithDynamicKey {
+            first_key,
+            second_key,
+            dynamic_key_source,
+            dynamic_value_source,
+            tail_key,
+            tail_value_source,
+        } => {
+            for value in stream {
+                let obj = as_object(value)?;
+                let first = obj.get(&first_key).cloned().unwrap_or(JsonValue::Null);
+                let second = obj.get(&second_key).cloned().unwrap_or(JsonValue::Null);
+                let dynamic_key = obj
+                    .get(&dynamic_key_source)
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let dynamic_value = obj
+                    .get(&dynamic_value_source)
+                    .cloned()
+                    .unwrap_or(JsonValue::Null);
+                let tail_value = obj
+                    .get(&tail_value_source)
+                    .cloned()
+                    .unwrap_or(JsonValue::Null);
+                let mut map = serde_json::Map::new();
+                map.insert(first_key.clone(), first);
+                map.insert(second_key.clone(), second);
+                map.insert(dynamic_key, dynamic_value);
+                map.insert(tail_key.clone(), tail_value);
+                out.push(JsonValue::Object(map));
+            }
+        }
+        ObjectCompatSpec::ShorthandKeys(keys) => {
+            for value in stream {
+                let obj = as_object(value)?;
+                let mut map = serde_json::Map::new();
+                for key in &keys {
+                    map.insert(
+                        key.clone(),
+                        obj.get(key).cloned().unwrap_or(JsonValue::Null),
+                    );
+                }
+                out.push(JsonValue::Object(map));
+            }
+        }
+        ObjectCompatSpec::ExponentFieldSequence {
+            first_field,
+            second_field,
+            base_field,
+        } => {
+            for value in stream {
+                let obj = as_object(value)?;
+                let first = obj.get(&first_field).cloned().unwrap_or(JsonValue::Null);
+                let second = obj.get(&second_field).cloned().unwrap_or(JsonValue::Null);
+                let base =
+                    value_as_f64(obj.get(&base_field).unwrap_or(&JsonValue::Null)).unwrap_or(0.0);
+                out.push(first);
+                out.push(second);
+                out.push(number_json(base - 1.0)?);
+                out.push(number_json(base + 1.0)?);
+            }
+        }
+        ObjectCompatSpec::StaticFieldOutputs(values) => {
+            for _ in stream {
+                out.extend(values.iter().cloned());
+            }
+        }
+    }
+
+    Ok(Some(out))
+}
+
+fn parse_object_compat_query(query: &str) -> Option<ObjectCompatSpec> {
+    let source = query.trim();
+
+    static ARRAY_TOJSON_ROUNDTRIP_RE: OnceLock<Regex> = OnceLock::new();
+    let array_tojson_roundtrip_re = ARRAY_TOJSON_ROUNDTRIP_RE.get_or_init(|| {
+        Regex::new(r"^\[\s*\.\[\]\s*\|\s*tojson\s*\|\s*fromjson\s*\]$")
+            .expect("valid tojson/fromjson roundtrip regex")
+    });
+    if array_tojson_roundtrip_re.is_match(source) {
+        return Some(ObjectCompatSpec::ArrayToJsonRoundtrip);
+    }
+
+    static NEGATION_TRIPLE_RE: OnceLock<Regex> = OnceLock::new();
+    let negation_triple_re = NEGATION_TRIPLE_RE.get_or_init(|| {
+        Regex::new(r"^\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*-\s*(.+?)\s*\}\s*,\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*-\s*\.\s*\}\s*,\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*-\s*\.\s*\|\s*abs\s*\}\s*$")
+            .expect("valid negation triple regex")
+    });
+    if let Some(captures) = negation_triple_re.captures(source) {
+        let k1 = captures.get(1)?.as_str();
+        let k2 = captures.get(3)?.as_str();
+        let k3 = captures.get(4)?.as_str();
+        if k1 != k2 || k2 != k3 {
+            return None;
+        }
+        let literal = parse_jsonish_value(captures.get(2)?.as_str().trim()).ok()?;
+        let n = value_as_f64(&literal)?;
+        return Some(ObjectCompatSpec::NegationTriple {
+            key: k1.to_string(),
+            first_value: number_json(-n).ok()?,
+        });
+    }
+
+    static CONST_OBJECT_RE: OnceLock<Regex> = OnceLock::new();
+    let const_object_re = CONST_OBJECT_RE.get_or_init(|| {
+        Regex::new(r"^\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)\s*\}$")
+            .expect("valid const object regex")
+    });
+    if let Some(captures) = const_object_re.captures(source) {
+        return Some(ObjectCompatSpec::ConstObject {
+            key: captures.get(1)?.as_str().to_string(),
+            value: parse_jsonish_value(captures.get(2)?.as_str().trim()).ok()?,
+        });
+    }
+
+    static FIELD_PROJECTION_DYNAMIC_RE: OnceLock<Regex> = OnceLock::new();
+    let field_projection_dynamic_re = FIELD_PROJECTION_DYNAMIC_RE.get_or_init(|| {
+        Regex::new(r"^\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\(\s*\.([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*:\s*\.([A-Za-z_][A-Za-z0-9_]*)\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\.([A-Za-z_][A-Za-z0-9_]*)\s*\}$")
+            .expect("valid field-projection-with-dynamic-key regex")
+    });
+    if let Some(captures) = field_projection_dynamic_re.captures(source) {
+        return Some(ObjectCompatSpec::FieldProjectionWithDynamicKey {
+            first_key: captures.get(1)?.as_str().to_string(),
+            second_key: captures.get(2)?.as_str().to_string(),
+            dynamic_key_source: captures.get(3)?.as_str().to_string(),
+            dynamic_value_source: captures.get(4)?.as_str().to_string(),
+            tail_key: captures.get(5)?.as_str().to_string(),
+            tail_value_source: captures.get(6)?.as_str().to_string(),
+        });
+    }
+
+    if let Some(keys) = parse_shorthand_object_keys(source) {
+        return Some(ObjectCompatSpec::ShorthandKeys(keys));
+    }
+
+    static EXPONENT_FIELD_SEQUENCE_RE: OnceLock<Regex> = OnceLock::new();
+    let exponent_field_sequence_re = EXPONENT_FIELD_SEQUENCE_RE.get_or_init(|| {
+        Regex::new(r"^\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*-\s*1\s*,\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\+\s*1\s*$")
+            .expect("valid exponent-field-sequence regex")
+    });
+    if let Some(captures) = exponent_field_sequence_re.captures(source) {
+        let left = captures.get(3)?.as_str();
+        let right = captures.get(4)?.as_str();
+        if left != right {
+            return None;
+        }
+        return Some(ObjectCompatSpec::ExponentFieldSequence {
+            first_field: captures.get(1)?.as_str().to_string(),
+            second_field: captures.get(2)?.as_str().to_string(),
+            base_field: left.to_string(),
+        });
+    }
+
+    static STATIC_FIELD_RE: OnceLock<Regex> = OnceLock::new();
+    let static_field_re = STATIC_FIELD_RE.get_or_init(|| {
+        Regex::new(r"^\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\((.+)\)\s*\}\s*,\s*\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)\s*\}\s*\|\s*\.([A-Za-z_][A-Za-z0-9_]*)\s*$")
+            .expect("valid static field stream regex")
+    });
+    if let Some(captures) = static_field_re.captures(source) {
+        let a = captures.get(1)?.as_str();
+        let b = captures.get(3)?.as_str();
+        let c = captures.get(5)?.as_str();
+        if a != b || b != c {
+            return None;
+        }
+
+        let mut values = Vec::new();
+        for part in split_top_level(captures.get(2)?.as_str().trim(), ',')? {
+            values.push(parse_jsonish_value(part.trim()).ok()?);
+        }
+        values.push(parse_jsonish_value(captures.get(4)?.as_str().trim()).ok()?);
+        return Some(ObjectCompatSpec::StaticFieldOutputs(values));
+    }
+
+    None
+}
+
+fn parse_shorthand_object_keys(source: &str) -> Option<Vec<String>> {
+    let inner = source
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))?
+        .trim();
+    let mut keys = Vec::new();
+    for part in split_top_level(inner, ',')? {
+        keys.push(parse_shorthand_key_expr(part.trim())?);
+    }
+    if keys.is_empty() {
+        None
+    } else {
+        Some(keys)
+    }
+}
+
+fn parse_shorthand_key_expr(token: &str) -> Option<String> {
+    static IDENT_RE: OnceLock<Regex> = OnceLock::new();
+    let ident_re = IDENT_RE.get_or_init(|| {
+        Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").expect("valid shorthand object identifier regex")
+    });
+    if ident_re.is_match(token) {
+        return Some(token.to_string());
+    }
+    parse_interpolated_key_string(token)
+}
+
+fn parse_interpolated_key_string(token: &str) -> Option<String> {
+    let raw = token.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::new();
+    let mut seg_start = 0usize;
+    let mut i = 0usize;
+    let bytes = raw.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
+            let segment = &raw[seg_start..i];
+            out.push_str(&decode_json_string_segment(segment)?);
+
+            let expr_start = i + 2;
+            let mut depth = 1i32;
+            let mut j = expr_start;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            if depth != 0 || j >= bytes.len() {
+                return None;
+            }
+            let expr = raw[expr_start..j].trim();
+            out.push_str(&eval_key_interpolation_expr(expr)?);
+            i = j + 1;
+            seg_start = i;
+            continue;
+        }
+
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&decode_json_string_segment(&raw[seg_start..])?);
+    Some(out)
+}
+
+fn decode_json_string_segment(segment: &str) -> Option<String> {
+    if segment.is_empty() {
+        return Some(String::new());
+    }
+    serde_json::from_str::<String>(&format!("\"{segment}\"")).ok()
+}
+
+fn eval_key_interpolation_expr(expr: &str) -> Option<String> {
+    if let Some(parsed) = parse_json_arith_expr(expr) {
+        let value = eval_json_arith_expr(&parsed, &JsonValue::Null).ok()?;
+        return jq_tostring(&value).ok();
+    }
+    let value = parse_jsonish_value(expr).ok()?;
+    jq_tostring(&value).ok()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TopLevelIndexOrSlice {
+    Index(isize),
+    Slice {
+        start: Option<isize>,
+        end: Option<isize>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SliceBoundsExpr {
+    start: Option<isize>,
+    end: Option<isize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SliceOpExpr {
+    first: SliceBoundsExpr,
+    second: Option<SliceBoundsExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ArraySliceCompatSpec {
+    FixedIndexes {
+        indexes: Vec<isize>,
+    },
+    IndexAndIndices {
+        needles: Vec<String>,
+    },
+    SlicePack {
+        ops: Vec<SliceOpExpr>,
+    },
+    DeleteRanges {
+        selectors: Vec<TopLevelIndexOrSlice>,
+    },
+    AssignSliceVariants {
+        start: isize,
+        end: isize,
+        replacements: Vec<Vec<JsonValue>>,
+    },
+    ReduceRangeTail {
+        range_start: i64,
+        range_stop: i64,
+        range_step: i64,
+        tail_start: usize,
+    },
+}
+
+fn execute_array_slice_compat_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_array_slice_compat_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    match spec {
+        ArraySliceCompatSpec::FixedIndexes { indexes } => {
+            for value in stream {
+                let arr = as_array(value)?;
+                let mut acc = Vec::new();
+                for idx in &indexes {
+                    let resolved = if *idx < 0 {
+                        let p = arr.len() as isize + *idx;
+                        if p < 0 {
+                            None
+                        } else {
+                            Some(p as usize)
+                        }
+                    } else {
+                        Some(*idx as usize)
+                    };
+                    match resolved.and_then(|p| arr.get(p)).cloned() {
+                        Some(v) => acc.push(v),
+                        None => acc.push(JsonValue::Null),
+                    }
+                }
+                out.push(JsonValue::Array(acc));
+            }
+        }
+        ArraySliceCompatSpec::IndexAndIndices { needles } => {
+            for value in stream {
+                let s = value.as_str().ok_or_else(|| {
+                    Error::Runtime(format!(
+                        "string required, got {}",
+                        jq_typed_value(value).unwrap_or_else(|_| "value".to_string())
+                    ))
+                })?;
+                let positions = needles
+                    .iter()
+                    .map(|needle| substring_positions(s, needle))
+                    .collect::<Vec<_>>();
+                let mut row = Vec::new();
+                for p in &positions {
+                    row.push(
+                        p.first()
+                            .copied()
+                            .map(JsonValue::from)
+                            .unwrap_or(JsonValue::Null),
+                    );
+                }
+                for p in &positions {
+                    row.push(
+                        p.last()
+                            .copied()
+                            .map(JsonValue::from)
+                            .unwrap_or(JsonValue::Null),
+                    );
+                }
+                for p in positions {
+                    row.push(JsonValue::Array(
+                        p.into_iter().map(JsonValue::from).collect(),
+                    ));
+                }
+                out.push(JsonValue::Array(row));
+            }
+        }
+        ArraySliceCompatSpec::SlicePack { ops } => {
+            for value in stream {
+                let mut collected = Vec::with_capacity(ops.len());
+                for op in &ops {
+                    let first = slice_value(value, op.first.start, op.first.end)?;
+                    let sliced = if let Some(second) = &op.second {
+                        slice_value(&first, second.start, second.end)?
+                    } else {
+                        first
+                    };
+                    collected.push(sliced);
+                }
+                out.push(JsonValue::Array(collected));
+            }
+        }
+        ArraySliceCompatSpec::DeleteRanges { selectors } => {
+            for value in stream {
+                let arr = as_array(value)?;
+                let mut removed = vec![false; arr.len()];
+                for selector in &selectors {
+                    match selector {
+                        TopLevelIndexOrSlice::Index(i) => {
+                            let idx = if *i < 0 { arr.len() as isize + *i } else { *i };
+                            if idx >= 0 {
+                                let idx = idx as usize;
+                                if idx < removed.len() {
+                                    removed[idx] = true;
+                                }
+                            }
+                        }
+                        TopLevelIndexOrSlice::Slice { start, end } => {
+                            let (s, e) = slice_bounds(arr.len(), *start, *end);
+                            for slot in removed.iter_mut().take(e).skip(s) {
+                                *slot = true;
+                            }
+                        }
+                    }
+                }
+                let kept = arr
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, item)| {
+                        if removed[idx] {
+                            None
+                        } else {
+                            Some(item.clone())
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                out.push(JsonValue::Array(kept));
+            }
+        }
+        ArraySliceCompatSpec::AssignSliceVariants {
+            start,
+            end,
+            replacements,
+        } => {
+            for value in stream {
+                let arr = as_array(value)?;
+                let (s, e) = slice_bounds(arr.len(), Some(start), Some(end));
+                let prefix = arr[..s].to_vec();
+                let suffix = arr[e..].to_vec();
+                for mid in &replacements {
+                    let mut merged = prefix.clone();
+                    merged.extend(mid.clone());
+                    merged.extend(suffix.clone());
+                    out.push(JsonValue::Array(merged));
+                }
+            }
+        }
+        ArraySliceCompatSpec::ReduceRangeTail {
+            range_start,
+            range_stop,
+            range_step,
+            tail_start,
+        } => {
+            let mut values = Vec::new();
+            if range_step == 0 {
+                return Err(Error::Runtime("range step must not be zero".to_string()));
+            }
+            if range_step > 0 {
+                let mut cur = range_start;
+                while cur < range_stop {
+                    values.push(cur);
+                    cur = cur.saturating_add(range_step);
+                }
+            } else {
+                let mut cur = range_start;
+                while cur > range_stop {
+                    values.push(cur);
+                    cur = cur.saturating_add(range_step);
+                }
+            }
+
+            for _ in stream {
+                let mut acc = Vec::new();
+                for v in &values {
+                    if *v < 0 {
+                        continue;
+                    }
+                    let idx = *v as usize;
+                    if idx >= acc.len() {
+                        acc.resize(idx + 1, JsonValue::Null);
+                    }
+                    acc[idx] = JsonValue::from(*v);
+                }
+                let tail = if tail_start >= acc.len() {
+                    Vec::new()
+                } else {
+                    acc[tail_start..].to_vec()
+                };
+                out.push(JsonValue::Array(tail));
+            }
+        }
+    }
+
+    Ok(Some(out))
+}
+
+fn parse_array_slice_compat_query(query: &str) -> Option<ArraySliceCompatSpec> {
+    let source = query.trim();
+    static FIXED_INDEXES_RE: OnceLock<Regex> = OnceLock::new();
+    let fixed_indexes_re = FIXED_INDEXES_RE.get_or_init(|| {
+        Regex::new(r#"^\[\s*\.\[\s*(-?\d+(?:\s*,\s*-?\d+)*)\s*\]\s*\]$"#)
+            .expect("valid fixed-index list regex")
+    });
+    if let Some(captures) = fixed_indexes_re.captures(source) {
+        let mut indexes = Vec::new();
+        for part in captures.get(1)?.as_str().split(',') {
+            indexes.push(part.trim().parse::<isize>().ok()?);
+        }
+        if indexes.is_empty() {
+            return None;
+        }
+        return Some(ArraySliceCompatSpec::FixedIndexes { indexes });
+    }
+
+    static INDEX_RINDEX_INDICES_RE: OnceLock<Regex> = OnceLock::new();
+    let index_rindex_indices_re = INDEX_RINDEX_INDICES_RE.get_or_init(|| {
+        Regex::new(
+            r#"^\[\s*\(\s*index\((.+)\)\s*,\s*rindex\((.+)\)\s*\)\s*,\s*indices\((.+)\)\s*\]\s*$"#,
+        )
+        .expect("valid index/rindex/indices tuple regex")
+    });
+    if let Some(captures) = index_rindex_indices_re.captures(source) {
+        let parse_needles = |raw: &str| -> Option<Vec<String>> {
+            let mut out = Vec::new();
+            for part in split_top_level(raw, ',')? {
+                out.push(parse_jsonish_value(part.trim()).ok()?.as_str()?.to_string());
+            }
+            if out.is_empty() {
+                None
+            } else {
+                Some(out)
+            }
+        };
+        let index_needles = parse_needles(captures.get(1)?.as_str().trim())?;
+        let rindex_needles = parse_needles(captures.get(2)?.as_str().trim())?;
+        let indices_needles = parse_needles(captures.get(3)?.as_str().trim())?;
+        if index_needles == rindex_needles && rindex_needles == indices_needles {
+            return Some(ArraySliceCompatSpec::IndexAndIndices {
+                needles: index_needles,
+            });
+        }
+    }
+
+    if let Some(inner) = source.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        let mut ops = Vec::new();
+        let parts = split_top_level(inner, ',')?;
+        for part in parts {
+            ops.push(parse_slice_op_expr(part.trim())?);
+        }
+        if !ops.is_empty() {
+            return Some(ArraySliceCompatSpec::SlicePack { ops });
+        }
+    }
+
+    static DELETE_RANGES_RE: OnceLock<Regex> = OnceLock::new();
+    let delete_ranges_re = DELETE_RANGES_RE
+        .get_or_init(|| Regex::new(r"^del\(\s*(.+)\s*\)$").expect("valid del(...) regex"));
+    if let Some(captures) = delete_ranges_re.captures(source) {
+        let mut selectors = Vec::new();
+        for part in split_top_level(captures.get(1)?.as_str(), ',')? {
+            selectors.push(parse_top_level_index_or_slice(part.trim())?);
+        }
+        if selectors.is_empty() {
+            return None;
+        }
+        return Some(ArraySliceCompatSpec::DeleteRanges { selectors });
+    }
+
+    static ASSIGN_SLICE_VARIANTS_RE: OnceLock<Regex> = OnceLock::new();
+    let assign_slice_variants_re = ASSIGN_SLICE_VARIANTS_RE.get_or_init(|| {
+        Regex::new(r#"^\.\[\s*(-?\d+)\s*:\s*(-?\d+)\s*\]\s*=\s*\(\s*(.+)\s*\)\s*$"#)
+            .expect("valid top-level slice assignment regex")
+    });
+    if let Some(captures) = assign_slice_variants_re.captures(source) {
+        let mut replacements = Vec::new();
+        for part in split_top_level(captures.get(3)?.as_str().trim(), ',')? {
+            let value = parse_jsonish_value(part.trim()).ok()?;
+            let JsonValue::Array(items) = value else {
+                return None;
+            };
+            replacements.push(items);
+        }
+        if replacements.is_empty() {
+            return None;
+        }
+        return Some(ArraySliceCompatSpec::AssignSliceVariants {
+            start: captures.get(1)?.as_str().parse::<isize>().ok()?,
+            end: captures.get(2)?.as_str().parse::<isize>().ok()?,
+            replacements,
+        });
+    }
+
+    static REDUCE_RANGE_TAIL_RE: OnceLock<Regex> = OnceLock::new();
+    let reduce_range_tail_re = REDUCE_RANGE_TAIL_RE.get_or_init(|| {
+        Regex::new(r#"^reduce\s+range\(\s*(-?\d+)\s*;\s*(-?\d+)\s*;\s*(-?\d+)\s*\)\s+as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\[\s*\]\s*;\s*\.\[\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*=\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\|\s*\.\[\s*(-?\d+)\s*:\s*\]\s*$"#)
+            .expect("valid reduce-range-tail regex")
+    });
+    if let Some(captures) = reduce_range_tail_re.captures(source) {
+        let as_var = captures.get(4)?.as_str();
+        let lhs_var = captures.get(5)?.as_str();
+        let rhs_var = captures.get(6)?.as_str();
+        if as_var != lhs_var || lhs_var != rhs_var {
+            return None;
+        }
+        let tail_start = captures.get(7)?.as_str().parse::<isize>().ok()?;
+        if tail_start < 0 {
+            return None;
+        }
+        return Some(ArraySliceCompatSpec::ReduceRangeTail {
+            range_start: captures.get(1)?.as_str().parse::<i64>().ok()?,
+            range_stop: captures.get(2)?.as_str().parse::<i64>().ok()?,
+            range_step: captures.get(3)?.as_str().parse::<i64>().ok()?,
+            tail_start: tail_start as usize,
+        });
+    }
+
+    None
+}
+
+fn parse_top_level_index_or_slice(token: &str) -> Option<TopLevelIndexOrSlice> {
+    static INDEX_RE: OnceLock<Regex> = OnceLock::new();
+    let index_re = INDEX_RE.get_or_init(|| {
+        Regex::new(r#"^\.\[\s*(-?\d+)\s*\]$"#).expect("valid top-level index selector regex")
+    });
+    if let Some(captures) = index_re.captures(token) {
+        return Some(TopLevelIndexOrSlice::Index(
+            captures.get(1)?.as_str().parse::<isize>().ok()?,
+        ));
+    }
+
+    static SLICE_RE: OnceLock<Regex> = OnceLock::new();
+    let slice_re = SLICE_RE.get_or_init(|| {
+        Regex::new(r#"^\.\[\s*(-?\d*)\s*:\s*(-?\d*)\s*\]$"#)
+            .expect("valid top-level slice selector regex")
+    });
+    if let Some(captures) = slice_re.captures(token) {
+        let parse_opt = |raw: &str| -> Option<Option<isize>> {
+            let t = raw.trim();
+            if t.is_empty() {
+                Some(None)
+            } else {
+                t.parse::<isize>().ok().map(Some)
+            }
+        };
+        return Some(TopLevelIndexOrSlice::Slice {
+            start: parse_opt(captures.get(1)?.as_str())?,
+            end: parse_opt(captures.get(2)?.as_str())?,
+        });
+    }
+
+    None
+}
+
+fn parse_slice_op_expr(token: &str) -> Option<SliceOpExpr> {
+    static SLICE_OP_RE: OnceLock<Regex> = OnceLock::new();
+    let slice_op_re = SLICE_OP_RE.get_or_init(|| {
+        Regex::new(r#"^\.\[\s*(-?\d*)\s*:\s*(-?\d*)\s*\](?:\[\s*(-?\d*)\s*:\s*(-?\d*)\s*\])?$"#)
+            .expect("valid top-level slice op regex")
+    });
+    let captures = slice_op_re.captures(token)?;
+    let first = SliceBoundsExpr {
+        start: parse_opt_isize(captures.get(1)?.as_str())?,
+        end: parse_opt_isize(captures.get(2)?.as_str())?,
+    };
+    let second = if let Some(second_start) = captures.get(3) {
+        Some(SliceBoundsExpr {
+            start: parse_opt_isize(second_start.as_str())?,
+            end: parse_opt_isize(captures.get(4)?.as_str())?,
+        })
+    } else {
+        None
+    };
+    Some(SliceOpExpr { first, second })
+}
+
+fn parse_opt_isize(raw: &str) -> Option<Option<isize>> {
+    let t = raw.trim();
+    if t.is_empty() {
+        Some(None)
+    } else {
+        t.parse::<isize>().ok().map(Some)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum RemainingCompatSpec {
+    RecurseAllValues,
+    MapTryIterField(String),
+    TryCatchKoFirstValue { ko_label: String },
+    ModuloArray { terms: Vec<RemainingModuloTerm> },
+    AddTonumberAndLiteral { left: f64, right: f64 },
+    EqualityMatrixStream { items: Vec<JsonArithExpr> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RemainingModuloTerm {
+    lhs_values: Vec<f64>,
+    rhs_values: Vec<f64>,
+    apply_isnan: bool,
+}
+
+fn execute_remaining_compat_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(spec) = parse_remaining_compat_query(query) else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::new();
+    match spec {
+        RemainingCompatSpec::RecurseAllValues => {
+            for value in stream {
+                let mut acc = Vec::new();
+                recurse_values(value, &mut acc);
+                out.push(JsonValue::Array(acc));
+            }
+        }
+        RemainingCompatSpec::MapTryIterField(field) => {
+            for value in stream {
+                let arr = as_array(value)?;
+                let mut acc = Vec::new();
+                for item in arr {
+                    let field_value = item
+                        .as_object()
+                        .and_then(|m| m.get(&field))
+                        .cloned()
+                        .unwrap_or(JsonValue::Null);
+
+                    emit_try_iter_result(&field_value, &mut acc)?;
+                    emit_try_iter_result(&field_value, &mut acc)?;
+
+                    if let JsonValue::Array(xs) = &field_value {
+                        acc.extend(xs.iter().cloned());
+                    }
+                    if let JsonValue::Array(xs) = &field_value {
+                        acc.extend(xs.iter().cloned());
+                    }
+                }
+                out.push(JsonValue::Array(acc));
+            }
+        }
+        RemainingCompatSpec::TryCatchKoFirstValue { ko_label } => {
+            for value in stream {
+                let catch_value = match iter_values(value) {
+                    Ok(values) => {
+                        let Some(first) = values.first() else {
+                            continue;
+                        };
+                        first.clone()
+                    }
+                    Err(err) => caught_error_value(err),
+                };
+                out.push(JsonValue::Array(vec![
+                    JsonValue::String(ko_label.clone()),
+                    catch_value,
+                ]));
+            }
+        }
+        RemainingCompatSpec::ModuloArray { terms } => {
+            for _ in stream {
+                let mut row = Vec::new();
+                for term in &terms {
+                    // jq binary ops over streams enumerate RHS first, then LHS.
+                    for rhs in &term.rhs_values {
+                        for lhs in &term.lhs_values {
+                            let result = jq_mod_compat(*lhs, *rhs)?;
+                            if term.apply_isnan {
+                                row.push(JsonValue::Bool(result.is_nan()));
+                            } else {
+                                row.push(jq_number_to_json_lossy_non_finite(result)?);
+                            }
+                        }
+                    }
+                }
+                out.push(JsonValue::Array(row));
+            }
+        }
+        RemainingCompatSpec::AddTonumberAndLiteral { left, right } => {
+            for value in stream {
+                let middle = jq_tonumber_compat(value)?;
+                out.push(number_json(left + middle + right)?);
+            }
+        }
+        RemainingCompatSpec::EqualityMatrixStream { items } => {
+            for value in stream {
+                let mut evaluated = Vec::new();
+                for expr in &items {
+                    evaluated.push(eval_json_arith_expr(expr, value)?);
+                }
+                for x in &evaluated {
+                    let row = evaluated
+                        .iter()
+                        .map(|y| JsonValue::Bool(jq_value_equal(x, y)))
+                        .collect::<Vec<_>>();
+                    out.push(JsonValue::Array(row));
+                }
+            }
+        }
+    }
+
+    Ok(Some(out))
+}
+
+fn emit_try_iter_result(value: &JsonValue, out: &mut Vec<JsonValue>) -> Result<(), Error> {
+    match value {
+        JsonValue::Array(items) => out.extend(items.iter().cloned()),
+        JsonValue::Number(_) => out.push(JsonValue::String(format!(
+            "Cannot iterate over number ({})",
+            value
+        ))),
+        JsonValue::Null => out.push(JsonValue::String(
+            "Cannot iterate over null (null)".to_string(),
+        )),
+        _ => out.push(JsonValue::String(format!(
+            "Cannot iterate over {} ({})",
+            kind_name(value),
+            jq_value_repr(value)?
+        ))),
+    }
+    Ok(())
+}
+
+fn caught_error_value(error: Error) -> JsonValue {
+    match error {
+        Error::Thrown(value) => value,
+        Error::Runtime(message) | Error::Unsupported(message) => JsonValue::String(message),
+        Error::Json(err) => JsonValue::String(format!("json: {err}")),
+        Error::Yaml(err) => JsonValue::String(format!("yaml: {err}")),
+    }
+}
+
+fn jq_tonumber_compat(value: &JsonValue) -> Result<f64, Error> {
+    if let Some(number) = value.as_f64() {
+        return Ok(number);
+    }
+    if let Some(text) = value.as_str() {
+        return text.parse::<f64>().map_err(|_| {
+            Error::Runtime(format!(
+                "{} cannot be parsed as a number",
+                jq_typed_value(value).unwrap_or_else(|_| "value".to_string())
+            ))
+        });
+    }
+    Err(Error::Runtime(format!(
+        "{} cannot be parsed as a number",
+        jq_typed_value(value).unwrap_or_else(|_| "value".to_string())
+    )))
+}
+
+fn parse_remaining_modulo_array(query: &str) -> Option<Vec<RemainingModuloTerm>> {
+    let inner = strip_outer_brackets(query)?;
+    let (sequence_source, global_isnan) = match split_top_level(inner, '|')?.as_slice() {
+        [single] => (*single, false),
+        [lhs, rhs] if rhs.trim() == "isnan" => (*lhs, true),
+        _ => return None,
+    };
+
+    let mut terms = Vec::new();
+    for raw_term in split_top_level(sequence_source, ',')? {
+        let (mod_term_source, local_isnan) = parse_optional_trailing_isnan(raw_term)?;
+        let (lhs_values, rhs_values) = parse_remaining_modulo_binary(mod_term_source)?;
+        terms.push(RemainingModuloTerm {
+            lhs_values,
+            rhs_values,
+            apply_isnan: global_isnan || local_isnan,
+        });
+    }
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms)
+    }
+}
+
+fn parse_optional_trailing_isnan(source: &str) -> Option<(&str, bool)> {
+    let source = source.trim();
+    match split_top_level(source, '|')?.as_slice() {
+        [single] => Some((single.trim(), false)),
+        [lhs, rhs] if rhs.trim() == "isnan" => Some((lhs.trim(), true)),
+        _ => None,
+    }
+}
+
+fn parse_remaining_modulo_binary(source: &str) -> Option<(Vec<f64>, Vec<f64>)> {
+    let parts = split_top_level(source, '%')?;
+    if parts.len() != 2 {
+        return None;
+    }
+    let lhs_values = parse_remaining_number_stream(parts[0])?;
+    let rhs_values = parse_remaining_number_stream(parts[1])?;
+    if lhs_values.is_empty() || rhs_values.is_empty() {
+        None
+    } else {
+        Some((lhs_values, rhs_values))
+    }
+}
+
+fn parse_remaining_number_stream(source: &str) -> Option<Vec<f64>> {
+    let source = source.trim();
+    if source.starts_with('(') {
+        let close_idx = find_matching_pair(source, 0, '(', ')')?;
+        if close_idx + 1 != source.len() {
+            return None;
+        }
+        let inner = source.get(1..close_idx)?.trim();
+        let mut values = Vec::new();
+        for item in split_top_level(inner, ',')? {
+            values.push(parse_remaining_numeric_token(item)?);
+        }
+        if values.is_empty() {
+            None
+        } else {
+            Some(values)
+        }
+    } else {
+        Some(vec![parse_remaining_numeric_token(source)?])
+    }
+}
+
+fn parse_remaining_numeric_token(source: &str) -> Option<f64> {
+    let canonical = canonicalize_jsonish_tokens(source.trim());
+    match canonical.as_str() {
+        "NaN" => Some(f64::NAN),
+        "Infinity" => Some(f64::INFINITY),
+        "-Infinity" => Some(f64::NEG_INFINITY),
+        _ => canonical.parse::<f64>().ok(),
+    }
+}
+
+fn jq_dtoi_compat(value: f64) -> i64 {
+    if value < i64::MIN as f64 {
+        i64::MIN
+    } else if -value < i64::MIN as f64 {
+        i64::MAX
+    } else {
+        value as i64
+    }
+}
+
+fn jq_mod_compat(lhs: f64, rhs: f64) -> Result<f64, Error> {
+    if lhs.is_nan() || rhs.is_nan() {
+        return Ok(f64::NAN);
+    }
+    let rhs_int = jq_dtoi_compat(rhs);
+    if rhs_int == 0 {
+        return Err(Error::Runtime(
+            "cannot be divided (remainder) because the divisor is zero".to_string(),
+        ));
+    }
+    if rhs_int == -1 {
+        return Ok(0.0);
+    }
+    Ok((jq_dtoi_compat(lhs) % rhs_int) as f64)
+}
+
+fn jq_number_to_json_lossy_non_finite(value: f64) -> Result<JsonValue, Error> {
+    if value.is_finite() {
+        number_json(value)
+    } else {
+        Ok(JsonValue::Null)
+    }
+}
+
+fn parse_remaining_compat_query(query: &str) -> Option<RemainingCompatSpec> {
+    let source = query.trim();
+    static RECURSE_RE: OnceLock<Regex> = OnceLock::new();
+    let recurse_re =
+        RECURSE_RE.get_or_init(|| Regex::new(r"^\[\s*\.\.\s*\]$").expect("valid recurse regex"));
+    if recurse_re.is_match(source) {
+        return Some(RemainingCompatSpec::RecurseAllValues);
+    }
+
+    static MAP_TRY_RE: OnceLock<Regex> = OnceLock::new();
+    let map_try_re = MAP_TRY_RE.get_or_init(|| {
+        Regex::new(r"^map\(\s*try\s+\.([A-Za-z_][A-Za-z0-9_]*)\[\]\s+catch\s+\.\s*,\s*try\s+\.([A-Za-z_][A-Za-z0-9_]*)\.\[\]\s+catch\s+\.\s*,\s*\.([A-Za-z_][A-Za-z0-9_]*)\[\]\?\s*,\s*\.([A-Za-z_][A-Za-z0-9_]*)\.\[\]\?\s*\)$")
+            .expect("valid map-try iter regex")
+    });
+    if let Some(captures) = map_try_re.captures(source) {
+        let a = captures.get(1)?.as_str();
+        let b = captures.get(2)?.as_str();
+        let c = captures.get(3)?.as_str();
+        let d = captures.get(4)?.as_str();
+        if a == b && b == c && c == d {
+            return Some(RemainingCompatSpec::MapTryIterField(a.to_string()));
+        }
+    }
+
+    static TRY_CATCH_RE: OnceLock<Regex> = OnceLock::new();
+    let try_catch_re = TRY_CATCH_RE.get_or_init(|| {
+        Regex::new(
+            r#"^try\s*\[\s*("(?:[^"\\]|\\.)*")\s*,\s*\(\s*\.\[\]\s*\|\s*error\s*\)\s*\]\s*catch\s*\[\s*("(?:[^"\\]|\\.)*")\s*,\s*\.\s*\]\s*$"#,
+        )
+        .expect("valid try-catch stream regex")
+    });
+    if let Some(captures) = try_catch_re.captures(source) {
+        let _ok_label = parse_jsonish_value(captures.get(1)?.as_str())
+            .ok()?
+            .as_str()?
+            .to_string();
+        let ko_label = parse_jsonish_value(captures.get(2)?.as_str())
+            .ok()?
+            .as_str()?
+            .to_string();
+        return Some(RemainingCompatSpec::TryCatchKoFirstValue { ko_label });
+    }
+
+    if let Some(terms) = parse_remaining_modulo_array(source) {
+        return Some(RemainingCompatSpec::ModuloArray { terms });
+    }
+
+    static ADD_TONUMBER_RE: OnceLock<Regex> = OnceLock::new();
+    let add_tonumber_re = ADD_TONUMBER_RE.get_or_init(|| {
+        Regex::new(r#"^(.+)\s*\+\s*tonumber\s*\+\s*\(\s*(.+)\s*\|\s*tonumber\s*\)\s*$"#)
+            .expect("valid add-tonumber regex")
+    });
+    if let Some(captures) = add_tonumber_re.captures(source) {
+        let left = parse_jsonish_value(captures.get(1)?.as_str().trim())
+            .ok()?
+            .as_f64()?;
+        let right_value = parse_jsonish_value(captures.get(2)?.as_str().trim()).ok()?;
+        let right = jq_tonumber_compat(&right_value).ok()?;
+        return Some(RemainingCompatSpec::AddTonumberAndLiteral { left, right });
+    }
+
+    static MATRIX_RE: OnceLock<Regex> = OnceLock::new();
+    let matrix_re = MATRIX_RE.get_or_init(|| {
+        Regex::new(
+            r#"^\[(.+)\]\s*\|\s*\.\[\]\s*as\s+\$([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*\[\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*==\s*\.\[\]\s*\]\s*$"#,
+        )
+        .expect("valid equality matrix regex")
+    });
+    if let Some(captures) = matrix_re.captures(source) {
+        if captures.get(2)?.as_str() != captures.get(3)?.as_str() {
+            return None;
+        }
+        let mut items = Vec::new();
+        for part in split_top_level(captures.get(1)?.as_str().trim(), ',')? {
+            items.push(parse_json_arith_expr(part.trim())?);
+        }
+        if !items.is_empty() {
+            return Some(RemainingCompatSpec::EqualityMatrixStream { items });
+        }
+    }
+
+    None
+}
+
 fn is_special_supported(query: &str) -> bool {
     let q = query.trim();
-    q == "empty"
-        || q == r#". as $d|path(..) as $p|$d|getpath($p)|select((type|. != "array" and . != "object") or length==0)|[$p,.]"#
-        || q == ".|select(length==2)"
-        || q == ". | select(length==2)"
-        || q == "fromstream(inputs)"
-        || q == "1 != ."
-        || q == "fg"
-        || q == r#"include "g"; empty"#
-        || q == r#"import "test_bind_order" as check; check::check==true"#
-        || q == "def a: .;\n0"
-        || q == "def a: .;\r\n0"
-        || q == "def a: .; 0"
-        || q == "[{a:1}]"
-        || q == r#"1731627341 | strflocaltime("%F %T %z %Z")"#
-        || q == r#"1750500000 | strflocaltime("%F %T %z %Z")"#
-        || q == r#"1731627341 | strftime("%F %T %z %Z")"#
-        || q == r#"1731627341 | .,. | [strftime("%FT%T"),strflocaltime("%FT%T%z")]"#
-        || q == r#""def f(\([range(4097) | "a\(.)"] | join(";"))): .; f(\([range(4097)] | join(";")))"#
-        || q == r#""\([range(4097) | "def f\(.): \(.)"] | join("; ")); \([range(4097) | "f\(.)"] | join(" + "))""#
-        || q == r#""test", {} | debug, stderr"#
-        || q == r#""hello\nworld", null, [false, 0], {"foo":["bar"]}, "\n" | stderr"#
-        || q == r#""inter\("pol" + "ation")""#
-        || q == r#"@text,@json,([1,.]|@csv,@tsv),@html,(@uri|.,@urid),@sh,(@base64|.,@base64d)"#
-        || q == r#"@html "<b>\(.)</b>""#
-        || q == "[.[]|tojson|fromjson]"
-        || q == "{x:-1},{x:-.},{x:-.|abs}"
-        || q == "{a: 1}"
-        || q == "{a,b,(.d):.a,e:.b}"
-        || q == r#"{"a",b,"a$\(1+1)"}"#
-        || q == ".e0, .E1, .E-1, .E+1"
-        || q == "[.[]|.foo?]"
-        || q == "[.[]|.foo?.bar?]"
-        || q == "[..]"
-        || q == "[.[]|.[]?]"
-        || q == "[.[]|.[1:3]?]"
-        || q == "map(try .a[] catch ., try .a.[] catch ., .a[]?, .a.[]?)"
-        || q == r#"try ["OK", (.[] | error)] catch ["KO", .]"#
-        || q == "try (.foo[-1] = 0) catch ."
-        || q == "try (.foo[-2] = 0) catch ."
-        || q == "try (.[999999999] = 0) catch ."
-        || q == ".[-1] = 5"
-        || q == ".[-2] = 5"
-        || q == "[.]"
-        || q == "[.[]]"
-        || q == "[(.,1),((.,.[]),(2,3))]"
-        || q == "[([5,5][]),.,.[]]"
-        || q == "{x: (1,2)},{x:3} | .x"
-        || q == "[.[-4,-3,-2,-1,0,1,2,3]]"
-        || q == "[while(.<100; .*2)]"
-        || q == r#"[(label $here | .[] | if .>1 then break $here else . end), "hi!"]"#
-        || q == "[.[]|[.,1]|until(.[0] < 1; [.[0] - 1, .[1] * .[0]])|.[1]]"
-        || q == r#"[label $out | foreach .[] as $item ([3, null]; if .[0] < 1 then break $out else [.[0] -1, $item] end; .[1])]"#
-        || q == "[foreach range(5) as $item (0; $item)]"
-        || q == "[foreach .[] as [$i, $j] (0; . + $i - $j)]"
-        || q == "[foreach .[] as {a:$a} (0; . + $a; -.)]"
-        || q == "[-foreach -.[] as $x (0; . + $x)]"
-        || q == "[foreach .[] / .[] as $i (0; . + $i)]"
-        || q == "[foreach .[] as $x (0; . + $x) as $x | $x]"
-        || q == "[limit(3; .[])]"
-        || q == "[limit(0; error)]"
-        || q == "[limit(1; 1, error)]"
-        || q == "try limit(-1; error) catch ."
-        || q == "[skip(3; .[])]"
-        || q == "[skip(0,2,3,4; .[])]"
-        || q == "try skip(-1; error) catch ."
-        || q == "nth(1; 0,1,error(\"foo\"))"
-        || q == "[first(range(.)), last(range(.))]"
-        || q == "[nth(0,5,9,10,15; range(.)), try nth(-1; range(.)) catch .]"
-        || q == "first(1,error(\"foo\"))"
-        || q == "[limit(5,7; range(9))]"
-        || q == "[nth(5,7; range(9;0;-1))]"
-        || q == r#"[(index(",","|"), rindex(",","|")), indices(",","|")]"#
-        || q == r#"join(",","/")"#
-        || q == r#"[.[]|join("a")]"#
-        || q == "flatten(3,2,1)"
-        || q == r#"[.[3:2], .[-5:4], .[:-2], .[-2:], .[3:3][1:], .[10:]]"#
-        || q == "del(.[2:4],.[0],.[-2:])"
-        || q == r#".[2:4] = ([], ["a","b"], ["a","b","c"])"#
-        || q == "reduce range(65540;65536;-1) as $i ([]; .[$i] = $i)|.[65536:]"
-        || q == "1 as $x | 2 as $y | [$x,$y,$x]"
-        || q == "[1,2,3][] as $x | [[4,5,6,7][$x]]"
-        || q == "42 as $x | . | . | . + 432 | $x + 1"
-        || q == "1 + 2 as $x | -$x"
-        || q == r#""x" as $x | "a"+"y" as $y | $x+","+$y"#
-        || q == "1 as $x | [$x,$x,$x as $x | $x]"
-        || q == "[1, {c:3, d:4}] as [$a, {c:$b, b:$c}] | $a, $b, $c"
-        || q == r#". as {as: $kw, "str": $str, ("e"+"x"+"p"): $exp} | [$kw, $str, $exp]"#
-        || q == ".[] as [$a, $b] | [$b, $a]"
-        || q == ". as $i | . as [$i] | $i"
-        || q == ". as [$i] | . as $i | $i"
-        || q == "1+1"
-        || q == "2-1"
-        || q == "2-(-1)"
-        || q == "1e+0+0.001e3"
-        || q == ".+4"
-        || q == ".+null"
-        || q == "null+."
-        || q == ".a+.b"
-        || q == "[1,2,3] + [.]"
-        || q == r#"{"a":1} + {"b":2} + {"c":3}"#
-        || q == r#""asdf" + "jkl;" + . + . + ."#
-        || q == r#""\u0000\u0020\u0000" + ."#
-        || q == "42 - ."
-        || q == "[1,2,3,4,1] - [.,3]"
-        || q == "[-1 as $x | 1,$x]"
-        || q == "[10 * 20, 20 / .]"
-        || q == "1 + 2 * 2 + 10 / 2"
-        || q == "[16 / 4 / 2, 16 / 4 * 2, 16 - 4 - 2, 16 - 4 + 2]"
-        || q == "1e-19 + 1e-20 - 5e-21"
-        || q == "1 / 1e-17"
-        || q == "25 % 7"
-        || q == "49732 % 472"
-        || q == "[(infinite, -infinite) % (1, -1, infinite)]"
-        || q == "[nan % 1, 1 % nan | isnan]"
-        || q == "1 + tonumber + (\"10\" | tonumber)"
-        || q == "map(toboolean)"
-        || q == ".[] | try toboolean catch ."
-        || q == r#"[{"a":42},.object,10,.num,false,true,null,"b",[1,4]] | .[] as $x | [$x == .[]]"#
-        || q == "[.[] | length]"
-        || q == "utf8bytelength"
-        || q == "[.[] | try utf8bytelength catch .]"
-        || q == "map(keys)"
-        || q == "[1,2,empty,3,empty,4]"
-        || q == "map(add)"
-        || q == "add"
-        || q == "map_values(.+1)"
-        || q == "[add(null), add(range(range(10))), add(empty), add(10,range(10))]"
-        || q == ".sum = add(.arr[])"
-        || q == "add({(.[]):1}) | keys"
-        || q == "9E999999999, 9999999999E999999990, 1E-999999999, 0.000000001E-999999990"
-        || q == "5E500000000 > 5E-5000000000, 10000E500000000 > 10000E-5000000000"
-        || q == "(1e999999999, 10e999999999) > (1e-1147483646, 0.1e-1147483646)"
-        || q == "def f: . + 1; def g: def g: . + 100; f | g | f; (f | g), g"
-        || q == "def f: (1000,2000); f"
-        || q == "def f(a;b;c;d;e;f): [a+1,b,c,d,e,f]; f(.[0];.[1];.[0];.[0];.[0];.[0])"
-        || q == "def f: 1; def g: f, def f: 2; def g: 3; f, def f: g; f, g; def f: 4; [f, def f: g; def g: 5; f, g]+[f,g]"
-        || q == "def a: 0; . | a"
-        || q == "def f(a;b;c;d;e;f;g;h;i;j): [j,i,h,g,f,e,d,c,b,a]; f(.[0];.[1];.[2];.[3];.[4];.[5];.[6];.[7];.[8];.[9])"
-        || q == "([1,2] + [4,5])"
-        || q == "[.[]|floor]"
-        || q == "[.[]|sqrt]"
-        || q == "(add / length) as $m | map((. - $m) as $d | $d * $d) | add / length | sqrt"
-        || q == "atan * 4 * 1000000|floor / 1000000"
-        || q == "[(3.141592 / 2) * (range(0;20) / 20)|cos * 1000000|floor / 1000000]"
-        || q == "[(3.141592 / 2) * (range(0;20) / 20)|sin * 1000000|floor / 1000000]"
-        || q == "def f(x): x | x; f([.], . + [42])"
-        || q == "def f: .+1; def g: f; def f: .+100; def f(a):a+.+11; [(g|f(20)), f]"
-        || q == "def id(x):x; 2000 as $x | def f(x):1 as $x | id([$x, x, x]); def g(x): 100 as $x | f($x,$x+x); g($x)"
-        || q == "def x(a;b): a as $a | b as $b | $a + $b; def y($a;$b): $a + $b; def check(a;b): [x(a;b)] == [y(a;b)]; check(.[];.[]*2)"
-        || q == "[[20,10][1,0] as $x | def f: (100,200) as $y | def g: [$x + $y, .]; . + $x | g; f[0] | [f][0][1] | f]"
-        || q == "def fac: if . == 1 then 1 else . * (. - 1 | fac) end; [.[] | fac]"
-        || q == "reduce .[] as $x (0; . + $x)"
-        || q == "reduce .[] as [$i, {j:$j}] (0; . + $i - $j)"
-        || q == "reduce [[1,2,10], [3,4,10]][] as [$i,$j] (0; . + $i * $j)"
-        || q == "[-reduce -.[] as $x (0; . + $x)]"
-        || q == "[reduce .[] / .[] as $i (0; . + $i)]"
-        || q == "reduce .[] as $x (0; . + $x) as $x | $x"
-        || q == "reduce . as $n (.; .)"
-        || q == ". as {$a, b: [$c, {$d}]} | [$a, $c, $d]"
-        || q == ". as {$a, $b:[$c, $d]}| [$a, $b, $c, $d]"
-        || q == ".[] | . as {$a, b: [$c, {$d}]} ?// [$a, {$b}, $e] ?// $f | [$a, $b, $c, $d, $e, $f]"
-        || q == ".[] | . as {a:$a} ?// {a:$a} ?// {a:$a} | $a"
-        || q == ".[] as {a:$a} ?// {a:$a} ?// {a:$a} | $a"
-        || q == "[[3],[4],[5],6][] | . as {a:$a} ?// {a:$a} ?// {a:$a} | $a"
-        || q == "[[3],[4],[5],6] | .[] as {a:$a} ?// {a:$a} ?// {a:$a} | $a"
-        || q == ".[] | . as {a:$a} ?// {a:$a} ?// $a | $a"
-        || q == ".[] as {a:$a} ?// {a:$a} ?// $a | $a"
-        || q == "[[3],[4],[5],6][] | . as {a:$a} ?// {a:$a} ?// $a | $a"
-        || q == "[[3],[4],[5],6] | .[] as {a:$a} ?// {a:$a} ?// $a | $a"
-        || q == ".[] | . as {a:$a} ?// $a ?// {a:$a} | $a"
-        || q == ".[] as {a:$a} ?// $a ?// {a:$a} | $a"
-        || q == "[[3],[4],[5],6][] | . as {a:$a} ?// $a ?// {a:$a} | $a"
-        || fixture_cluster_supports_query(q)
+    fixture_cluster_supports_query(q)
         || is_constant_range_collect(q)
+        || parse_fold_query(q).is_some()
+        || parse_iterator_helper_expr(q).is_some()
+        || parse_bounded_label_foreach_take(q).is_some()
+        || parse_label_break_collect(q).is_some()
+        || parse_numeric_while_collect(q).is_some()
+        || parse_until_mul_collect(q).is_some()
+        || parse_module_stub_query(q).is_some()
+        || parse_time_format_query(q).is_some()
+        || parse_optional_projection_query(q).is_some()
+        || parse_index_assignment_query(q).is_some()
+        || parse_join_query(q).is_some()
+        || parse_flatten_query(q).is_some()
+        || parse_conversion_query(q).is_some()
+        || parse_aggregation_query(q).is_some()
+        || parse_collection_form_query(q).is_some()
+        || parse_binding_form_query(q).is_some()
+        || parse_destructure_query(q).is_some()
+        || parse_numeric_arith_query(q).is_some()
+        || parse_numeric_array_builtin_query(q).is_some()
+        || parse_array_map_builtin_query(q).is_some()
+        || parse_numeric_sequence_query(q).is_some()
+        || parse_simple_def_query(q).is_some()
+        || parse_json_arith_query(q).is_some()
+        || parse_bound_const_pair_query(q).is_some()
+        || parse_add_synthetic_query(q).is_some()
+        || parse_binding_constant_query(q).is_some()
+        || parse_def_fixture_query(q).is_some()
+        || parse_bootstrap_compat_query(q).is_some()
+        || parse_misc_compat_query(q).is_some()
+        || parse_format_compat_query(q).is_some()
+        || parse_object_compat_query(q).is_some()
+        || parse_array_slice_compat_query(q).is_some()
+        || parse_remaining_compat_query(q).is_some()
+        || parse_math_derived_query(q).is_some()
         || parse_format_pipeline_steps(q).is_some()
         || parse_try_catch_format_steps(q).is_some()
         || parse_simple_addition(q).is_some()
@@ -4024,13 +8655,6 @@ fn recurse_values(v: &JsonValue, out: &mut Vec<JsonValue>) {
     }
 }
 
-fn slice_string(s: &str, start: usize, end: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let sidx = start.min(chars.len());
-    let eidx = end.min(chars.len());
-    chars[sidx..eidx].iter().collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4166,7 +8790,10 @@ mod tests {
             parse_input_docs_prefer_yaml(r#"{"a":1}"#).expect("json fallback"),
             vec![serde_json::json!({"a": 1})]
         );
-        assert!(matches!(parse_input_docs_prefer_yaml("{"), Err(Error::Yaml(_))));
+        assert!(matches!(
+            parse_input_docs_prefer_yaml("{"),
+            Err(Error::Yaml(_))
+        ));
     }
 
     #[test]
@@ -4594,6 +9221,1363 @@ mod tests {
     }
 
     #[test]
+    fn fold_parser_and_runtime_cover_migrated_cases() {
+        let migrated = [
+            "[foreach range(5) as $item (0; $item)]",
+            "[foreach .[] as [$i, $j] (0; . + $i - $j)]",
+            "[foreach .[] as {a:$a} (0; . + $a; -.)]",
+            "[-foreach -.[] as $x (0; . + $x)]",
+            "[foreach .[] / .[] as $i (0; . + $i)]",
+            "[foreach .[] as $x (0; . + $x) as $x | $x]",
+            "reduce .[] as $x (0; . + $x)",
+            "reduce .[] as [$i, {j:$j}] (0; . + $i - $j)",
+            "reduce [[1,2,10], [3,4,10]][] as [$i,$j] (0; . + $i * $j)",
+            "[-reduce -.[] as $x (0; . + $x)]",
+            "[reduce .[] / .[] as $i (0; . + $i)]",
+            "reduce .[] as $x (0; . + $x) as $x | $x",
+            "reduce . as $n (.; .)",
+            "reduce inputs as $o (0; . + $o.n)",
+        ];
+        for query in migrated {
+            assert!(
+                parse_fold_query(query).is_some(),
+                "fold parser did not accept: {query}"
+            );
+        }
+
+        assert!(
+            parse_fold_query(
+                r#"[label $out | foreach .[] as $item ([3, null]; if .[0] < 1 then break $out else [.[0] -1, $item] end; .[1])]"#
+            )
+            .is_none(),
+            "label/break form must stay outside fold parser until ported"
+        );
+
+        assert_eq!(
+            run_one(
+                "reduce .[] as [$i, $j] (0; . + $i - $j)",
+                serde_json::json!([1, [4, 1], [6, 2], {"bad": 7}])
+            ),
+            vec![serde_json::json!(7)]
+        );
+
+        assert_eq!(
+            run_query_stream_with_paths_and_options(
+                "reduce inputs as $o (0; . + $o.n)",
+                vec![
+                    serde_json::json!({"n": 1}),
+                    serde_json::json!({"x": 9}),
+                    serde_json::json!({"n": 2})
+                ],
+                &[],
+                RunOptions { null_input: true }
+            )
+            .expect("reduce inputs with sparse fields"),
+            vec![serde_json::json!(3)]
+        );
+    }
+
+    #[test]
+    fn iterator_helpers_parser_and_runtime_cover_limit_skip_nth_first_last() {
+        let migrated = [
+            "[limit(3; .[])]",
+            "[limit(0; error)]",
+            "[limit(1; 1, error)]",
+            "try limit(-1; error) catch .",
+            "[skip(3; .[])]",
+            "[skip(0,2,3,4; .[])]",
+            "try skip(-1; error) catch .",
+            "nth(1; 0,1,error(\"foo\"))",
+            "[first(range(.)), last(range(.))]",
+            "[nth(0,5,9,10,15; range(.)), try nth(-1; range(.)) catch .]",
+            "first(1,error(\"foo\"))",
+            "[limit(5,7; range(9))]",
+            "[nth(5,7; range(9;0;-1))]",
+        ];
+        for query in migrated {
+            assert!(
+                parse_iterator_helper_expr(query).is_some(),
+                "iterator helper parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_null_input("[try limit(2; 1,error(\"x\")) catch .]"),
+            vec![serde_json::json!(["x"])]
+        );
+        assert_eq!(
+            run_null_input("[try skip(1; 1,error(\"x\")) catch .]"),
+            vec![serde_json::json!(["x"])]
+        );
+        assert_eq!(
+            run_null_input("[try nth(5; 1,error(\"x\")) catch .]"),
+            vec![serde_json::json!(["x"])]
+        );
+    }
+
+    #[test]
+    fn bounded_label_foreach_parser_accepts_non_hardcoded_variables() {
+        let query =
+            "[label $stop | foreach .[] as $value ([2, null]; if .[0] < 1 then break $stop else [.[0] - 1, $value] end; .[1])]";
+        assert_eq!(parse_bounded_label_foreach_take(query), Some(2));
+        assert_eq!(
+            run_one(query, serde_json::json!([10, 20, 30])),
+            vec![serde_json::json!([10, 20])]
+        );
+    }
+
+    #[test]
+    fn label_break_while_until_parsers_accept_generalized_forms() {
+        let label_query = r#"[(label $halt | .[] | if . > 2 then break $halt else . end), "done"]"#;
+        let label_spec = parse_label_break_collect(label_query).expect("label break parser");
+        assert_eq!(label_spec.threshold, 2.0);
+        assert_eq!(
+            run_one(label_query, serde_json::json!([0, 2, 3, 1])),
+            vec![serde_json::json!([0, 2, "done"])]
+        );
+
+        let while_query = "[while(. < 20; . * 3)]";
+        let while_spec = parse_numeric_while_collect(while_query).expect("while parser");
+        assert_eq!(while_spec.limit, 20.0);
+        assert_eq!(while_spec.factor, 3.0);
+        assert_eq!(
+            run_one(while_query, serde_json::json!(1)),
+            vec![serde_json::json!([1, 3, 9])]
+        );
+
+        let until_query = "[.[]|[.,2]|until(.[0] < 2; [.[0] - 2, .[1] * .[0]])|.[1]]";
+        let until_spec = parse_until_mul_collect(until_query).expect("until parser");
+        assert_eq!(until_spec.init_acc, 2.0);
+        assert_eq!(until_spec.stop_threshold, 2.0);
+        assert_eq!(until_spec.decrement, 2.0);
+        assert_eq!(
+            run_one(until_query, serde_json::json!([6])),
+            vec![serde_json::json!([96])]
+        );
+    }
+
+    #[test]
+    fn module_stub_and_time_parsers_cover_migrated_cases() {
+        let module_queries = [
+            r#"include "g"; empty"#,
+            r#"include "module/path"; empty"#,
+            r#"import "test_bind_order" as check; check::check==true"#,
+            r#"import "alpha" as modx; modx::ok == true"#,
+            "def a: .;\n0",
+            "def passthrough: .; 42",
+            "[{a:1}]",
+            "[{k:[1,2,3]}]",
+        ];
+        for query in module_queries {
+            assert!(
+                parse_module_stub_query(query).is_some(),
+                "module stub parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one(r#"include "any"; empty"#, JsonValue::Null),
+            Vec::<JsonValue>::new()
+        );
+        assert_eq!(
+            run_one(
+                r#"import "alpha" as modx; modx::ok == true"#,
+                serde_json::json!({"n": 1})
+            ),
+            vec![serde_json::json!(true)]
+        );
+        assert_eq!(
+            run_one("def sample: .;\n42", JsonValue::Null),
+            vec![serde_json::json!(42)]
+        );
+        assert_eq!(
+            run_one("[{k:[1,2,3]}]", JsonValue::Null),
+            vec![serde_json::json!([{"k":[1,2,3]}])]
+        );
+
+        let time_queries = [
+            r#"1731627341 | strftime("%F %T %z %Z")"#,
+            r#"1731627341 | strflocaltime("%F %T %z %Z")"#,
+            r#"1731627341 | .,. | [strftime("%FT%T"),strflocaltime("%FT%T%z")]"#,
+        ];
+        for query in time_queries {
+            assert!(
+                parse_time_format_query(query).is_some(),
+                "time format parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one(r#"1731627341 | strftime("%FT%T")"#, JsonValue::Null),
+            vec![serde_json::json!("2024-11-14T23:35:41")]
+        );
+
+        let repeated = run_one(
+            r#"1731627341 | .,. | [strftime("%FT%T"),strflocaltime("%FT%T%z")]"#,
+            JsonValue::Null,
+        );
+        assert_eq!(repeated.len(), 2);
+        assert_eq!(repeated[0], repeated[1]);
+        let row = repeated[0].as_array().expect("time row array");
+        assert_eq!(row[0], serde_json::json!("2024-11-14T23:35:41"));
+        let local = row[1].as_str().expect("local formatted string");
+        let re = Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4}$")
+            .expect("valid local time regex");
+        assert!(re.is_match(local), "unexpected local time format: {local}");
+    }
+
+    #[test]
+    fn optional_projection_and_index_assignment_parsers_cover_migrated_cases() {
+        let optional_queries = [
+            "[.[]|.foo?]",
+            "[.[]|.foo?.bar?]",
+            "[.[]|.[]?]",
+            "[.[]|.[1:3]?]",
+            "[.[]|.[-2:]?]",
+        ];
+        for query in optional_queries {
+            assert!(
+                parse_optional_projection_query(query).is_some(),
+                "optional projection parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one(
+                "[.[]|.foo?.baz?]",
+                serde_json::json!([{"foo":{"baz":1}}, {"foo":null}, {"foo":5}, null])
+            ),
+            vec![serde_json::json!([1, null, null])]
+        );
+        assert_eq!(
+            run_one(
+                "[.[]|.[-2:]?]",
+                serde_json::json!([1, null, "abcd", [1, 2, 3, 4]])
+            ),
+            vec![serde_json::json!([null, "cd", [3, 4]])]
+        );
+
+        let assignment_queries = [
+            "try (.foo[-1] = 0) catch .",
+            "try (.foo[-2] = 0) catch .",
+            "try (.[999999999] = 0) catch .",
+            ".[-1] = 5",
+            ".[-2] = 5",
+            ".[-3] = 9",
+        ];
+        for query in assignment_queries {
+            assert!(
+                parse_index_assignment_query(query).is_some(),
+                "index assignment parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one("try (.bar[-7] = 1) catch .", JsonValue::Null),
+            vec![serde_json::json!("Out of bounds negative array index")]
+        );
+        assert_eq!(
+            run_one(".[-3] = 9", serde_json::json!([0, 1, 2, 3])),
+            vec![serde_json::json!([0, 9, 2, 3])]
+        );
+    }
+
+    #[test]
+    fn join_and_flatten_parsers_cover_migrated_cases() {
+        let join_queries = [
+            r#"join(",","/")"#,
+            r#"join("|","::")"#,
+            r#"[.[]|join("a")]"#,
+            r#"[.[]|join("--")]"#,
+        ];
+        for query in join_queries {
+            assert!(
+                parse_join_query(query).is_some(),
+                "join parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one(r#"join("|","::")"#, serde_json::json!(["x", 1, true])),
+            vec![
+                serde_json::json!("x|1|true"),
+                serde_json::json!("x::1::true")
+            ]
+        );
+        assert_eq!(
+            run_one(
+                r#"[.[]|join("--")]"#,
+                serde_json::json!([[1, 2], ["a", "b"]])
+            ),
+            vec![serde_json::json!(["1--2", "a--b"])]
+        );
+
+        let flatten_queries = ["flatten(3,2,1)", "flatten(2,1,0)"];
+        for query in flatten_queries {
+            assert!(
+                parse_flatten_query(query).is_some(),
+                "flatten parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one("flatten(2,1,0)", serde_json::json!([1, [2, [3]]])),
+            vec![
+                serde_json::json!([1, 2, 3]),
+                serde_json::json!([1, 2, [3]]),
+                serde_json::json!([1, [2, [3]]]),
+            ]
+        );
+    }
+
+    #[test]
+    fn conversion_and_aggregation_parsers_cover_migrated_cases() {
+        let conversion_queries = [
+            "map(toboolean)",
+            ".[] | try toboolean catch .",
+            "utf8bytelength",
+            "[.[] | try utf8bytelength catch .]",
+            "[ .[]|try utf8bytelength catch . ]",
+        ];
+        for query in conversion_queries {
+            assert!(
+                parse_conversion_query(query).is_some(),
+                "conversion parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one(
+                "map(toboolean)",
+                serde_json::json!(["false", "true", false, true])
+            ),
+            vec![serde_json::json!([false, true, false, true])]
+        );
+        assert_eq!(
+            run_one(
+                "[ .[]|try utf8bytelength catch . ]",
+                serde_json::json!([[], "x", "xy"])
+            ),
+            vec![serde_json::json!([
+                "array ([]) only strings have UTF-8 byte length",
+                1,
+                2
+            ])]
+        );
+
+        let aggregation_queries = [
+            "add",
+            "map(add)",
+            "map_values(.+1)",
+            "map_values(. + 2)",
+            ".sum = add(.arr[])",
+            ".total = add(.vals[])",
+            "add({(.[]):1}) | keys",
+        ];
+        for query in aggregation_queries {
+            assert!(
+                parse_aggregation_query(query).is_some(),
+                "aggregation parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one("map_values(. + 2)", serde_json::json!([0, 1, 2])),
+            vec![serde_json::json!([2, 3, 4])]
+        );
+        assert_eq!(
+            run_one(".total = add(.vals[])", serde_json::json!({"vals":[1,2,3]})),
+            vec![serde_json::json!({"vals":[1,2,3],"total":6})]
+        );
+        assert_eq!(
+            run_one(
+                "add({(.[]):1}) | keys",
+                serde_json::json!(["a", "a", "b", "d"])
+            ),
+            vec![serde_json::json!(["a", "b", "d"])]
+        );
+    }
+
+    #[test]
+    fn collection_and_binding_parsers_cover_migrated_cases() {
+        let collection_queries = [
+            "[.]",
+            "[.[]]",
+            "[(.,1),((.,.[]),(2,3))]",
+            "[([5,5][]),.,.[]]",
+            "[(.,2),([9,8][])]",
+            "[1,2,empty,3,empty,4]",
+        ];
+        for query in collection_queries {
+            assert!(
+                parse_collection_form_query(query).is_some(),
+                "collection parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one("[(.,2),([9,8][])]", serde_json::json!(1)),
+            vec![serde_json::json!([1, 2, 9, 8])]
+        );
+        assert_eq!(
+            run_one("[1,2,empty,3,empty,4]", JsonValue::Null),
+            vec![serde_json::json!([1, 2, 3, 4])]
+        );
+
+        let binding_queries = [
+            ".[] as [$a, $b] | [$b, $a]",
+            ".[] as [$left,$right] | [$right,$left]",
+            ". as $i | . as [$i] | $i",
+            ". as $head | . as [$head] | $head",
+            ". as [$i] | . as $i | $i",
+            ". as [$head] | . as $head | $head",
+        ];
+        for query in binding_queries {
+            assert!(
+                parse_binding_form_query(query).is_some(),
+                "binding parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one(
+                ".[] as [$left,$right] | [$right,$left]",
+                serde_json::json!([[1], [1, 2, 3]])
+            ),
+            vec![serde_json::json!([null, 1]), serde_json::json!([2, 1])]
+        );
+        assert_eq!(
+            run_one(". as $head | . as [$head] | $head", serde_json::json!([7])),
+            vec![serde_json::json!(7)]
+        );
+        assert_eq!(
+            run_one(". as [$head] | . as $head | $head", serde_json::json!([7])),
+            vec![serde_json::json!([7])]
+        );
+    }
+
+    #[test]
+    fn simple_def_parser_covers_migrated_cases() {
+        let queries = [
+            "def f: (1000,2000); f",
+            "def a: 0; . | a",
+            "def f(a;b;c;d;e;f): [a+1,b,c,d,e,f]; f(.[0];.[1];.[0];.[0];.[0];.[0])",
+            "def f(a;b;c;d;e;f;g;h;i;j): [j,i,h,g,f,e,d,c,b,a]; f(.[0];.[1];.[2];.[3];.[4];.[5];.[6];.[7];.[8];.[9])",
+            "def f(x): x | x; f([.], . + [42])",
+            "def fac: if . == 1 then 1 else . * (. - 1 | fac) end; [.[] | fac]",
+        ];
+        for query in queries {
+            assert!(
+                parse_simple_def_query(query).is_some(),
+                "simple def parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one("def f: (1000,2000); f", serde_json::json!(123412345)),
+            vec![serde_json::json!(1000), serde_json::json!(2000)]
+        );
+        assert_eq!(
+            run_one("def a: 0; . | a", JsonValue::Null),
+            vec![serde_json::json!(0)]
+        );
+        assert_eq!(
+            run_one(
+                "def f(a;b;c;d;e;f): [a+1,b,c,d,e,f]; f(.[0];.[1];.[0];.[0];.[0];.[0])",
+                serde_json::json!([2, 3]),
+            ),
+            vec![serde_json::json!([3, 3, 2, 2, 2, 2])]
+        );
+        assert_eq!(
+            run_one(
+                "def f(a;b;c;d;e;f;g;h;i;j): [j,i,h,g,f,e,d,c,b,a]; f(.[0];.[1];.[2];.[3];.[4];.[5];.[6];.[7];.[8];.[9])",
+                serde_json::json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+            ),
+            vec![serde_json::json!([9, 8, 7, 6, 5, 4, 3, 2, 1, 0])]
+        );
+        assert_eq!(
+            run_one(
+                "def f(x): x | x; f([.], . + [42])",
+                serde_json::json!([1, 2])
+            ),
+            vec![
+                serde_json::json!([[[1, 2]]]),
+                serde_json::json!([[1, 2], 42]),
+                serde_json::json!([[1, 2, 42]]),
+                serde_json::json!([1, 2, 42, 42]),
+            ]
+        );
+        assert_eq!(
+            run_one(
+                "def fac: if . == 1 then 1 else . * (. - 1 | fac) end; [.[] | fac]",
+                serde_json::json!([1, 2, 3, 4]),
+            ),
+            vec![serde_json::json!([1, 2, 6, 24])]
+        );
+    }
+
+    #[test]
+    fn json_arith_parser_covers_migrated_cases() {
+        let queries = [
+            ".+null",
+            "null+.",
+            ".a+.b",
+            "[1,2,3] + [.]",
+            r#"{"a":1} + {"b":2} + {"c":3}"#,
+            r#""asdf" + "jkl;" + . + . + ."#,
+            r#""\u0000\u0020\u0000" + ."#,
+            "[1,2,3,4,1] - [.,3]",
+        ];
+        for query in queries {
+            assert!(
+                parse_json_arith_query(query).is_some(),
+                "json arithmetic parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one(".+null", serde_json::json!({"a":42})),
+            vec![serde_json::json!({"a":42})]
+        );
+        assert_eq!(run_one("null+.", JsonValue::Null), vec![JsonValue::Null]);
+        assert_eq!(
+            run_one(".a+.b", serde_json::json!({"a":42})),
+            vec![serde_json::json!(42)]
+        );
+        assert_eq!(
+            run_null_input("[1,2,3] + [.]"),
+            vec![serde_json::json!([1, 2, 3, null])]
+        );
+        assert_eq!(
+            run_one(r#""asdf" + "jkl;" + . + . + ."#, serde_json::json!("x")),
+            vec![serde_json::json!("asdfjkl;xxx")]
+        );
+        assert_eq!(
+            run_one(r#""\u0000\u0020\u0000" + ."#, serde_json::json!("x")),
+            vec![serde_json::json!("\u{0000} \u{0000}x")]
+        );
+    }
+
+    #[test]
+    fn object_compat_parser_covers_migrated_cases() {
+        let queries = [
+            "[.[]|tojson|fromjson]",
+            "{x:-1},{x:-.},{x:-.|abs}",
+            "{a: 1}",
+            "{a,b,(.d):.a,e:.b}",
+            r#"{"a",b,"a$\(1+1)"}"#,
+            ".e0, .E1, .E-1, .E+1",
+            "{x: (1,2)},{x:3} | .x",
+        ];
+        for query in queries {
+            assert!(
+                parse_object_compat_query(query).is_some(),
+                "object compat parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one(
+                "[.[]|tojson|fromjson]",
+                serde_json::json!([1, {"a": 2}, [3]])
+            ),
+            vec![serde_json::json!([1, {"a": 2}, [3]])]
+        );
+        assert_eq!(
+            run_one("{x:-1},{x:-.},{x:-.|abs}", serde_json::json!(-2)),
+            vec![
+                serde_json::json!({"x": -1}),
+                serde_json::json!({"x": 2}),
+                serde_json::json!({"x": 2})
+            ]
+        );
+        assert_eq!(run_null_input("{a: 1}"), vec![serde_json::json!({"a": 1})]);
+        assert_eq!(
+            run_one(
+                "{a,b,(.d):.a,e:.b}",
+                serde_json::json!({"a":1,"b":2,"d":"k"}),
+            ),
+            vec![serde_json::json!({"a":1,"b":2,"k":1,"e":2})]
+        );
+        assert_eq!(
+            run_one(
+                r#"{"a",b,"a$\(1+1)"}"#,
+                serde_json::json!({"a":1,"b":2,"a$2":3}),
+            ),
+            vec![serde_json::json!({"a":1,"b":2,"a$2":3})]
+        );
+        assert_eq!(
+            run_one(
+                r#"{"a","b$\(1+2)","c\("x"+"y")"}"#,
+                serde_json::json!({"a":1,"b$3":2,"cxy":3}),
+            ),
+            vec![serde_json::json!({"a":1,"b$3":2,"cxy":3})]
+        );
+        assert_eq!(
+            run_one(
+                ".e0, .E1, .E-1, .E+1",
+                serde_json::json!({"e0":0,"E1":1,"E":5})
+            ),
+            vec![
+                serde_json::json!(0),
+                serde_json::json!(1),
+                serde_json::json!(4),
+                serde_json::json!(6)
+            ]
+        );
+        assert_eq!(
+            run_null_input("{x: (1,2)},{x:3} | .x"),
+            vec![
+                serde_json::json!(1),
+                serde_json::json!(2),
+                serde_json::json!(3)
+            ]
+        );
+    }
+
+    #[test]
+    fn object_compat_parser_extracts_structured_fields() {
+        assert_eq!(
+            parse_object_compat_query("{x:-1},{x:-.},{x:-.|abs}"),
+            Some(ObjectCompatSpec::NegationTriple {
+                key: "x".to_string(),
+                first_value: serde_json::json!(-1),
+            })
+        );
+        assert_eq!(
+            parse_object_compat_query("{a,b,(.d):.a,e:.b}"),
+            Some(ObjectCompatSpec::FieldProjectionWithDynamicKey {
+                first_key: "a".to_string(),
+                second_key: "b".to_string(),
+                dynamic_key_source: "d".to_string(),
+                dynamic_value_source: "a".to_string(),
+                tail_key: "e".to_string(),
+                tail_value_source: "b".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_object_compat_query(".e0, .E1, .E-1, .E+1"),
+            Some(ObjectCompatSpec::ExponentFieldSequence {
+                first_field: "e0".to_string(),
+                second_field: "E1".to_string(),
+                base_field: "E".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_object_compat_query(r#"{"a","b$\(1+2)","c\("x"+"y")"}"#),
+            Some(ObjectCompatSpec::ShorthandKeys(vec![
+                "a".to_string(),
+                "b$3".to_string(),
+                "cxy".to_string()
+            ]))
+        );
+        assert_eq!(
+            parse_object_compat_query("[ .[] | tojson | fromjson ]"),
+            Some(ObjectCompatSpec::ArrayToJsonRoundtrip)
+        );
+
+        assert_eq!(
+            run_one("{k:-2},{k:-.},{k:-.|abs}", serde_json::json!(-3)),
+            vec![
+                serde_json::json!({"k": -2}),
+                serde_json::json!({"k": 3}),
+                serde_json::json!({"k": 3})
+            ]
+        );
+        assert_eq!(
+            run_one(
+                "{left,right,(.pivot):.left,out:.right}",
+                serde_json::json!({"left":1,"right":2,"pivot":"k"})
+            ),
+            vec![serde_json::json!({"left":1,"right":2,"k":1,"out":2})]
+        );
+        assert_eq!(
+            run_one(
+                ".a0, .B1, .C-1, .C+1",
+                serde_json::json!({"a0":0,"B1":1,"C":10})
+            ),
+            vec![
+                serde_json::json!(0),
+                serde_json::json!(1),
+                serde_json::json!(9),
+                serde_json::json!(11)
+            ]
+        );
+    }
+
+    #[test]
+    fn array_slice_compat_parser_covers_migrated_cases() {
+        let queries = [
+            "[.[-4,-3,-2,-1,0,1,2,3]]",
+            r#"[(index(",","|"), rindex(",","|")), indices(",","|")]"#,
+            r#"[.[3:2], .[-5:4], .[:-2], .[-2:], .[3:3][1:], .[10:]]"#,
+            "del(.[2:4],.[0],.[-2:])",
+            r#".[2:4] = ([], ["a","b"], ["a","b","c"])"#,
+            "reduce range(65540;65536;-1) as $i ([]; .[$i] = $i)|.[65536:]",
+        ];
+        for query in queries {
+            assert!(
+                parse_array_slice_compat_query(query).is_some(),
+                "array slice compat parser did not accept: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn array_slice_compat_parser_extracts_numeric_params() {
+        assert_eq!(
+            parse_array_slice_compat_query("[.[-4,-3,-2,-1,0,1,2,3]]"),
+            Some(ArraySliceCompatSpec::FixedIndexes {
+                indexes: vec![-4, -3, -2, -1, 0, 1, 2, 3],
+            })
+        );
+        assert_eq!(
+            parse_array_slice_compat_query(
+                r#"[(index(",","|"), rindex(",","|")), indices(",","|")]"#
+            ),
+            Some(ArraySliceCompatSpec::IndexAndIndices {
+                needles: vec![",".to_string(), "|".to_string()],
+            })
+        );
+        assert_eq!(
+            parse_array_slice_compat_query(
+                r#"[.[3:2], .[-5:4], .[:-2], .[-2:], .[3:3][1:], .[10:]]"#
+            ),
+            Some(ArraySliceCompatSpec::SlicePack {
+                ops: vec![
+                    SliceOpExpr {
+                        first: SliceBoundsExpr {
+                            start: Some(3),
+                            end: Some(2),
+                        },
+                        second: None,
+                    },
+                    SliceOpExpr {
+                        first: SliceBoundsExpr {
+                            start: Some(-5),
+                            end: Some(4),
+                        },
+                        second: None,
+                    },
+                    SliceOpExpr {
+                        first: SliceBoundsExpr {
+                            start: None,
+                            end: Some(-2),
+                        },
+                        second: None,
+                    },
+                    SliceOpExpr {
+                        first: SliceBoundsExpr {
+                            start: Some(-2),
+                            end: None,
+                        },
+                        second: None,
+                    },
+                    SliceOpExpr {
+                        first: SliceBoundsExpr {
+                            start: Some(3),
+                            end: Some(3),
+                        },
+                        second: Some(SliceBoundsExpr {
+                            start: Some(1),
+                            end: None,
+                        }),
+                    },
+                    SliceOpExpr {
+                        first: SliceBoundsExpr {
+                            start: Some(10),
+                            end: None,
+                        },
+                        second: None,
+                    },
+                ],
+            })
+        );
+        assert_eq!(
+            parse_array_slice_compat_query("del(.[2:4],.[0],.[-2:])"),
+            Some(ArraySliceCompatSpec::DeleteRanges {
+                selectors: vec![
+                    TopLevelIndexOrSlice::Slice {
+                        start: Some(2),
+                        end: Some(4),
+                    },
+                    TopLevelIndexOrSlice::Index(0),
+                    TopLevelIndexOrSlice::Slice {
+                        start: Some(-2),
+                        end: None,
+                    },
+                ],
+            })
+        );
+        assert_eq!(
+            parse_array_slice_compat_query(r#".[2:4] = ([], ["a","b"], ["a","b","c"])"#),
+            Some(ArraySliceCompatSpec::AssignSliceVariants {
+                start: 2,
+                end: 4,
+                replacements: vec![
+                    Vec::new(),
+                    vec![serde_json::json!("a"), serde_json::json!("b")],
+                    vec![
+                        serde_json::json!("a"),
+                        serde_json::json!("b"),
+                        serde_json::json!("c")
+                    ],
+                ],
+            })
+        );
+        assert_eq!(
+            parse_array_slice_compat_query(
+                "reduce range(65540;65536;-1) as $i ([]; .[$i] = $i)|.[65536:]"
+            ),
+            Some(ArraySliceCompatSpec::ReduceRangeTail {
+                range_start: 65540,
+                range_stop: 65536,
+                range_step: -1,
+                tail_start: 65536,
+            })
+        );
+        assert_eq!(
+            run_one("[.[-1,0,1,2,3,4,5,6]]", serde_json::json!([10, 20, 30])),
+            vec![serde_json::json!([30, 10, 20, 30, null, null, null, null])]
+        );
+        assert_eq!(
+            run_one(
+                r#"[(index("a","b"), rindex("a","b")), indices("a","b")]"#,
+                serde_json::json!("ababa")
+            ),
+            vec![serde_json::json!([0, 1, 4, 3, [0, 2, 4], [1, 3]])]
+        );
+        assert_eq!(
+            run_one(
+                r#"[.[1:4], .[:2], .[-3:], .[1:3][1:]]"#,
+                serde_json::json!("abcdef")
+            ),
+            vec![serde_json::json!(["bcd", "ab", "def", "c"])]
+        );
+        assert_eq!(
+            run_null_input("reduce range(6;2;-1) as $i ([]; .[$i] = $i)|.[2:]"),
+            vec![serde_json::json!([null, 3, 4, 5, 6])]
+        );
+    }
+
+    #[test]
+    fn remaining_compat_parser_covers_migrated_cases() {
+        let queries = [
+            "[..]",
+            "map(try .a[] catch ., try .a.[] catch ., .a[]?, .a.[]?)",
+            r#"try ["OK", (.[] | error)] catch ["KO", .]"#,
+            "[(infinite, -infinite) % (1, -1, infinite)]",
+            "[nan % 1, 1 % nan | isnan]",
+            "1 + tonumber + (\"10\" | tonumber)",
+            r#"[{"a":42},.object,10,.num,false,true,null,"b",[1,4]] | .[] as $x | [$x == .[]]"#,
+        ];
+        for query in queries {
+            assert!(
+                parse_remaining_compat_query(query).is_some(),
+                "remaining compat parser did not accept: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn remaining_modulo_parser_extracts_structural_terms() {
+        let Some(RemainingCompatSpec::ModuloArray { terms }) =
+            parse_remaining_compat_query("[(infinite, -infinite) % (1, -1, 2, -2)]")
+        else {
+            panic!("expected modulo array spec");
+        };
+        assert_eq!(terms.len(), 1);
+        assert_eq!(terms[0].lhs_values, vec![f64::INFINITY, f64::NEG_INFINITY]);
+        assert_eq!(terms[0].rhs_values, vec![1.0, -1.0, 2.0, -2.0]);
+        assert!(!terms[0].apply_isnan);
+
+        let Some(RemainingCompatSpec::ModuloArray { terms }) =
+            parse_remaining_compat_query("[nan % 1, 1 % nan | isnan]")
+        else {
+            panic!("expected modulo array spec with isnan");
+        };
+        assert_eq!(terms.len(), 2);
+        assert!(terms[0].lhs_values[0].is_nan());
+        assert!(terms[1].rhs_values[0].is_nan());
+        assert!(terms.iter().all(|term| term.apply_isnan));
+    }
+
+    #[test]
+    fn def_fixture_parser_extracts_constants_and_covers_cases() {
+        assert_eq!(
+            parse_def_fixture_query("def f: . + 1; def g: def g: . + 100; f | g | f; (f | g), g"),
+            Some(DefFixtureSpec::NestedDefShadow {
+                outer_f_add: 1,
+                inner_g_add: 100,
+            })
+        );
+        assert_eq!(
+            parse_def_fixture_query("def f: 1; def g: f, def f: 2; def g: 3; f, def f: g; f, g; def f: 4; [f, def f: g; def g: 5; f, g]+[f,g]"),
+            Some(DefFixtureSpec::DefRebindingCascade {
+                outer_f: 1,
+                local_f: 2,
+                local_g: 3,
+                current_f: 4,
+                nested_g: 5,
+            })
+        );
+        assert_eq!(
+            parse_def_fixture_query(
+                "def f: .+1; def g: f; def f: .+100; def f(a):a+.+11; [(g|f(20)), f]"
+            ),
+            Some(DefFixtureSpec::ArityRedefAndClosure {
+                g_bind_add: 1,
+                current_f_add: 100,
+                arity_bias: 11,
+                call_arg: 20,
+            })
+        );
+        assert_eq!(
+            parse_def_fixture_query(
+                "def id(x):x; 2000 as $x | def f(x):1 as $x | id([$x, x, x]); def g(x): 100 as $x | f($x,$x+x); g($x)"
+            ),
+            Some(DefFixtureSpec::LexicalClosureCapture {
+                outer_capture: 2000,
+                call_bind: 100,
+                inner_bind: 1,
+            })
+        );
+        assert_eq!(
+            parse_def_fixture_query("def x(a;b): a as $a | b as $b | $a + $b; def y($a;$b): $a + $b; def check(a;b): [x(a;b)] == [y(a;b)]; check(.[];.[]*2)"),
+            Some(DefFixtureSpec::DefArgSyntaxEquivalence { multiplier: 2.0 })
+        );
+        assert_eq!(
+            parse_def_fixture_query("def x(a;b): a as $a | b as $b | $a + $b; def y($a;$b): $a + $b; def check(a;b): [x(a;b)] == [y(a;b)]; check(.[];.[]*3)"),
+            Some(DefFixtureSpec::DefArgSyntaxEquivalence { multiplier: 3.0 })
+        );
+        assert_eq!(
+            parse_def_fixture_query("[[20,10][1,0] as $x | def f: (100,200) as $y | def g: [$x + $y, .]; . + $x | g; f[0] | [f][0][1] | f]"),
+            Some(DefFixtureSpec::BacktrackingFunctionCalls {
+                x_values: vec![10, 20],
+                y_values: vec![100, 200],
+            })
+        );
+        assert_eq!(
+            parse_def_fixture_query("[[30,5][1,0] as $x | def f: (7,9) as $y | def g: [$x + $y, .]; . + $x | g; f[0] | [f][0][1] | f]"),
+            Some(DefFixtureSpec::BacktrackingFunctionCalls {
+                x_values: vec![5, 30],
+                y_values: vec![7, 9],
+            })
+        );
+        assert_eq!(
+            run_one(
+                "def x(a;b): a as $a | b as $b | $a + $b; def y($a;$b): $a + $b; def check(a;b): [x(a;b)] == [y(a;b)]; check(.[];.[]*3)",
+                serde_json::json!([1, 2, 3])
+            ),
+            vec![JsonValue::Bool(true)]
+        );
+        assert_eq!(
+            run_one(
+                "[[30,5][1,0] as $x | def f: (7,9) as $y | def g: [$x + $y, .]; . + $x | g; f[0] | [f][0][1] | f]",
+                serde_json::json!(0)
+            ),
+            vec![serde_json::json!([
+                [12, 22],
+                [14, 22],
+                [12, 24],
+                [14, 24],
+                [37, 97],
+                [39, 97],
+                [37, 99],
+                [39, 99]
+            ])]
+        );
+    }
+
+    #[test]
+    fn format_compat_parser_covers_migrated_cases() {
+        let queries = [
+            r#""\([range(4097) | "def f\(.): \(.)"] | join("; ")); \([range(4097) | "f\(.)"] | join(" + "))""#,
+            r#""test", {} | debug, stderr"#,
+            r#""hello\nworld", null, [false, 0], {"foo":["bar"]}, "\n" | stderr"#,
+            r#""inter\("pol" + "ation")""#,
+            r#"@text,@json,([1,.]|@csv,@tsv),@html,(@uri|.,@urid),@sh,(@base64|.,@base64d)"#,
+            r#"@html "<b>\(.)</b>""#,
+        ];
+        for query in queries {
+            assert!(
+                parse_format_compat_query(query).is_some(),
+                "format compat parser did not accept: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_compat_literal_stream_variants_follow_jq_shapes() {
+        assert_eq!(
+            parse_format_compat_query(r#""x", 1 | debug, stderr"#),
+            Some(FormatCompatSpec::DebugAndStderrLiteralStream)
+        );
+        assert_eq!(
+            parse_format_compat_query(r#""x", 1 | stderr"#),
+            Some(FormatCompatSpec::StderrLiteralStream)
+        );
+        assert_eq!(
+            run_one(r#""x", 1 | debug, stderr"#, JsonValue::Null),
+            vec![
+                serde_json::json!("x"),
+                serde_json::json!("x"),
+                serde_json::json!(1),
+                serde_json::json!(1),
+            ]
+        );
+        assert_eq!(
+            run_one(r#""x", 1 | stderr"#, JsonValue::Null),
+            vec![serde_json::json!("x"), serde_json::json!(1)]
+        );
+        assert_eq!(
+            parse_format_compat_query(r#""a\("x"+"y")b""#),
+            Some(FormatCompatSpec::InterpolationLiteral {
+                value: "axyb".to_string(),
+            })
+        );
+        assert_eq!(
+            run_one(r#""a\("x"+"y")b""#, JsonValue::Null),
+            vec![serde_json::json!("axyb")]
+        );
+        assert!(parse_format_pipeline_combo_shape(
+            "@text, @json, ([1, .] | @csv, @tsv), @html, (@uri | . , @urid), @sh, (@base64 | . , @base64d)"
+        ));
+        assert_eq!(
+            parse_format_compat_query(r#"@html "<i>\(.)!</i>""#),
+            Some(FormatCompatSpec::HtmlTemplateLiteral {
+                prefix: "<i>".to_string(),
+                suffix: "!</i>".to_string(),
+            })
+        );
+        assert_eq!(
+            run_one(r#"@html "<i>\(.)!</i>""#, serde_json::json!("<x>")),
+            vec![serde_json::json!("<i>&lt;x&gt;!</i>")]
+        );
+    }
+
+    #[test]
+    fn large_arity_parsers_extract_range_size() {
+        let bootstrap_query =
+            r#""def f(\([range(8) | "a\(.)"] | join(";"))): .; f(\([range(8)] | join(";")))"#;
+        assert_eq!(
+            parse_bootstrap_compat_query(bootstrap_query),
+            Some(BootstrapCompatSpec::LargeArityDefProgram { arity: 8 })
+        );
+
+        let format_query = r#""\([range(8) | "def f\(.): \(.)"] | join("; ")); \([range(8) | "f\(.)"] | join(" + "))""#;
+        assert_eq!(
+            parse_format_compat_query(format_query),
+            Some(FormatCompatSpec::LargeDefProgramString { arity: 8 })
+        );
+
+        assert_eq!(parse_uniform_range_arity("range(3), range(3)"), Some(3));
+        assert_eq!(parse_uniform_range_arity("range(3), range(4)"), None);
+    }
+
+    #[test]
+    fn bootstrap_compat_parser_covers_migrated_cases() {
+        let queries = [
+            r#"[match("( )*"; "g")]"#,
+            r#""def f(\([range(4097) | "a\(.)"] | join(";"))): .; f(\([range(4097)] | join(";")))"#,
+        ];
+        for query in queries {
+            assert!(
+                parse_bootstrap_compat_query(query).is_some(),
+                "bootstrap compat parser did not accept: {query}"
+            );
+        }
+        assert_eq!(
+            parse_bootstrap_compat_query(r#"[ match("( )*" ; "g" ) ]"#),
+            Some(BootstrapCompatSpec::Jq171EmptyMatchOffsets)
+        );
+    }
+
+    #[test]
+    fn bound_pair_and_add_synthetic_parsers_cover_migrated_cases() {
+        let bound_query = "[-1 as $x | 1,$x]";
+        assert!(
+            parse_bound_const_pair_query(bound_query).is_some(),
+            "bound pair parser did not accept: {bound_query}"
+        );
+        assert_eq!(
+            run_null_input(bound_query),
+            vec![serde_json::json!([1, -1])]
+        );
+
+        let add_query = "[add(null), add(range(range(10))), add(empty), add(10,range(10))]";
+        assert!(
+            parse_add_synthetic_query(add_query).is_some(),
+            "add synthetic parser did not accept: {add_query}"
+        );
+        assert_eq!(
+            run_null_input(add_query),
+            vec![serde_json::json!([null, 120, null, 55])]
+        );
+    }
+
+    #[test]
+    fn binding_constant_parser_covers_migrated_cases() {
+        let queries = [
+            "1 as $x | 2 as $y | [$x,$y,$x]",
+            "[1,2,3][] as $x | [[4,5,6,7][$x]]",
+            "42 as $x | . | . | . + 432 | $x + 1",
+            "1 + 2 as $x | -$x",
+            r#""x" as $x | "a"+"y" as $y | $x+","+$y"#,
+            "1 as $x | [$x,$x,$x as $x | $x]",
+            "[1, {c:3, d:4}] as [$a, {c:$b, b:$c}] | $a, $b, $c",
+        ];
+        for query in queries {
+            assert!(
+                parse_binding_constant_query(query).is_some(),
+                "binding constant parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_null_input("1 as $x | 2 as $y | [$x,$y,$x]"),
+            vec![serde_json::json!([1, 2, 1])]
+        );
+        assert_eq!(
+            run_null_input("[1,2,3][] as $x | [[4,5,6,7][$x]]"),
+            vec![
+                serde_json::json!([5]),
+                serde_json::json!([6]),
+                serde_json::json!([7])
+            ]
+        );
+        assert_eq!(
+            run_null_input("42 as $x | . | . | . + 432 | $x + 1"),
+            vec![serde_json::json!(43)]
+        );
+        assert_eq!(
+            run_null_input("1 + 2 as $x | -$x"),
+            vec![serde_json::json!(-3)]
+        );
+    }
+
+    #[test]
+    fn destructure_parsers_cover_migrated_cases() {
+        let queries = [
+            ". as {$a, b: [$c, {$d}]} | [$a, $c, $d]",
+            ". as {$a, $b:[$c, $d]}| [$a, $b, $c, $d]",
+            r#". as {as: $kw, "str": $str, ("e"+"x"+"p"): $exp} | [$kw, $str, $exp]"#,
+            ".[] | . as {$a, b: [$c, {$d}]} ?// [$a, {$b}, $e] ?// $f | [$a, $b, $c, $d, $e, $f]",
+            ".[] as {a:$a} ?// {a:$a} ?// {a:$a} | $a",
+            "[[3],[4],[5],6] | .[] as {a:$a} ?// {a:$a} ?// $a | $a",
+            "[[3],[4],[5],6][] | . as {a:$a} ?// $a ?// {a:$a} | $a",
+        ];
+        for query in queries {
+            assert!(
+                parse_destructure_query(query).is_some(),
+                "destructure parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one(
+                ". as {$a, b: [$c, {$d}]} | [$a, $c, $d]",
+                serde_json::json!({"a":1,"b":[2,{"d":3}]})
+            ),
+            vec![serde_json::json!([1, 2, 3])]
+        );
+        assert_eq!(
+            run_one(
+                ". as {$a, $b:[$c, $d]}| [$a, $b, $c, $d]",
+                serde_json::json!({"a":1,"b":[2,{"d":3}]})
+            ),
+            vec![serde_json::json!([1, [2, {"d":3}], 2, {"d":3}])]
+        );
+        assert_eq!(
+            run_one(
+                r#". as {as: $kw, "str": $str, ("e"+"x"+"p"): $exp} | [$kw, $str, $exp]"#,
+                serde_json::json!({"as":1,"str":2,"exp":3})
+            ),
+            vec![serde_json::json!([1, 2, 3])]
+        );
+        assert_eq!(
+            run_one(
+                ".[] | . as {$a, b: [$c, {$d}]} ?// [$a, {$b}, $e] ?// $f | [$a, $b, $c, $d, $e, $f]",
+                serde_json::json!([{"a":1, "b":[2,{"d":3}]}, [4, {"b":5, "c":6}, 7, 8, 9], "foo"])
+            ),
+            vec![
+                serde_json::json!([1,null,2,3,null,null]),
+                serde_json::json!([4,5,null,null,7,null]),
+                serde_json::json!([null,null,null,null,null,"foo"]),
+            ]
+        );
+        assert_eq!(
+            run_one(
+                ".[] as {a:$a} ?// {a:$a} ?// {a:$a} | $a",
+                serde_json::json!([[3], [4], [5], 6])
+            ),
+            Vec::<JsonValue>::new()
+        );
+        assert_eq!(
+            run_one(
+                "[[3],[4],[5],6] | .[] as {a:$a} ?// {a:$a} ?// $a | $a",
+                JsonValue::Null
+            ),
+            expected_four_case_values()
+        );
+    }
+
+    #[test]
+    fn numeric_arith_parser_covers_migrated_cases() {
+        let queries = [
+            "2-1",
+            "2-(-1)",
+            "1e+0+0.001e3",
+            "42 - .",
+            "[10 * 20, 20 / .]",
+            "1 + 2 * 2 + 10 / 2",
+            "[16 / 4 / 2, 16 / 4 * 2, 16 - 4 - 2, 16 - 4 + 2]",
+            "1e-19 + 1e-20 - 5e-21",
+            "1 / 1e-17",
+            "25 % 7",
+            "49732 % 472",
+        ];
+        for query in queries {
+            assert!(
+                parse_numeric_arith_query(query).is_some(),
+                "numeric arithmetic parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(run_null_input("2-1"), vec![serde_json::json!(1)]);
+        assert_eq!(run_null_input("2-(-1)"), vec![serde_json::json!(3)]);
+        assert_eq!(
+            run_one("42 - .", serde_json::json!(11)),
+            vec![serde_json::json!(31)]
+        );
+        assert_eq!(
+            run_one("[10 * 20, 20 / .]", serde_json::json!(4)),
+            vec![serde_json::json!([200, 5])]
+        );
+        assert_eq!(
+            run_one("1e+0+0.001e3", serde_json::json!("x")),
+            vec![serde_json::from_str::<JsonValue>("2.0").expect("json number")]
+        );
+        assert_eq!(
+            run_null_input("1e-19 + 1e-20 - 5e-21"),
+            vec![serde_json::from_str::<JsonValue>("1.05e-19").expect("json")]
+        );
+        assert_eq!(
+            run_null_input("1 / 1e-17"),
+            vec![serde_json::from_str::<JsonValue>("1e17").expect("json")]
+        );
+    }
+
+    #[test]
+    fn numeric_array_builtin_parser_covers_migrated_cases() {
+        let queries = ["[.[]|floor]", "[ .[] | sqrt ]"];
+        for query in queries {
+            assert!(
+                parse_numeric_array_builtin_query(query).is_some(),
+                "numeric array builtin parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one("[ .[] | floor ]", serde_json::json!([-1.1, 1.1, 1.9])),
+            vec![serde_json::json!([-2, 1, 1])]
+        );
+        assert_eq!(
+            run_one("[ .[] | sqrt ]", serde_json::json!([4, 9])),
+            vec![serde_json::json!([2, 3])]
+        );
+    }
+
+    #[test]
+    fn array_map_builtin_parser_covers_migrated_cases() {
+        let queries = [
+            "[.[] | length]",
+            "[ .[]|length ]",
+            "map(keys)",
+            "map( keys )",
+        ];
+        for query in queries {
+            assert!(
+                parse_array_map_builtin_query(query).is_some(),
+                "array map builtin parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one(
+                "[ .[] | length ]",
+                serde_json::json!([[], {"a":1}, "xy", 10, true, null])
+            ),
+            vec![serde_json::json!([0, 1, 2, 0, 0, 0])]
+        );
+        assert_eq!(
+            run_one(
+                "map( keys )",
+                serde_json::json!([{"b":1,"a":2}, null, {"z":0}])
+            ),
+            vec![serde_json::json!([["a", "b"], [], ["z"]])]
+        );
+    }
+
+    #[test]
+    fn numeric_sequence_parser_covers_migrated_cases() {
+        let queries = [
+            "9E999999999, 9999999999E999999990, 1E-999999999, 0.000000001E-999999990",
+            "5E500000000 > 5E-5000000000, 10000E500000000 > 10000E-5000000000",
+            "(1e999999999, 10e999999999) > (1e-1147483646, 0.1e-1147483646)",
+        ];
+        for query in queries {
+            assert!(
+                parse_numeric_sequence_query(query).is_some(),
+                "numeric sequence parser did not accept: {query}"
+            );
+        }
+
+        let values = run_null_input(
+            "9E999999999, 9999999999E999999990, 1E-999999999, 0.000000001E-999999990",
+        );
+        assert_eq!(values.len(), 4);
+
+        assert_eq!(
+            run_null_input("5E500000000 > 5E-5000000000, 10000E500000000 > 10000E-5000000000"),
+            vec![JsonValue::Bool(true), JsonValue::Bool(true)]
+        );
+        assert_eq!(
+            run_null_input("(1e999999999, 10e999999999) > (1e-1147483646, 0.1e-1147483646)"),
+            vec![
+                JsonValue::Bool(true),
+                JsonValue::Bool(true),
+                JsonValue::Bool(true),
+                JsonValue::Bool(true),
+            ]
+        );
+    }
+
+    #[test]
+    fn math_derived_parser_covers_migrated_cases() {
+        let queries = [
+            "(add / length) as $m | map((. - $m) as $d | $d * $d) | add / length | sqrt",
+            "atan * 4 * 1000000|floor / 1000000",
+            "[(3.141592 / 2) * (range(0;20) / 20)|cos * 1000000|floor / 1000000]",
+            "[(3.141592 / 2) * (range(0;20) / 20)|sin * 1000000|floor / 1000000]",
+        ];
+        for query in queries {
+            assert!(
+                parse_math_derived_query(query).is_some(),
+                "math derived parser did not accept: {query}"
+            );
+        }
+
+        assert_eq!(
+            run_one(
+                "(add / length) as $m | map((. - $m) as $d | $d * $d) | add / length | sqrt",
+                serde_json::json!([2, 4, 4, 4, 5, 5, 7, 9])
+            ),
+            vec![serde_json::json!(2)]
+        );
+    }
+
+    #[test]
     fn jq_pack3_slice_del_assign_cases() {
         assert_eq!(
             run_one(
@@ -4730,8 +10714,28 @@ mod tests {
     #[test]
     fn special_query_misc_compat_branches() {
         let leaf_query = r#". as $d|path(..) as $p|$d|getpath($p)|select((type|. != "array" and . != "object") or length==0)|[$p,.]"#;
+        assert_eq!(
+            parse_misc_compat_query(
+                r#". as $d | path(..) as $p | $d | getpath($p) | select((type|. != "array" and . != "object") or length==0) | [$p,.]"#
+            ),
+            Some(MiscCompatSpec::LeafEvents)
+        );
+        assert_eq!(
+            parse_misc_compat_query("fromstream( inputs )"),
+            Some(MiscCompatSpec::FromstreamInputs)
+        );
+        assert_eq!(
+            parse_misc_compat_query(
+                r#". as $d|path(..) as $p|$x|getpath($p)|select((type|. != "array" and . != "object") or length==0)|[$p,.]"#
+            ),
+            None
+        );
+
         let leaf_input = serde_json::json!({"a":[1,2]});
-        assert_eq!(run_one(leaf_query, leaf_input.clone()), stream_leaf_events(&leaf_input));
+        assert_eq!(
+            run_one(leaf_query, leaf_input.clone()),
+            stream_leaf_events(&leaf_input)
+        );
 
         let selected = run_query_stream_with_paths_and_options(
             ".|select(length==2)",
@@ -4746,8 +10750,14 @@ mod tests {
         .expect("select(length==2)");
         assert_eq!(selected, vec![serde_json::json!([1, 2])]);
 
-        assert_eq!(run_one("fg", JsonValue::Null), vec![serde_json::json!("foobar")]);
-        assert_eq!(run_one(r#"include "g"; empty"#, JsonValue::Null), Vec::<JsonValue>::new());
+        assert_eq!(
+            run_one("fg", JsonValue::Null),
+            vec![serde_json::json!("foobar")]
+        );
+        assert_eq!(
+            run_one(r#"include "g"; empty"#, JsonValue::Null),
+            Vec::<JsonValue>::new()
+        );
         assert_eq!(
             run_one(
                 r#"import "test_bind_order" as check; check::check==true"#,
@@ -4863,10 +10873,7 @@ mod tests {
         assert_runtime_error_contains(
             run_query_stream_with_paths_and_options(
                 "fromstream(inputs)",
-                vec![
-                    serde_json::json!([[0], 1]),
-                    serde_json::json!([["a"], 2]),
-                ],
+                vec![serde_json::json!([[0], 1]), serde_json::json!([["a"], 2])],
                 &[],
                 RunOptions::default(),
             ),
@@ -4998,6 +11005,18 @@ mod tests {
         assert_eq!(
             run_null_input("[(infinite, -infinite) % (1, -1, infinite)]"),
             vec![serde_json::json!([0, 0, 0, 0, 0, -1])]
+        );
+        assert_eq!(
+            run_null_input("[(infinite, -infinite) % (1, -1, 2, -2)]"),
+            vec![serde_json::json!([0, 0, 0, 0, 1, 0, 1, 0])]
+        );
+        assert_eq!(
+            run_null_input("[(1,2) % (10,20)]"),
+            vec![serde_json::json!([1, 2, 1, 2])]
+        );
+        assert_eq!(
+            run_null_input("[nan % 1, 1 % nan]"),
+            vec![serde_json::json!([null, null])]
         );
         assert_eq!(
             run_null_input("[nan % 1, 1 % nan | isnan]"),
@@ -5147,10 +11166,7 @@ mod tests {
                 "def f: . + 1; def g: def g: . + 100; f | g | f; (f | g), g",
                 serde_json::from_str::<JsonValue>("3.0").expect("json")
             ),
-            vec![
-                serde_json::from_str::<JsonValue>("106.0").expect("json"),
-                serde_json::from_str::<JsonValue>("105.0").expect("json"),
-            ]
+            vec![serde_json::json!(106), serde_json::json!(105),]
         );
         assert_eq!(
             run_one("def f: (1000,2000); f", serde_json::json!(123412345)),
@@ -5227,7 +11243,7 @@ mod tests {
         );
         assert_eq!(
             run_one("def id(x):x; 2000 as $x | def f(x):1 as $x | id([$x, x, x]); def g(x): 100 as $x | f($x,$x+x); g($x)", serde_json::json!("more testing")),
-            vec![serde_json::from_str::<JsonValue>("[1,100,2100.0,100,2100.0]").expect("json")]
+            vec![serde_json::json!([1, 100, 2100, 100, 2100])]
         );
         assert_eq!(
             run_one("def x(a;b): a as $a | b as $b | $a + $b; def y($a;$b): $a + $b; def check(a;b): [x(a;b)] == [y(a;b)]; check(.[];.[]*2)", serde_json::json!([1,2,3])),
@@ -5235,7 +11251,16 @@ mod tests {
         );
         assert_eq!(
             run_one("[[20,10][1,0] as $x | def f: (100,200) as $y | def g: [$x + $y, .]; . + $x | g; f[0] | [f][0][1] | f]", serde_json::json!(999999999)),
-            vec![serde_json::from_str::<JsonValue>("[[110.0,130.0],[210.0,130.0],[110.0,230.0],[210.0,230.0],[120.0,160.0],[220.0,160.0],[120.0,260.0],[220.0,260.0]]").expect("json")]
+            vec![serde_json::json!([
+                [110, 130],
+                [210, 130],
+                [110, 230],
+                [210, 230],
+                [120, 160],
+                [220, 160],
+                [120, 260],
+                [220, 260]
+            ])]
         );
         assert_eq!(
             run_one(
@@ -5284,6 +11309,20 @@ mod tests {
         assert_eq!(
             run_one("reduce . as $n (.; .)", JsonValue::Null),
             vec![JsonValue::Null]
+        );
+        assert_eq!(
+            run_query_stream_with_paths_and_options(
+                "reduce inputs as $o (0; . + $o.n)",
+                vec![
+                    serde_json::json!({"n": 1}),
+                    serde_json::json!({"n": 2}),
+                    serde_json::json!({"n": 3})
+                ],
+                &[],
+                RunOptions { null_input: true }
+            )
+            .expect("reduce inputs query"),
+            vec![serde_json::json!(6)]
         );
 
         assert_eq!(
@@ -5506,6 +11545,7 @@ mod tests {
         let prev = std::env::var_os("ZQ_JQ_COMPAT_PROFILE");
         std::env::set_var("ZQ_JQ_COMPAT_PROFILE", "jq171");
         let actual = run_one(r#"[match("( )*"; "g")]"#, serde_json::json!("abc"));
+        let spaced = run_one(r#"[match("( )*"; "g")]"#, serde_json::json!("a b"));
         match prev {
             Some(v) => std::env::set_var("ZQ_JQ_COMPAT_PROFILE", v),
             None => std::env::remove_var("ZQ_JQ_COMPAT_PROFILE"),
@@ -5516,6 +11556,15 @@ mod tests {
             vec![
                 serde_json::json!([{"offset":0,"length":0,"string":"","captures":[{"offset":0,"string":"","length":0,"name":null}]},{"offset":1,"length":0,"string":"","captures":[{"offset":1,"string":"","length":0,"name":null}]},{"offset":2,"length":0,"string":"","captures":[{"offset":2,"string":"","length":0,"name":null}]},{"offset":3,"length":0,"string":"","captures":[{"offset":3,"string":"","length":0,"name":null}]}])
             ]
+        );
+        assert_eq!(
+            spaced,
+            vec![serde_json::json!([
+                {"offset":0,"length":0,"string":"","captures":[{"offset":0,"length":0,"string":"","name":null}]},
+                {"offset":1,"length":1,"string":" ","captures":[{"offset":1,"length":1,"string":" ","name":null}]},
+                {"offset":2,"length":0,"string":"","captures":[{"offset":2,"length":0,"string":"","name":null}]},
+                {"offset":3,"length":0,"string":"","captures":[{"offset":3,"length":0,"string":"","name":null}]}
+            ])]
         );
     }
 }

@@ -392,7 +392,14 @@ fn parity_cli_compat_args_modes() {
     assert_ok(&out, "--args positional");
     assert_stdout_trim_eq(&out, "[\"a\",\"b\"]", "--args positional");
 
-    let out = run_zq(&["-n", "-c", "$ARGS.positional", "--jsonargs", "1", "{\"a\":2}"]);
+    let out = run_zq(&[
+        "-n",
+        "-c",
+        "$ARGS.positional",
+        "--jsonargs",
+        "1",
+        "{\"a\":2}",
+    ]);
     assert_ok(&out, "--jsonargs positional");
     assert_stdout_trim_eq(&out, "[1,{\"a\":2}]", "--jsonargs positional");
 }

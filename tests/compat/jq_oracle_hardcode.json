@@ -1,0 +1,123 @@
+{
+  "cases": [
+    {
+      "id": "modulo_infinite_table",
+      "query": "[(infinite, -infinite) % (1, -1, infinite)]",
+      "null_input": true,
+      "input_stream": [],
+      "expected_output": [[0, 0, 0, 0, 0, -1]]
+    },
+    {
+      "id": "modulo_nan_isnan",
+      "query": "[nan % 1, 1 % nan | isnan]",
+      "null_input": true,
+      "input_stream": [],
+      "expected_output": [[true, true]]
+    },
+    {
+      "id": "modulo_parametric_finite_and_infinite",
+      "query": "[(infinite,-infinite)%(1,-1,2,-2)]",
+      "null_input": true,
+      "input_stream": [],
+      "expected_output": [[0, 0, 0, 0, 1, 0, 1, 0]]
+    },
+    {
+      "id": "modulo_parametric_nan_null",
+      "query": "[(nan,1)%(1,nan)]",
+      "null_input": true,
+      "input_stream": [],
+      "expected_output": [[null, 0, null, null]]
+    },
+    {
+      "id": "modulo_parametric_nan_isnan",
+      "query": "[(nan,1)%(1,nan)|isnan]",
+      "null_input": true,
+      "input_stream": [],
+      "expected_output": [[true, false, true, true]]
+    },
+    {
+      "id": "modulo_zero_divisor_error",
+      "query": "[(infinite,-infinite)%(0)]",
+      "null_input": true,
+      "input_stream": [],
+      "expected_error_contains": "divisor is zero"
+    },
+    {
+      "id": "array_tojson_roundtrip",
+      "query": "[.[]|tojson|fromjson]",
+      "null_input": false,
+      "input_stream": [[1, "x", {"k": true}]],
+      "expected_output": [[1, "x", {"k": true}]]
+    },
+    {
+      "id": "object_dynamic_key_projection",
+      "query": "{a,b,(.d):.a,e:.b}",
+      "null_input": false,
+      "input_stream": [{"a": 10, "b": 20, "d": "dyn"}],
+      "expected_output": [{"a": 10, "b": 20, "dyn": 10, "e": 20}]
+    },
+    {
+      "id": "slice_pack_string",
+      "query": "[.[1:4], .[:2], .[-3:], .[1:3][1:]]",
+      "null_input": false,
+      "input_stream": ["abcdef"],
+      "expected_output": [["bcd", "ab", "def", "c"]]
+    },
+    {
+      "id": "def_arg_syntax_equivalence",
+      "query": "def x(a;b): a as $a | b as $b | $a + $b; def y($a;$b): $a + $b; def check(a;b): [x(a;b)] == [y(a;b)]; check(.[];.[]*3)",
+      "null_input": false,
+      "input_stream": [[1, 2, 3, 4]],
+      "expected_output": [true]
+    },
+    {
+      "id": "html_escape_angle_amp",
+      "query": "@html \"<b>\\(.)</b>\"",
+      "null_input": false,
+      "input_stream": ["<x&y>"],
+      "expected_output": ["<b>&lt;x&amp;y&gt;</b>"]
+    },
+    {
+      "id": "html_escape_quotes",
+      "query": "@html \"pre:\\(.) :post\"",
+      "null_input": false,
+      "input_stream": ["\"quote\""],
+      "expected_output": ["pre:&quot;quote&quot; :post"]
+    },
+    {
+      "id": "html_escape_apos",
+      "query": "@html \"[\\(.)]\"",
+      "null_input": false,
+      "input_stream": ["alpha'beta"],
+      "expected_output": ["[alpha&apos;beta]"]
+    },
+    {
+      "id": "object_shorthand_interpolation_n2",
+      "query": "{\"a\",\"b$\\(1+2)\",\"c\\(\"x\"+\"y\")\"}",
+      "null_input": false,
+      "input_stream": [{"a": 10, "b$3": 20, "cxy": 30}],
+      "expected_output": [{"a": 10, "b$3": 20, "cxy": 30}]
+    },
+    {
+      "id": "object_shorthand_interpolation_n3",
+      "query": "{\"a\",\"b$\\(1+3)\",\"c\\(\"x\"+\"y\")\"}",
+      "null_input": false,
+      "input_stream": [{"a": 10, "b$4": 20, "cxy": 30}],
+      "expected_output": [{"a": 10, "b$4": 20, "cxy": 30}]
+    },
+    {
+      "id": "object_shorthand_interpolation_n5",
+      "query": "{\"a\",\"b$\\(1+5)\",\"c\\(\"x\"+\"y\")\"}",
+      "null_input": false,
+      "input_stream": [{"a": 10, "b$6": 20, "cxy": 30}],
+      "expected_output": [{"a": 10, "b$6": 20, "cxy": 30}]
+    },
+    {
+      "id": "object_shorthand_interpolation_n8",
+      "query": "{\"a\",\"b$\\(1+8)\",\"c\\(\"x\"+\"y\")\"}",
+      "null_input": false,
+      "input_stream": [{"a": 10, "b$9": 20, "cxy": 30}],
+      "expected_output": [{"a": 10, "b$9": 20, "cxy": 30}]
+    }
+  ]
+}

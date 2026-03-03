@@ -1,0 +1,9 @@
+# case<TAB>jq_query
+identity	.
+arith_ab	.a + .b
+project_fields	{id,group,value}
+mod_value	.value % 7
+gsub_text	.text | gsub("[aeiou]";"")
+tags_length	.tags | length
+select_gt	select(.id > 2) | .id
+select_test	select(.text | test("alpha")) | .id

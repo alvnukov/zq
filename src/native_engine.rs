@@ -1,6 +1,8 @@
 use regex::Regex;
 use serde_json::Value as JsonValue;
 
+static JSON_NULL: JsonValue = JsonValue::Null;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunOptions {
     pub null_input: bool,
@@ -19,13 +21,38 @@ pub enum TryExecuteStream {
 }
 
 pub fn is_supported(query: &str) -> bool {
-    parse_pipeline(query).is_some()
+    try_compile(query).is_some()
+}
+
+pub struct CompiledProgram {
+    stages: Vec<Vec<Stage>>,
+}
+
+pub fn try_compile(query: &str) -> Option<CompiledProgram> {
+    let stages = parse_pipeline(query)?;
+    Some(CompiledProgram { stages })
 }
 
 #[derive(Debug, Clone)]
 enum Stage {
     Literal(JsonValue),
     Path(Vec<Accessor>),
+    PathAdd {
+        left: Vec<Accessor>,
+        right: Vec<Accessor>,
+    },
+    PathMod {
+        path: Vec<Accessor>,
+        rhs: f64,
+    },
+    ObjectPick {
+        fields: Vec<String>,
+    },
+    Length,
+    Gsub {
+        regex: Regex,
+        replacement: String,
+    },
     SelectTest {
         path: Vec<Accessor>,
         regex: Regex,
@@ -51,6 +78,10 @@ enum Accessor {
 enum CompareOp {
     Eq,
     Ne,
+    Gt,
+    Ge,
+    Lt,
+    Le,
 }
 
 pub fn try_execute(query: &str, inputs: &[JsonValue], run_options: RunOptions) -> TryExecute {
@@ -74,37 +105,72 @@ pub fn try_execute_stream<F>(
 where
     F: FnMut(JsonValue) -> Result<(), String>,
 {
-    let Some(stages) = parse_pipeline(query) else {
+    let Some(program) = try_compile(query) else {
         return TryExecuteStream::Unsupported;
     };
 
-    let mut stream = if run_options.null_input {
-        vec![JsonValue::Null]
-    } else {
-        inputs.to_vec()
-    };
+    if let Err(e) = program.execute_slice(inputs, run_options, &mut emit) {
+        return TryExecuteStream::Executed(Err(e));
+    }
+    TryExecuteStream::Executed(Ok(()))
+}
 
-    for (stage_idx, terms) in stages.iter().enumerate() {
-        let last_stage = stage_idx + 1 == stages.len();
-        if last_stage {
-            for value in stream {
-                if let Err(e) = run_terms_emit(terms, value, &mut emit) {
-                    return TryExecuteStream::Executed(Err(e));
+impl CompiledProgram {
+    pub fn execute_input<F>(&self, root: JsonValue, emit: &mut F) -> Result<(), String>
+    where
+        F: FnMut(JsonValue) -> Result<(), String>,
+    {
+        if self.stages.len() == 1 {
+            return run_terms_emit(&self.stages[0], root, emit);
+        }
+        if self.stages.len() == 2 {
+            let mut mid = Vec::new();
+            run_terms_collect(&self.stages[0], root, &mut mid)?;
+            for value in mid {
+                run_terms_emit(&self.stages[1], value, emit)?;
+            }
+            return Ok(());
+        }
+
+        // Evaluate the full pipeline per root value. This avoids building
+        // large cross-input intermediate vectors for queries like `.x | length`.
+        let mut stream = vec![root];
+        for (stage_idx, terms) in self.stages.iter().enumerate() {
+            let last_stage = stage_idx + 1 == self.stages.len();
+            if last_stage {
+                for value in stream {
+                    run_terms_emit(terms, value, emit)?;
                 }
+                return Ok(());
             }
-            return TryExecuteStream::Executed(Ok(()));
-        }
 
-        let mut out = Vec::new();
-        for value in stream {
-            if let Err(e) = run_terms_collect(terms, value, &mut out) {
-                return TryExecuteStream::Executed(Err(e));
+            let mut out = Vec::new();
+            for value in stream {
+                run_terms_collect(terms, value, &mut out)?;
             }
+            stream = out;
         }
-        stream = out;
+        Ok(())
     }
 
-    TryExecuteStream::Executed(Ok(()))
+    pub fn execute_slice<F>(
+        &self,
+        inputs: &[JsonValue],
+        run_options: RunOptions,
+        emit: &mut F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(JsonValue) -> Result<(), String>,
+    {
+        if run_options.null_input {
+            self.execute_input(JsonValue::Null, emit)?;
+            return Ok(());
+        }
+        for root in inputs {
+            self.execute_input(root.clone(), emit)?;
+        }
+        Ok(())
+    }
 }
 
 fn run_terms_collect(
@@ -139,9 +205,7 @@ where
 {
     let terms_len = terms.len();
     if terms_len == 1 {
-        for result in run_stage(&terms[0], value)? {
-            emit(result)?;
-        }
+        run_stage_emit(&terms[0], value, emit)?;
         return Ok(());
     }
 
@@ -155,9 +219,79 @@ where
                 .expect("value available for branch clone")
                 .clone()
         };
-        for result in run_stage(term, input)? {
-            emit(result)?;
+        run_stage_emit(term, input, emit)?;
+    }
+    Ok(())
+}
+
+fn run_stage_emit<F>(stage: &Stage, input: JsonValue, emit: &mut F) -> Result<(), String>
+where
+    F: FnMut(JsonValue) -> Result<(), String>,
+{
+    match stage {
+        Stage::Literal(v) => emit(v.clone()),
+        Stage::Path(accessors) => run_path_emit(accessors, input, emit),
+        Stage::PathAdd { left, right } => {
+            for value in run_path_add(left, right, input)? {
+                emit(value)?;
+            }
+            Ok(())
         }
+        Stage::PathMod { path, rhs } => {
+            for value in run_path_mod(path, *rhs, input)? {
+                emit(value)?;
+            }
+            Ok(())
+        }
+        Stage::ObjectPick { fields } => {
+            for value in run_object_pick(fields, input)? {
+                emit(value)?;
+            }
+            Ok(())
+        }
+        Stage::Length => {
+            for value in run_length(input)? {
+                emit(value)?;
+            }
+            Ok(())
+        }
+        Stage::Gsub { regex, replacement } => {
+            for value in run_gsub(regex, replacement, input)? {
+                emit(value)?;
+            }
+            Ok(())
+        }
+        Stage::SelectTest { path, regex } => {
+            for value in run_select_test(path, regex, input)? {
+                emit(value)?;
+            }
+            Ok(())
+        }
+        Stage::SelectCompare { path, op, rhs } => {
+            for value in run_select_compare(path, *op, rhs, input)? {
+                emit(value)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn run_path_emit<F>(accessors: &[Accessor], input: JsonValue, emit: &mut F) -> Result<(), String>
+where
+    F: FnMut(JsonValue) -> Result<(), String>,
+{
+    if accessors.is_empty() {
+        emit(input)?;
+        return Ok(());
+    }
+
+    if accessors.len() == 1 {
+        apply_accessor_emit(input, &accessors[0], emit)?;
+        return Ok(());
+    }
+
+    for value in run_path(accessors, input)? {
+        emit(value)?;
     }
     Ok(())
 }
@@ -166,9 +300,131 @@ fn run_stage(stage: &Stage, input: JsonValue) -> Result<Vec<JsonValue>, String> 
     match stage {
         Stage::Literal(v) => Ok(vec![v.clone()]),
         Stage::Path(accessors) => run_path(accessors, input),
+        Stage::PathAdd { left, right } => run_path_add(left, right, input),
+        Stage::PathMod { path, rhs } => run_path_mod(path, *rhs, input),
+        Stage::ObjectPick { fields } => run_object_pick(fields, input),
+        Stage::Length => run_length(input),
+        Stage::Gsub { regex, replacement } => run_gsub(regex, replacement, input),
         Stage::SelectTest { path, regex } => run_select_test(path, regex, input),
         Stage::SelectCompare { path, op, rhs } => run_select_compare(path, *op, rhs, input),
     }
+}
+
+fn run_object_pick(fields: &[String], input: JsonValue) -> Result<Vec<JsonValue>, String> {
+    match input {
+        JsonValue::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(fields.len());
+            for field in fields {
+                out.insert(
+                    field.clone(),
+                    map.get(field).cloned().unwrap_or(JsonValue::Null),
+                );
+            }
+            Ok(vec![JsonValue::Object(out)])
+        }
+        JsonValue::Null => {
+            let mut out = serde_json::Map::with_capacity(fields.len());
+            for field in fields {
+                out.insert(field.clone(), JsonValue::Null);
+            }
+            Ok(vec![JsonValue::Object(out)])
+        }
+        other => Err(format!(
+            "Cannot index {} with string \"{}\"",
+            type_name(&other),
+            fields.first().map(String::as_str).unwrap_or("")
+        )),
+    }
+}
+
+fn run_path_add(
+    left: &[Accessor],
+    right: &[Accessor],
+    input: JsonValue,
+) -> Result<Vec<JsonValue>, String> {
+    if path_is_single_valued(left) && path_is_single_valued(right) {
+        let lhs = run_path_single_ref(left, &input)?;
+        let rhs = run_path_single_ref(right, &input)?;
+        return match (lhs, rhs) {
+            (Some(l), Some(r)) => Ok(vec![binop_add(l.into_owned(), r.into_owned())?]),
+            _ => Ok(Vec::new()),
+        };
+    }
+
+    let lhs_values = run_path(left, input.clone())?;
+    let rhs_values = run_path(right, input)?;
+    let mut out = Vec::with_capacity(lhs_values.len().saturating_mul(rhs_values.len()));
+    for rhs in rhs_values {
+        for lhs in &lhs_values {
+            out.push(binop_add(lhs.clone(), rhs.clone())?);
+        }
+    }
+    Ok(out)
+}
+
+fn binop_add(lhs: JsonValue, rhs: JsonValue) -> Result<JsonValue, String> {
+    match (lhs, rhs) {
+        (JsonValue::Null, r) => Ok(r),
+        (l, JsonValue::Null) => Ok(l),
+        (JsonValue::Number(a), JsonValue::Number(b)) => {
+            let af = a
+                .as_f64()
+                .ok_or_else(|| "number is out of range".to_string())?;
+            let bf = b
+                .as_f64()
+                .ok_or_else(|| "number is out of range".to_string())?;
+            Ok(number_to_json(af + bf))
+        }
+        (JsonValue::String(a), JsonValue::String(b)) => Ok(JsonValue::String(format!("{a}{b}"))),
+        (JsonValue::Array(mut a), JsonValue::Array(b)) => {
+            a.extend(b);
+            Ok(JsonValue::Array(a))
+        }
+        (JsonValue::Object(mut a), JsonValue::Object(b)) => {
+            for (k, v) in b {
+                a.insert(k, v);
+            }
+            Ok(JsonValue::Object(a))
+        }
+        (l, r) => Err(format!(
+            "{} ({}) and {} ({}) cannot be added",
+            type_name(&l),
+            value_for_error(&l),
+            type_name(&r),
+            value_for_error(&r)
+        )),
+    }
+}
+
+fn run_length(input: JsonValue) -> Result<Vec<JsonValue>, String> {
+    let out = match input {
+        JsonValue::Null => JsonValue::from(0),
+        JsonValue::Array(arr) => JsonValue::from(arr.len() as i64),
+        JsonValue::Object(map) => JsonValue::from(map.len() as i64),
+        JsonValue::String(s) => JsonValue::from(s.chars().count() as i64),
+        JsonValue::Number(n) => {
+            let Some(v) = n.as_f64() else {
+                return Err("number is out of range".to_string());
+            };
+            number_to_json(v.abs())
+        }
+        JsonValue::Bool(b) => {
+            return Err(format!("boolean ({b}) has no length"));
+        }
+    };
+    Ok(vec![out])
+}
+
+fn run_gsub(regex: &Regex, replacement: &str, input: JsonValue) -> Result<Vec<JsonValue>, String> {
+    let JsonValue::String(s) = input else {
+        return Err(format!(
+            "{} ({}) cannot be matched, as it is not a string",
+            type_name(&input),
+            value_for_error(&input)
+        ));
+    };
+    let out = regex.replace_all(&s, replacement).to_string();
+    Ok(vec![JsonValue::String(out)])
 }
 
 fn run_select_test(
@@ -176,6 +432,23 @@ fn run_select_test(
     regex: &Regex,
     input: JsonValue,
 ) -> Result<Vec<JsonValue>, String> {
+    if path_is_single_valued(path) {
+        let Some(value) = run_path_single_ref(path, &input)? else {
+            return Ok(Vec::new());
+        };
+        let JsonValue::String(s) = value.as_ref() else {
+            return Err(format!(
+                "{} ({}) cannot be matched, as it is not a string",
+                type_name(value.as_ref()),
+                value_for_error(value.as_ref())
+            ));
+        };
+        if regex.is_match(s) {
+            return Ok(vec![input]);
+        }
+        return Ok(Vec::new());
+    }
+
     let values = run_path(path, input.clone())?;
     let mut matches_count = 0usize;
     for value in values {
@@ -207,13 +480,20 @@ fn run_select_compare(
     rhs: &JsonValue,
     input: JsonValue,
 ) -> Result<Vec<JsonValue>, String> {
+    if path_is_single_valued(path) {
+        let Some(lhs) = run_path_single_ref(path, &input)? else {
+            return Ok(Vec::new());
+        };
+        if compare_with_op(lhs.as_ref(), rhs, op) {
+            return Ok(vec![input]);
+        }
+        return Ok(Vec::new());
+    }
+
     let values = run_path(path, input.clone())?;
     let mut matches_count = 0usize;
     for lhs in values {
-        let is_match = match op {
-            CompareOp::Eq => lhs == *rhs,
-            CompareOp::Ne => lhs != *rhs,
-        };
+        let is_match = compare_with_op(&lhs, rhs, op);
         if is_match {
             matches_count += 1;
         }
@@ -230,15 +510,266 @@ fn run_select_compare(
     Ok(out)
 }
 
+fn compare_with_op(lhs: &JsonValue, rhs: &JsonValue, op: CompareOp) -> bool {
+    match op {
+        CompareOp::Eq => lhs == rhs,
+        CompareOp::Ne => lhs != rhs,
+        CompareOp::Gt => jq_cmp(lhs, rhs) == std::cmp::Ordering::Greater,
+        CompareOp::Ge => {
+            let ord = jq_cmp(lhs, rhs);
+            ord == std::cmp::Ordering::Greater || ord == std::cmp::Ordering::Equal
+        }
+        CompareOp::Lt => jq_cmp(lhs, rhs) == std::cmp::Ordering::Less,
+        CompareOp::Le => {
+            let ord = jq_cmp(lhs, rhs);
+            ord == std::cmp::Ordering::Less || ord == std::cmp::Ordering::Equal
+        }
+    }
+}
+
+// Mirrors jq's ordering contract from src/jv_aux.c:jv_cmp().
+fn jq_cmp(lhs: &JsonValue, rhs: &JsonValue) -> std::cmp::Ordering {
+    let lrank = jq_kind_rank(lhs);
+    let rrank = jq_kind_rank(rhs);
+    if lrank != rrank {
+        return lrank.cmp(&rrank);
+    }
+
+    match (lhs, rhs) {
+        (JsonValue::Null, JsonValue::Null) => std::cmp::Ordering::Equal,
+        (JsonValue::Bool(_), JsonValue::Bool(_)) => std::cmp::Ordering::Equal,
+        (JsonValue::Number(a), JsonValue::Number(b)) => {
+            let af = a.as_f64().unwrap_or(f64::NAN);
+            let bf = b.as_f64().unwrap_or(f64::NAN);
+            af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (JsonValue::String(a), JsonValue::String(b)) => a.cmp(b),
+        (JsonValue::Array(a), JsonValue::Array(b)) => {
+            for (la, lb) in a.iter().zip(b.iter()) {
+                let ord = jq_cmp(la, lb);
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            a.len().cmp(&b.len())
+        }
+        (JsonValue::Object(a), JsonValue::Object(b)) => {
+            let mut akeys = a.keys().cloned().collect::<Vec<_>>();
+            let mut bkeys = b.keys().cloned().collect::<Vec<_>>();
+            akeys.sort();
+            bkeys.sort();
+            let key_ord = akeys.cmp(&bkeys);
+            if key_ord != std::cmp::Ordering::Equal {
+                return key_ord;
+            }
+            for k in akeys {
+                let ord = jq_cmp(
+                    a.get(&k).expect("key from object A"),
+                    b.get(&k).expect("key from object B"),
+                );
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            std::cmp::Ordering::Equal
+        }
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
+fn jq_kind_rank(v: &JsonValue) -> i32 {
+    match v {
+        JsonValue::Null => 1,
+        JsonValue::Bool(false) => 2,
+        JsonValue::Bool(true) => 3,
+        JsonValue::Number(_) => 4,
+        JsonValue::String(_) => 5,
+        JsonValue::Array(_) => 6,
+        JsonValue::Object(_) => 7,
+    }
+}
+
+fn run_path_mod(path: &[Accessor], rhs: f64, input: JsonValue) -> Result<Vec<JsonValue>, String> {
+    if path_is_single_valued(path) {
+        let Some(lhs) = run_path_single_ref(path, &input)? else {
+            return Ok(Vec::new());
+        };
+        let JsonValue::Number(num) = lhs.as_ref() else {
+            let rhs_json = number_to_json(rhs);
+            return Err(format!(
+                "{} ({}) and number ({}) cannot be divided (remainder)",
+                type_name(lhs.as_ref()),
+                value_for_error(lhs.as_ref()),
+                value_for_error(&rhs_json)
+            ));
+        };
+        let Some(lhs_f64) = num.as_f64() else {
+            return Err("number is out of range".to_string());
+        };
+        let v = jq_mod_compat(lhs_f64, rhs)?;
+        return Ok(vec![number_to_json(v)]);
+    }
+
+    let values = run_path(path, input)?;
+    let mut out = Vec::with_capacity(values.len());
+    let rhs_json = number_to_json(rhs);
+    for lhs in values {
+        let JsonValue::Number(num) = lhs else {
+            return Err(format!(
+                "{} ({}) and number ({}) cannot be divided (remainder)",
+                type_name(&lhs),
+                value_for_error(&lhs),
+                value_for_error(&rhs_json)
+            ));
+        };
+        let Some(lhs_f64) = num.as_f64() else {
+            return Err("number is out of range".to_string());
+        };
+        let v = jq_mod_compat(lhs_f64, rhs)?;
+        out.push(number_to_json(v));
+    }
+    Ok(out)
+}
+
+fn jq_dtoi_compat(v: f64) -> i64 {
+    if v < i64::MIN as f64 {
+        i64::MIN
+    } else if -v < i64::MIN as f64 {
+        i64::MAX
+    } else {
+        v as i64
+    }
+}
+
+fn jq_mod_compat(lhs: f64, rhs: f64) -> Result<f64, String> {
+    if lhs.is_nan() || rhs.is_nan() {
+        return Ok(f64::NAN);
+    }
+    let rhs_i = jq_dtoi_compat(rhs);
+    if rhs_i == 0 {
+        return Err("cannot be divided (remainder) because the divisor is zero".to_string());
+    }
+    if rhs_i == -1 {
+        return Ok(0.0);
+    }
+    Ok((jq_dtoi_compat(lhs) % rhs_i) as f64)
+}
+
+fn number_to_json(v: f64) -> JsonValue {
+    if !v.is_finite() {
+        return JsonValue::Null;
+    }
+    if v.fract() == 0.0 && v >= i64::MIN as f64 && v <= i64::MAX as f64 {
+        return JsonValue::from(v as i64);
+    }
+    let n = serde_json::Number::from_f64(v).expect("finite number");
+    JsonValue::Number(n)
+}
+
+fn path_is_single_valued(path: &[Accessor]) -> bool {
+    !path
+        .iter()
+        .any(|a| matches!(a, Accessor::Iter | Accessor::IterOpt))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SinglePathValue<'a> {
+    Borrowed(&'a JsonValue),
+    Null,
+}
+
+impl<'a> SinglePathValue<'a> {
+    fn as_ref(self) -> &'a JsonValue {
+        match self {
+            SinglePathValue::Borrowed(v) => v,
+            SinglePathValue::Null => &JSON_NULL,
+        }
+    }
+
+    fn into_owned(self) -> JsonValue {
+        match self {
+            SinglePathValue::Borrowed(v) => v.clone(),
+            SinglePathValue::Null => JsonValue::Null,
+        }
+    }
+}
+
+fn run_path_single_ref<'a>(
+    path: &[Accessor],
+    input: &'a JsonValue,
+) -> Result<Option<SinglePathValue<'a>>, String> {
+    let mut current = SinglePathValue::Borrowed(input);
+    for accessor in path {
+        current = match accessor {
+            Accessor::Field(name) | Accessor::FieldOpt(name) => match current {
+                SinglePathValue::Null => SinglePathValue::Null,
+                SinglePathValue::Borrowed(JsonValue::Object(map)) => map
+                    .get(name)
+                    .map(SinglePathValue::Borrowed)
+                    .unwrap_or(SinglePathValue::Null),
+                SinglePathValue::Borrowed(other) => {
+                    if matches!(accessor, Accessor::FieldOpt(_)) {
+                        return Ok(None);
+                    }
+                    return Err(format!(
+                        "Cannot index {} with string \"{}\"",
+                        type_name(other),
+                        name
+                    ));
+                }
+            },
+            Accessor::Index(index) | Accessor::IndexOpt(index) => match current {
+                SinglePathValue::Null => SinglePathValue::Null,
+                SinglePathValue::Borrowed(JsonValue::Array(arr)) => {
+                    let len = arr.len() as i64;
+                    let idx = if *index < 0 { len + *index } else { *index };
+                    if idx < 0 || idx >= len {
+                        SinglePathValue::Null
+                    } else {
+                        SinglePathValue::Borrowed(&arr[idx as usize])
+                    }
+                }
+                SinglePathValue::Borrowed(other) => {
+                    if matches!(accessor, Accessor::IndexOpt(_)) {
+                        return Ok(None);
+                    }
+                    return Err(format!("Cannot index {} with number", type_name(other)));
+                }
+            },
+            Accessor::Iter | Accessor::IterOpt => {
+                unreachable!("iter accessors are not single-valued")
+            }
+        };
+    }
+    Ok(Some(current))
+}
+
 fn run_path(accessors: &[Accessor], input: JsonValue) -> Result<Vec<JsonValue>, String> {
-    let mut current = vec![input];
+    if accessors.is_empty() {
+        return Ok(vec![input]);
+    }
+
+    if accessors.len() == 1 {
+        let mut out = Vec::with_capacity(1);
+        apply_accessor_into(input, &accessors[0], &mut out)?;
+        return Ok(out);
+    }
+
+    let mut current = Vec::with_capacity(1);
+    current.push(input);
+    let mut next = Vec::new();
+
     for accessor in accessors {
-        let mut next = Vec::new();
-        for value in current {
+        next.clear();
+        if next.capacity() < current.len() {
+            next.reserve(current.len() - next.capacity());
+        }
+        for value in current.drain(..) {
             apply_accessor_into(value, accessor, &mut next)?;
         }
-        current = next;
+        std::mem::swap(&mut current, &mut next);
     }
+
     Ok(current)
 }
 
@@ -287,6 +818,59 @@ fn apply_accessor_into(
             }
             JsonValue::Object(map) => {
                 out.extend(map.into_iter().map(|(_, v)| v));
+                Ok(())
+            }
+            other => Err(format!(
+                "Cannot iterate over {} ({})",
+                type_name(&other),
+                value_for_error(&other)
+            )),
+        },
+    };
+
+    result.or_else(|e| match accessor {
+        Accessor::FieldOpt(_) | Accessor::IndexOpt(_) | Accessor::IterOpt => Ok(()),
+        _ => Err(e),
+    })
+}
+
+fn apply_accessor_emit<F>(value: JsonValue, accessor: &Accessor, emit: &mut F) -> Result<(), String>
+where
+    F: FnMut(JsonValue) -> Result<(), String>,
+{
+    let result = match accessor {
+        Accessor::Field(name) | Accessor::FieldOpt(name) => match value {
+            JsonValue::Object(map) => emit(map.get(name).cloned().unwrap_or(JsonValue::Null)),
+            JsonValue::Null => emit(JsonValue::Null),
+            other => Err(format!(
+                "Cannot index {} with string \"{}\"",
+                type_name(&other),
+                name
+            )),
+        },
+        Accessor::Index(index) | Accessor::IndexOpt(index) => match value {
+            JsonValue::Array(arr) => {
+                let len = arr.len() as i64;
+                let idx = if *index < 0 { len + *index } else { *index };
+                if idx < 0 || idx >= len {
+                    return emit(JsonValue::Null);
+                }
+                emit(arr[idx as usize].clone())
+            }
+            JsonValue::Null => emit(JsonValue::Null),
+            other => Err(format!("Cannot index {} with number", type_name(&other))),
+        },
+        Accessor::Iter | Accessor::IterOpt => match value {
+            JsonValue::Array(arr) => {
+                for item in arr {
+                    emit(item)?;
+                }
+                Ok(())
+            }
+            JsonValue::Object(map) => {
+                for (_, item) in map {
+                    emit(item)?;
+                }
                 Ok(())
             }
             other => Err(format!(
@@ -363,6 +947,14 @@ fn parse_terms(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<V
 }
 
 fn parse_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<Stage> {
+    if chars.peek().copied() == Some('{') {
+        let mut probe = chars.clone();
+        if let Some(stage) = parse_object_pick_stage(&mut probe) {
+            *chars = probe;
+            return Some(stage);
+        }
+    }
+
     if chars.peek().copied() == Some('.') {
         return parse_path_stage(chars);
     }
@@ -375,12 +967,71 @@ fn parse_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<S
         }
     }
 
+    if chars.peek().copied() == Some('l') {
+        let mut probe = chars.clone();
+        if let Some(stage) = parse_length_stage(&mut probe) {
+            *chars = probe;
+            return Some(stage);
+        }
+    }
+
+    if chars.peek().copied() == Some('g') {
+        let mut probe = chars.clone();
+        if let Some(stage) = parse_gsub_stage(&mut probe) {
+            *chars = probe;
+            return Some(stage);
+        }
+    }
+
     let lit = parse_literal(chars)?;
     Some(Stage::Literal(lit))
 }
 
 fn parse_path_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<Stage> {
-    Some(Stage::Path(parse_path_accessors(chars)?))
+    let left = parse_path_accessors(chars)?;
+    skip_ws(chars);
+    if chars.peek().copied() == Some('+') {
+        chars.next();
+        skip_ws(chars);
+        let right = parse_path_accessors(chars)?;
+        return Some(Stage::PathAdd { left, right });
+    }
+    let path = left;
+    if chars.peek().copied() == Some('%') {
+        chars.next();
+        skip_ws(chars);
+        let rhs = parse_literal(chars)?.as_f64()?;
+        return Some(Stage::PathMod { path, rhs });
+    }
+    Some(Stage::Path(path))
+}
+
+fn parse_object_pick_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<Stage> {
+    if chars.next() != Some('{') {
+        return None;
+    }
+    let mut fields = Vec::new();
+    loop {
+        skip_ws(chars);
+        if chars.peek().copied() == Some('}') {
+            chars.next();
+            break;
+        }
+        let name = parse_field_after_dot(chars)?;
+        fields.push(name);
+        skip_ws(chars);
+        match chars.peek().copied() {
+            Some(',') => {
+                chars.next();
+            }
+            Some('}') => {
+                chars.next();
+                break;
+            }
+            _ => return None,
+        }
+    }
+    Some(Stage::ObjectPick { fields })
 }
 
 fn parse_path_accessors(
@@ -485,12 +1136,69 @@ fn parse_select_compare_op(
 ) -> Option<CompareOp> {
     skip_ws(chars);
     let first = chars.next()?;
-    let second = chars.next()?;
-    match (first, second) {
-        ('=', '=') => Some(CompareOp::Eq),
-        ('!', '=') => Some(CompareOp::Ne),
+    match first {
+        '=' => {
+            if chars.next() == Some('=') {
+                Some(CompareOp::Eq)
+            } else {
+                None
+            }
+        }
+        '!' => {
+            if chars.next() == Some('=') {
+                Some(CompareOp::Ne)
+            } else {
+                None
+            }
+        }
+        '>' => {
+            if chars.peek().copied() == Some('=') {
+                chars.next();
+                Some(CompareOp::Ge)
+            } else {
+                Some(CompareOp::Gt)
+            }
+        }
+        '<' => {
+            if chars.peek().copied() == Some('=') {
+                chars.next();
+                Some(CompareOp::Le)
+            } else {
+                Some(CompareOp::Lt)
+            }
+        }
         _ => None,
     }
+}
+
+fn parse_length_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<Stage> {
+    parse_keyword(chars, "length")?;
+    if matches!(chars.peek().copied(), Some(c) if c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(Stage::Length)
+}
+
+fn parse_gsub_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<Stage> {
+    parse_keyword(chars, "gsub")?;
+    skip_ws(chars);
+    if chars.next() != Some('(') {
+        return None;
+    }
+    skip_ws(chars);
+    let pattern = parse_string(chars)?;
+    skip_ws(chars);
+    if chars.next() != Some(';') {
+        return None;
+    }
+    skip_ws(chars);
+    let replacement = parse_string(chars)?;
+    skip_ws(chars);
+    if chars.next() != Some(')') {
+        return None;
+    }
+    let regex = Regex::new(&pattern).ok()?;
+    Some(Stage::Gsub { regex, replacement })
 }
 
 fn parse_select_rhs_literal(
@@ -829,6 +1537,55 @@ mod tests {
     }
 
     #[test]
+    fn supports_select_compare_ordering_filter() {
+        let input = vec![
+            serde_json::json!({"i": 1}),
+            serde_json::json!({"i": 2}),
+            serde_json::json!({"i": 3}),
+        ];
+        let out = try_execute("select(.i>2)", &input, RunOptions { null_input: false });
+        match out {
+            TryExecute::Executed(Ok(values)) => {
+                assert_eq!(values, vec![serde_json::json!({"i": 3})]);
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn supports_path_mod_literal_length_and_gsub() {
+        let input = vec![serde_json::json!({
+            "value": 11,
+            "tags": [1, 2, 3],
+            "text": "alpha-beta"
+        })];
+
+        let out = try_execute(".value % 7", &input, RunOptions { null_input: false });
+        match out {
+            TryExecute::Executed(Ok(values)) => assert_eq!(values, vec![serde_json::json!(4)]),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let out = try_execute(".tags | length", &input, RunOptions { null_input: false });
+        match out {
+            TryExecute::Executed(Ok(values)) => assert_eq!(values, vec![serde_json::json!(3)]),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let out = try_execute(
+            ".text | gsub(\"[aeiou]\";\"\")",
+            &input,
+            RunOptions { null_input: false },
+        );
+        match out {
+            TryExecute::Executed(Ok(values)) => {
+                assert_eq!(values, vec![serde_json::json!("lph-bt")])
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
     fn select_test_errors_on_non_string_like_jq() {
         let input = vec![serde_json::json!({"name": null})];
         let out = try_execute(
@@ -952,13 +1709,21 @@ mod tests {
             other => panic!("unexpected outcome: {other:?}"),
         }
 
-        let out = try_execute(".[]?", &[serde_json::json!(true)], RunOptions { null_input: false });
+        let out = try_execute(
+            ".[]?",
+            &[serde_json::json!(true)],
+            RunOptions { null_input: false },
+        );
         match out {
             TryExecute::Executed(Ok(values)) => assert!(values.is_empty()),
             other => panic!("unexpected outcome: {other:?}"),
         }
 
-        let out = try_execute(".[2]", &[serde_json::json!([0, 1])], RunOptions { null_input: false });
+        let out = try_execute(
+            ".[2]",
+            &[serde_json::json!([0, 1])],
+            RunOptions { null_input: false },
+        );
         match out {
             TryExecute::Executed(Ok(values)) => assert_eq!(values, vec![JsonValue::Null]),
             other => panic!("unexpected outcome: {other:?}"),
@@ -1015,10 +1780,275 @@ mod tests {
         let out = try_execute("., .a | .", &input, RunOptions { null_input: false });
         match out {
             TryExecute::Executed(Ok(values)) => {
-                assert_eq!(values, vec![serde_json::json!({"a": 1}), serde_json::json!(1)]);
+                assert_eq!(
+                    values,
+                    vec![serde_json::json!({"a": 1}), serde_json::json!(1)]
+                );
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    #[test]
+    fn length_semantics_follow_jq_builtin_c() {
+        let input = vec![
+            serde_json::json!(null),
+            serde_json::json!([1, 2]),
+            serde_json::json!({"a": 1}),
+            serde_json::json!("abμ"),
+            serde_json::json!(-3.5),
+        ];
+        let out = try_execute("length", &input, RunOptions { null_input: false });
+        match out {
+            TryExecute::Executed(Ok(values)) => {
+                assert_eq!(
+                    values,
+                    vec![
+                        serde_json::json!(0),
+                        serde_json::json!(2),
+                        serde_json::json!(1),
+                        serde_json::json!(3),
+                        serde_json::json!(3.5),
+                    ]
+                );
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let out = try_execute(
+            "length",
+            &[serde_json::json!(true)],
+            RunOptions { null_input: false },
+        );
+        match out {
+            TryExecute::Executed(Err(err)) => {
+                assert_eq!(err, "boolean (true) has no length");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modulo_semantics_follow_jq_builtin_c() {
+        let input = vec![
+            serde_json::json!({"v": -5}),
+            serde_json::json!({"v": 0}),
+            serde_json::json!({"v": 7}),
+        ];
+        let out = try_execute(".v % 2", &input, RunOptions { null_input: false });
+        match out {
+            TryExecute::Executed(Ok(values)) => {
+                assert_eq!(
+                    values,
+                    vec![
+                        serde_json::json!(-1),
+                        serde_json::json!(0),
+                        serde_json::json!(1)
+                    ]
+                );
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let out = try_execute(".v % -1", &input, RunOptions { null_input: false });
+        match out {
+            TryExecute::Executed(Ok(values)) => {
+                assert_eq!(
+                    values,
+                    vec![
+                        serde_json::json!(0),
+                        serde_json::json!(0),
+                        serde_json::json!(0)
+                    ]
+                );
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let out = try_execute(".v % 0", &input, RunOptions { null_input: false });
+        match out {
+            TryExecute::Executed(Err(err)) => {
+                assert_eq!(
+                    err,
+                    "cannot be divided (remainder) because the divisor is zero"
+                );
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let out = try_execute(
+            ".v % 2",
+            &[serde_json::json!({"v":"x"})],
+            RunOptions { null_input: false },
+        );
+        match out {
+            TryExecute::Executed(Err(err)) => {
+                assert_eq!(
+                    err,
+                    "string (\"x\") and number (2) cannot be divided (remainder)"
+                );
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_ordering_semantics_follow_jv_cmp() {
+        let input = vec![
+            serde_json::json!({"v": null}),
+            serde_json::json!({"v": false}),
+            serde_json::json!({"v": true}),
+            serde_json::json!({"v": 0}),
+            serde_json::json!({"v": "0"}),
+            serde_json::json!({"v": []}),
+            serde_json::json!({"v": {}}),
+        ];
+        let out = try_execute(
+            "select(.v > false) | .v",
+            &input,
+            RunOptions { null_input: false },
+        );
+        match out {
+            TryExecute::Executed(Ok(values)) => {
+                assert_eq!(
+                    values,
+                    vec![
+                        serde_json::json!(true),
+                        serde_json::json!(0),
+                        serde_json::json!("0"),
+                        serde_json::json!([]),
+                        serde_json::json!({}),
+                    ]
+                );
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let arrs = vec![
+            serde_json::json!({"v":[1,2]}),
+            serde_json::json!({"v":[1,2,0]}),
+            serde_json::json!({"v":[1,3]}),
+        ];
+        let out = try_execute(
+            "select(.v > [1,2]) | .v",
+            &arrs,
+            RunOptions { null_input: false },
+        );
+        match out {
+            TryExecute::Executed(Ok(values)) => {
+                assert_eq!(
+                    values,
+                    vec![serde_json::json!([1, 2, 0]), serde_json::json!([1, 3])]
+                );
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let objs = vec![
+            serde_json::json!({"v":{"a":1}}),
+            serde_json::json!({"v":{"a":1,"b":0}}),
+            serde_json::json!({"v":{"a":2}}),
+        ];
+        let out = try_execute(
+            r#"select(.v > {"a":1}) | .v"#,
+            &objs,
+            RunOptions { null_input: false },
+        );
+        match out {
+            TryExecute::Executed(Ok(values)) => {
+                assert_eq!(
+                    values,
+                    vec![serde_json::json!({"a":1,"b":0}), serde_json::json!({"a":2})]
+                );
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gsub_basic_and_error_semantics_follow_jq() {
+        let out = try_execute(
+            r#"gsub("a";"x")"#,
+            &[serde_json::json!("banana")],
+            RunOptions { null_input: false },
+        );
+        match out {
+            TryExecute::Executed(Ok(values)) => {
+                assert_eq!(values, vec![serde_json::json!("bxnxnx")]);
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let out = try_execute(
+            r#"gsub("a";"x")"#,
+            &[serde_json::json!(1)],
+            RunOptions { null_input: false },
+        );
+        match out {
+            TryExecute::Executed(Err(err)) => {
+                assert_eq!(err, "number (1) cannot be matched, as it is not a string");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bench_regression_queries_are_covered() {
+        let single = vec![serde_json::json!({
+            "id": 8,
+            "active": true,
+            "group": 3,
+            "value": 77,
+            "a": 8,
+            "b": 4,
+            "text": "alpha-beta",
+            "tags": [1, 2, 3]
+        })];
+        let many = vec![
+            serde_json::json!({"id": 1, "active": true}),
+            serde_json::json!({"id": 3, "active": true}),
+            serde_json::json!({"id": 8, "active": true}),
+        ];
+
+        let out = try_execute(".value % 7", &single, RunOptions { null_input: false });
+        assert!(matches!(out, TryExecute::Executed(Ok(_))), "{out:?}");
+
+        let out = try_execute(
+            r#".text | gsub("[aeiou]";"")"#,
+            &single,
+            RunOptions { null_input: false },
+        );
+        assert!(matches!(out, TryExecute::Executed(Ok(_))), "{out:?}");
+
+        let out = try_execute(".tags | length", &single, RunOptions { null_input: false });
+        assert!(matches!(out, TryExecute::Executed(Ok(_))), "{out:?}");
+
+        let out = try_execute("select(.id > 2)", &many, RunOptions { null_input: false });
+        assert!(matches!(out, TryExecute::Executed(Ok(_))), "{out:?}");
+
+        let out = try_execute(".a + .b", &single, RunOptions { null_input: false });
+        match out {
+            TryExecute::Executed(Ok(values)) => assert_eq!(values, vec![serde_json::json!(12)]),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let out = try_execute(
+            "{id,group,value}",
+            &single,
+            RunOptions { null_input: false },
+        );
+        match out {
+            TryExecute::Executed(Ok(values)) => assert_eq!(
+                values,
+                vec![serde_json::json!({"id":8,"group":3,"value":77})]
+            ),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        // Exact complex filter from stdin benchmark that previously failed as unsupported.
+        let complex = r#"select(.active and (.id % 7 == 0)) | {id,group,score:(.a*3 + .b - (.value/10)),txt:(.text|ascii_downcase),ok:(.tags|length>2)}"#;
+        let out = try_execute(complex, &single, RunOptions { null_input: false });
+        assert!(matches!(out, TryExecute::Unsupported), "{out:?}");
     }
 
     #[test]

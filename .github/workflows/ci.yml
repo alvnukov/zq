@@ -33,6 +33,9 @@ jobs:
       - name: Test
         run: cargo test --all-targets --all-features --locked
 
+      - name: Hard Compatibility Tests
+        run: cargo test --locked --test hardcode_guard --test hardcode_guard_clusters --test jq_oracle_baseline
+
   build:
     name: Build (${{ matrix.os }})
     strategy:

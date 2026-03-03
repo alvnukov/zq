@@ -1,6 +1,6 @@
 [package]
 name = "zq"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Standalone jq-compatible query engine with JSON/YAML input and JSON/YAML output"
@@ -19,6 +19,7 @@ regex = "1"
 unsafe-libyaml = "0.2"
 base64 = "0.22"
 memmap2 = "0.9"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

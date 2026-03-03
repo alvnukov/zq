@@ -117,6 +117,46 @@ where
     }
 }
 
+pub fn try_run_jq_native_stream_json_text_options<F>(
+    query: &str,
+    input: &str,
+    run_options: RunOptions,
+    mut emit: F,
+) -> Result<NativeStreamStatus, Error>
+where
+    F: FnMut(JsonValue) -> Result<(), String>,
+{
+    let Some(program) = crate::native_engine::try_compile(query) else {
+        return Ok(NativeStreamStatus::Unsupported);
+    };
+    let mut emitted_any = false;
+    let mut wrapped_emit = |value: JsonValue| {
+        emitted_any = true;
+        emit(value)
+    };
+
+    if run_options.null_input {
+        program
+            .execute_input(JsonValue::Null, &mut wrapped_emit)
+            .map_err(|e| Error::Query(crate::QueryError::Runtime(e)))?;
+        return Ok(NativeStreamStatus::Executed);
+    }
+
+    for next in serde_json::Deserializer::from_str(input).into_iter::<JsonValue>() {
+        let value = match next {
+            Ok(v) => v,
+            // Let caller fallback to the standard parser path
+            // (JSON + YAML compatibility handling).
+            Err(e) if emitted_any => return Err(Error::Query(crate::QueryError::Json(e))),
+            Err(_) => return Ok(NativeStreamStatus::Unsupported),
+        };
+        program
+            .execute_input(value, &mut wrapped_emit)
+            .map_err(|e| Error::Query(crate::QueryError::Runtime(e)))?;
+    }
+    Ok(NativeStreamStatus::Executed)
+}
+
 pub fn parse_jq_input_values(
     input: &str,
     doc_mode: DocMode,

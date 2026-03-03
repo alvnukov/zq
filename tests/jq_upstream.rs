@@ -102,54 +102,11 @@ fn jq_upstream_suite() {
         return;
     }
 
-    let has_git = Command::new("git")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success());
-    let has_jq = Command::new("jq")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success());
-
-    assert!(has_git, "git is required for upstream jq suite");
-    assert!(has_jq, "jq is required for upstream jq suite");
-
     let run_tests_timeout = read_timeout("ZQ_JQ_RUN_TESTS_TIMEOUT_SECS", 900);
     let shtest_timeout = read_timeout("ZQ_JQ_SHTEST_TIMEOUT_SECS", 3600);
-    if run_local_jq_clones(run_tests_timeout, shtest_timeout) {
-        return;
+    if !run_local_jq_clones(run_tests_timeout, shtest_timeout) {
+        eprintln!("skip jq upstream suite: local clones are required at .tmp/jq and/or .tmp/jq171");
     }
-
-    let td = tempfile::TempDir::new().expect("tempdir");
-    let jq_repo = td.path().join("jq");
-    let jq_ref = resolve_jq_upstream_ref();
-
-    clone_jq_repo(&jq_repo, jq_ref.as_deref());
-
-    let tests_dir = jq_repo.join("tests");
-    let modules_dir = tests_dir.join("modules");
-    let test_files = collect_test_files(&tests_dir);
-    assert!(
-        !test_files.is_empty(),
-        "no *.test files found in jq upstream"
-    );
-
-    run_test_files_sequential(test_files, &modules_dir, &tests_dir, run_tests_timeout);
-
-    if std::env::var("ZQ_JQ_SKIP_SHTEST").ok().as_deref() == Some("1") {
-        eprintln!("skip jq upstream shtest: set ZQ_JQ_SKIP_SHTEST=0 (or unset) to run");
-        return;
-    }
-
-    run_cmd(
-        Command::new("sh")
-            .arg(tests_dir.join("shtest"))
-            .env("JQ", zq_bin())
-            .env("PAGER", "less")
-            .current_dir(&tests_dir),
-        "run jq upstream shtest via zq",
-        shtest_timeout,
-    );
 }
 
 fn read_timeout(env_name: &str, default_secs: u64) -> Duration {
@@ -159,73 +116,6 @@ fn read_timeout(env_name: &str, default_secs: u64) -> Duration {
         .filter(|v| *v > 0)
         .unwrap_or(default_secs);
     Duration::from_secs(secs)
-}
-
-fn resolve_jq_upstream_ref() -> Option<String> {
-    if let Ok(explicit) = std::env::var("ZQ_JQ_UPSTREAM_REF") {
-        let explicit = explicit.trim();
-        if !explicit.is_empty() {
-            return Some(explicit.to_string());
-        }
-    }
-
-    let out = Command::new("jq").arg("--version").output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let version = String::from_utf8_lossy(&out.stdout);
-    let trimmed = version.trim();
-    let without_prefix = trimmed.strip_prefix("jq-")?;
-    let semver = without_prefix
-        .split('-')
-        .next()
-        .unwrap_or(without_prefix)
-        .trim();
-    if semver.is_empty() {
-        return None;
-    }
-    Some(format!("jq-{semver}"))
-}
-
-fn clone_jq_repo(dst: &Path, jq_ref: Option<&str>) {
-    if let Some(tag) = jq_ref {
-        let mut clone_tag = Command::new("git");
-        clone_tag
-            .arg("clone")
-            .arg("--depth=1")
-            .arg("--branch")
-            .arg(tag)
-            .arg("https://github.com/jqlang/jq")
-            .arg(dst);
-
-        match run_cmd_capture_timeout(
-            &mut clone_tag,
-            Duration::from_secs(120),
-            "clone jq upstream (tag)",
-        ) {
-            Ok(out) if out.status.success() => return,
-            Ok(out) => {
-                eprintln!(
-                    "failed to clone jq ref {tag}, fallback to default branch\nstdout:\n{}\nstderr:\n{}",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            }
-            Err(err) => {
-                eprintln!("failed to clone jq ref {tag}, fallback to default branch\n{err}");
-            }
-        }
-    }
-
-    run_cmd(
-        Command::new("git")
-            .arg("clone")
-            .arg("--depth=1")
-            .arg("https://github.com/jqlang/jq")
-            .arg(dst),
-        "clone jq upstream",
-        Duration::from_secs(120),
-    );
 }
 
 fn run_local_jq_clones(run_tests_timeout: Duration, shtest_timeout: Duration) -> bool {

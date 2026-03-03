@@ -26,13 +26,13 @@ pub fn run() -> Result<i32, Error> {
     run_with(cli, compat_args)
 }
 
-fn query_uses_inputs_builtin(query: &str) -> bool {
+fn query_uses_any_builtin(query: &str, builtins: &[&str]) -> bool {
     let mut in_string = false;
     let mut escaped = false;
     let mut token = String::new();
 
     let flush = |token: &mut String| {
-        let out = token == "input" || token == "inputs";
+        let out = builtins.contains(&token.as_str());
         token.clear();
         out
     };
@@ -67,45 +67,12 @@ fn query_uses_inputs_builtin(query: &str) -> bool {
     flush(&mut token)
 }
 
+fn query_uses_inputs_builtin(query: &str) -> bool {
+    query_uses_any_builtin(query, &["input", "inputs"])
+}
+
 fn query_uses_stderr_builtin(query: &str) -> bool {
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut token = String::new();
-
-    let flush = |token: &mut String| {
-        let out = token == "stderr";
-        token.clear();
-        out
-    };
-
-    for ch in query.chars() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        if ch == '"' {
-            if flush(&mut token) {
-                return true;
-            }
-            in_string = true;
-            continue;
-        }
-
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            token.push(ch);
-        } else if flush(&mut token) {
-            return true;
-        }
-    }
-
-    flush(&mut token)
+    query_uses_any_builtin(query, &["stderr"])
 }
 
 fn parse_halt_error_code(expr: &str) -> Option<i32> {
@@ -249,46 +216,39 @@ fn extract_cli_compat_args(args: Vec<String>) -> Result<(Vec<String>, CliCompatA
 
         match arg {
             "--arg" => {
-                if i + 2 >= args.len() {
-                    return Err(invalid_cli_arg("--arg requires two arguments: NAME VALUE"));
-                }
-                let name = args[i + 1].clone();
-                let value = JsonValue::String(args[i + 2].clone());
+                let (name_raw, value_raw) =
+                    parse_named_arg_pair(&args, i, "--arg requires two arguments: NAME VALUE")?;
+                let name = name_raw.to_string();
+                let value = JsonValue::String(value_raw.to_string());
                 compat.named_vars.insert(name.clone(), value.clone());
                 compat.named_args.insert(name, value);
                 i += 3;
             }
             "--argjson" => {
-                if i + 2 >= args.len() {
-                    return Err(invalid_cli_arg(
-                        "--argjson requires two arguments: NAME JSON",
-                    ));
-                }
-                let name = args[i + 1].clone();
-                let value = parse_named_json("--argjson", &args[i + 2])?;
+                let (name_raw, value_raw) =
+                    parse_named_arg_pair(&args, i, "--argjson requires two arguments: NAME JSON")?;
+                let name = name_raw.to_string();
+                let value = parse_named_json("--argjson", value_raw)?;
                 compat.named_vars.insert(name.clone(), value.clone());
                 compat.named_args.insert(name, value);
                 i += 3;
             }
             "--slurpfile" => {
-                if i + 2 >= args.len() {
-                    return Err(invalid_cli_arg(
-                        "--slurpfile requires two arguments: NAME FILE",
-                    ));
-                }
-                let name = args[i + 1].clone();
-                let values = read_slurpfile_values(&args[i + 2])?;
+                let (name_raw, path_raw) = parse_named_arg_pair(
+                    &args,
+                    i,
+                    "--slurpfile requires two arguments: NAME FILE",
+                )?;
+                let name = name_raw.to_string();
+                let values = read_slurpfile_values(path_raw)?;
                 compat.named_vars.insert(name, JsonValue::Array(values));
                 i += 3;
             }
             "--rawfile" => {
-                if i + 2 >= args.len() {
-                    return Err(invalid_cli_arg(
-                        "--rawfile requires two arguments: NAME FILE",
-                    ));
-                }
-                let name = args[i + 1].clone();
-                let value = fs::read_to_string(&args[i + 2])?;
+                let (name_raw, path_raw) =
+                    parse_named_arg_pair(&args, i, "--rawfile requires two arguments: NAME FILE")?;
+                let name = name_raw.to_string();
+                let value = fs::read_to_string(path_raw)?;
                 compat.named_vars.insert(name, JsonValue::String(value));
                 i += 3;
             }
@@ -328,6 +288,17 @@ fn parse_positional_value(mode: PositionalArgsMode, raw: &str) -> Result<JsonVal
 
 fn invalid_cli_arg(msg: impl Into<String>) -> Error {
     Error::Io(io::Error::new(io::ErrorKind::InvalidInput, msg.into()))
+}
+
+fn parse_named_arg_pair<'a>(
+    args: &'a [String],
+    i: usize,
+    error_message: &'static str,
+) -> Result<(&'a str, &'a str), Error> {
+    if i + 2 >= args.len() {
+        return Err(invalid_cli_arg(error_message));
+    }
+    Ok((args[i + 1].as_str(), args[i + 2].as_str()))
 }
 
 fn read_slurpfile_values(path: &str) -> Result<Vec<JsonValue>, Error> {
@@ -386,7 +357,7 @@ fn run_cli_compat_special(base_query: &str, compat: &CliCompatArgs) -> Option<Ve
     let q = base_query.trim();
     let q_no_ws: String = q.chars().filter(|ch| !ch.is_whitespace()).collect();
 
-    if q == "{$foo, $bar} | ., . == $ARGS.named" {
+    let compat_foo_bar = || {
         let mut obj = JsonMap::new();
         obj.insert(
             "foo".to_string(),
@@ -404,30 +375,17 @@ fn run_cli_compat_special(base_query: &str, compat: &CliCompatArgs) -> Option<Ve
                 .cloned()
                 .unwrap_or(JsonValue::Null),
         );
-        let obj_value = JsonValue::Object(obj);
+        JsonValue::Object(obj)
+    };
+
+    if q == "{$foo, $bar} | ., . == $ARGS.named" {
+        let obj_value = compat_foo_bar();
         let named = JsonValue::Object(compat.named_args.clone());
         return Some(vec![obj_value.clone(), JsonValue::Bool(obj_value == named)]);
     }
 
     if q == "{$foo, $bar}" {
-        let mut obj = JsonMap::new();
-        obj.insert(
-            "foo".to_string(),
-            compat
-                .named_vars
-                .get("foo")
-                .cloned()
-                .unwrap_or(JsonValue::Null),
-        );
-        obj.insert(
-            "bar".to_string(),
-            compat
-                .named_vars
-                .get("bar")
-                .cloned()
-                .unwrap_or(JsonValue::Null),
-        );
-        return Some(vec![JsonValue::Object(obj)]);
+        return Some(vec![compat_foo_bar()]);
     }
 
     if q == "$ARGS.positional" {
@@ -604,17 +562,14 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
 
     let mut pre_parsed_standard_inputs: Option<Vec<JsonValue>> = None;
     if can_native_stream_direct {
-        let inputs = zq::parse_jq_input_values(input, doc_mode, "jq")
-            .map_err(|e| Error::Query(render_engine_error("jq", input, e)))?;
-
         let stdout = io::stdout();
         let mut writer = io::BufWriter::new(stdout.lock());
         let mut wrote_any = false;
         let mut json_scratch = Vec::new();
 
-        let native_status = zq::try_run_jq_native_stream_with_paths_options(
+        let native_status = zq::try_run_jq_native_stream_json_text_options(
             query.as_str(),
-            &inputs,
+            input,
             zq::EngineRunOptions { null_input: false },
             |value| {
                 if wrote_any && !cli.join_output {
@@ -644,6 +599,9 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
             }
             return Ok(0);
         }
+
+        let inputs = zq::parse_jq_input_values(input, doc_mode, "jq")
+            .map_err(|e| Error::Query(render_engine_error("jq", input, e)))?;
         pre_parsed_standard_inputs = Some(inputs);
     }
 
@@ -2666,12 +2624,20 @@ fn print_heavy_cases(timings: &[TestTiming]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
 
     fn parse_cli_for_test(args: &[&str]) -> Cli {
         let mut all = Vec::with_capacity(args.len() + 1);
         all.push("zq");
         all.extend_from_slice(args);
         Cli::parse_from(all)
+    }
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock poisoned")
     }
 
     #[test]
@@ -2974,15 +2940,27 @@ mod tests {
                 "--arg requires two arguments",
             ),
             (
-                vec!["zq".to_string(), "--argjson".to_string(), "name".to_string()],
+                vec![
+                    "zq".to_string(),
+                    "--argjson".to_string(),
+                    "name".to_string(),
+                ],
                 "--argjson requires two arguments",
             ),
             (
-                vec!["zq".to_string(), "--slurpfile".to_string(), "name".to_string()],
+                vec![
+                    "zq".to_string(),
+                    "--slurpfile".to_string(),
+                    "name".to_string(),
+                ],
                 "--slurpfile requires two arguments",
             ),
             (
-                vec!["zq".to_string(), "--rawfile".to_string(), "name".to_string()],
+                vec![
+                    "zq".to_string(),
+                    "--rawfile".to_string(),
+                    "name".to_string(),
+                ],
                 "--rawfile requires two arguments",
             ),
         ];
@@ -3186,7 +3164,13 @@ mod tests {
         }];
         let mut i = 0usize;
         let mut root_done = false;
-        assert!(advance_json_scan(b"]", &mut i, 1, &mut frames, &mut root_done));
+        assert!(advance_json_scan(
+            b"]",
+            &mut i,
+            1,
+            &mut frames,
+            &mut root_done
+        ));
         assert!(root_done);
 
         let mut frames = vec![JsonScanFrame::Array {
@@ -3195,7 +3179,13 @@ mod tests {
         }];
         let mut i = 0usize;
         let mut root_done = false;
-        assert!(advance_json_scan(b",", &mut i, 1, &mut frames, &mut root_done));
+        assert!(advance_json_scan(
+            b",",
+            &mut i,
+            1,
+            &mut frames,
+            &mut root_done
+        ));
         assert!(matches!(
             frames[0],
             JsonScanFrame::Array {
@@ -3210,7 +3200,13 @@ mod tests {
         }];
         let mut i = 0usize;
         let mut root_done = false;
-        assert!(advance_json_scan(b"]", &mut i, 1, &mut frames, &mut root_done));
+        assert!(advance_json_scan(
+            b"]",
+            &mut i,
+            1,
+            &mut frames,
+            &mut root_done
+        ));
         assert!(root_done);
 
         let mut frames = vec![JsonScanFrame::Array {
@@ -3219,7 +3215,13 @@ mod tests {
         }];
         let mut i = 0usize;
         let mut root_done = false;
-        assert!(!advance_json_scan(b"x", &mut i, 1, &mut frames, &mut root_done));
+        assert!(!advance_json_scan(
+            b"x",
+            &mut i,
+            1,
+            &mut frames,
+            &mut root_done
+        ));
 
         let mut frames = vec![JsonScanFrame::Object {
             key: None,
@@ -3227,7 +3229,13 @@ mod tests {
         }];
         let mut i = 0usize;
         let mut root_done = false;
-        assert!(advance_json_scan(b"}", &mut i, 1, &mut frames, &mut root_done));
+        assert!(advance_json_scan(
+            b"}",
+            &mut i,
+            1,
+            &mut frames,
+            &mut root_done
+        ));
         assert!(root_done);
 
         let raw = r#""a""#;
@@ -3258,7 +3266,13 @@ mod tests {
         }];
         let mut i = 0usize;
         let mut root_done = false;
-        assert!(advance_json_scan(b":", &mut i, 1, &mut frames, &mut root_done));
+        assert!(advance_json_scan(
+            b":",
+            &mut i,
+            1,
+            &mut frames,
+            &mut root_done
+        ));
         assert!(matches!(
             frames[0],
             JsonScanFrame::Object {
@@ -3273,7 +3287,13 @@ mod tests {
         }];
         let mut i = 0usize;
         let mut root_done = false;
-        assert!(advance_json_scan(b",", &mut i, 1, &mut frames, &mut root_done));
+        assert!(advance_json_scan(
+            b",",
+            &mut i,
+            1,
+            &mut frames,
+            &mut root_done
+        ));
         assert!(matches!(
             frames[0],
             JsonScanFrame::Object {
@@ -3288,7 +3308,13 @@ mod tests {
         }];
         let mut i = 0usize;
         let mut root_done = false;
-        assert!(advance_json_scan(b"}", &mut i, 1, &mut frames, &mut root_done));
+        assert!(advance_json_scan(
+            b"}",
+            &mut i,
+            1,
+            &mut frames,
+            &mut root_done
+        ));
         assert!(root_done);
 
         let mut i = 0usize;
@@ -3330,12 +3356,24 @@ mod tests {
         let mut i = 0usize;
         let mut frames = Vec::new();
         let mut root_done = false;
-        assert!(!scan_json_value(b"\"", &mut i, 1, &mut frames, &mut root_done));
+        assert!(!scan_json_value(
+            b"\"",
+            &mut i,
+            1,
+            &mut frames,
+            &mut root_done
+        ));
 
         let mut i = 0usize;
         let mut frames = Vec::new();
         let mut root_done = false;
-        assert!(!scan_json_value(b"x", &mut i, 1, &mut frames, &mut root_done));
+        assert!(!scan_json_value(
+            b"x",
+            &mut i,
+            1,
+            &mut frames,
+            &mut root_done
+        ));
 
         let mut frames = vec![JsonScanFrame::Object {
             key: Some("a".to_string()),
@@ -3643,6 +3681,7 @@ mod tests {
             .expect("raw slurp stream");
         assert_eq!(raw_slurp, vec![serde_json::json!("a\nb\n")]);
 
+        let _guard = env_lock();
         let env = ScopedEnvVar::set("JQ_COLORS", "invalid");
         let color_cli = parse_cli_for_test(&["-C", "."]);
         let opts = resolve_json_color_options(&color_cli);
@@ -3663,6 +3702,7 @@ mod tests {
         assert!(!default_opts.warn_invalid);
 
         let palette = "0;90:0;39:0;39:0;39:0;32:1;39:1;39:1;31";
+        let _guard = env_lock();
         let env = ScopedEnvVar::set("JQ_COLORS", palette);
         let color_cli = parse_cli_for_test(&["-C", "."]);
         let opts = resolve_json_color_options(&color_cli);

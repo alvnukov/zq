@@ -294,6 +294,12 @@ fn parse_jq_nan_json(input: &[u8]) -> Option<ValR> {
         return None;
     }
 
+    // jq 1.7.x accepts lowercase NaN payloads ("nan123") as NaN.
+    // Keep uppercase payloads strict for newer jq behavior.
+    if s.starts_with("nan") || s.starts_with("-nan") {
+        return Some(Ok(Val::Num(Num::Float(f64::NAN))));
+    }
+
     let col = s.len();
     Some(Err(Error::str(format_args!(
         "Invalid numeric literal at EOF at line 1, column {col} (while parsing '{s}')"

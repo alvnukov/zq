@@ -753,33 +753,27 @@ impl Val {
 
     fn jq_dump_string_trunc(&self, bufsize: usize) -> String {
         debug_assert!(bufsize > 0);
-        let dumped = String::from_utf8_lossy(&self.to_json()).into_owned();
-        let len = dumped.len();
-        if len > bufsize.saturating_sub(1) && bufsize >= 8 {
-            let delim = match dumped.as_bytes().first().copied() {
-                Some(b'"') => Some('"'),
-                Some(b'[') => Some(']'),
-                Some(b'{') => Some('}'),
-                _ => None,
-            };
-            let mut l = bufsize - if delim.is_some() { 5 } else { 4 };
-            while l > 0 && !dumped.is_char_boundary(l) {
-                l -= 1;
-            }
-            let mut out = String::from(&dumped[..l]);
-            out.push_str("...");
-            if let Some(d) = delim {
-                out.push(d);
-            }
-            out
+        let dumped = self.to_json();
+        let dumped_len = dumped.len();
+        let max = bufsize.saturating_sub(1);
+        let mut out = if dumped.len() > max {
+            dumped[..max].to_vec()
         } else {
-            let l = core::cmp::min(len, bufsize.saturating_sub(1));
-            String::from(&dumped[..l])
+            dumped
+        };
+        if dumped_len > max && bufsize >= 4 && out.len() >= 3 {
+            let n = out.len();
+            out[n - 1] = b'.';
+            out[n - 2] = b'.';
+            out[n - 3] = b'.';
         }
+        String::from_utf8_lossy(&out).into_owned()
     }
 
     fn jq_value_repr(&self) -> String {
-        self.jq_dump_string_trunc(30)
+        // jq's type_error paths use jv_dump_string_trunc() with a 15-byte buffer.
+        // Keep this width to preserve jq-compatible error messages.
+        self.jq_dump_string_trunc(15)
     }
 
     fn jq_typed_value(&self) -> String {

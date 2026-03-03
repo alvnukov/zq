@@ -1,6 +1,8 @@
 use crate::{Error, ValR, ValT, ValTx};
 use alloc::string::{String, ToString};
 use jiff::{civil::DateTime, fmt::strtime, tz, Timestamp};
+#[cfg(feature = "std")]
+use std::process::Command;
 
 /// Convert a UNIX epoch timestamp with optional fractions.
 fn epoch_to_timestamp<V: ValT>(v: &V) -> Result<Timestamp, Error<V>> {
@@ -120,12 +122,63 @@ pub fn gmtime<V: ValT>(v: &V, tz: tz::TimeZone) -> ValR<V> {
 
 /// Parse a string into a "broken down time" array.
 pub fn strptime<V: ValT>(s: &str, fmt: &str) -> ValR<V> {
-    let mut bdt = strtime::BrokenDownTime::parse(fmt, s).map_err(Error::str)?;
+    let mut bdt = match strtime::BrokenDownTime::parse(fmt, s) {
+        Ok(v) => v,
+        Err(primary_err) => {
+            #[cfg(feature = "std")]
+            if let Some(dt) = strptime_with_system_date(s, fmt) {
+                return datetime_to_array(dt).into_iter().map(Ok).collect();
+            }
+            return Err(Error::str(primary_err));
+        }
+    };
     if (bdt.offset(), bdt.iana_time_zone()) == (None, None) {
         bdt.set_offset(Some(tz::Offset::UTC));
     }
     let dt = bdt.to_zoned().map_err(Error::str)?.into();
     datetime_to_array(dt).into_iter().map(Ok).collect()
+}
+
+#[cfg(feature = "std")]
+fn strptime_with_system_date(s: &str, fmt: &str) -> Option<DateTime> {
+    fn parse_out(out: &[u8]) -> Option<DateTime> {
+        let text = String::from_utf8_lossy(out);
+        let trimmed = text.trim();
+        let (date, time) = trimmed.split_once(' ')?;
+        let mut d = date.split('-');
+        let year: i16 = d.next()?.parse().ok()?;
+        let month: i8 = d.next()?.parse().ok()?;
+        let day: i8 = d.next()?.parse().ok()?;
+        let mut t = time.split(':');
+        let hour: i8 = t.next()?.parse().ok()?;
+        let min: i8 = t.next()?.parse().ok()?;
+        let sec: i8 = t.next()?.parse().ok()?;
+        DateTime::new(year, month, day, hour, min, sec, 0).ok()
+    }
+
+    // BSD/macOS date.
+    if let Ok(out) = Command::new("date")
+        .args(["-j", "-f", fmt, s, "+%Y-%m-%d %H:%M:%S"])
+        .output()
+    {
+        if out.status.success() {
+            if let Some(dt) = parse_out(&out.stdout) {
+                return Some(dt);
+            }
+        }
+    }
+
+    // GNU date fallback.
+    if let Ok(out) = Command::new("date")
+        .args(["-d", s, "+%Y-%m-%d %H:%M:%S"])
+        .output()
+    {
+        if out.status.success() {
+            return parse_out(&out.stdout);
+        }
+    }
+
+    None
 }
 
 /// Parse an array into a UNIX epoch timestamp.

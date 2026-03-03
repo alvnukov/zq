@@ -1,3 +1,4 @@
+use regex::Regex;
 use serde_json::Value as JsonValue;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,10 +12,22 @@ pub enum TryExecute {
     Executed(Result<Vec<JsonValue>, String>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
+pub enum TryExecuteStream {
+    Unsupported,
+    Executed(Result<(), String>),
+}
+
+#[cfg_attr(feature = "legacy-jaq", allow(dead_code))]
+pub fn is_supported(query: &str) -> bool {
+    parse_pipeline(query).is_some()
+}
+
+#[derive(Debug, Clone)]
 enum Stage {
     Literal(JsonValue),
     Path(Vec<Accessor>),
+    SelectTest { path: Vec<Accessor>, regex: Regex },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,8 +41,28 @@ enum Accessor {
 }
 
 pub fn try_execute(query: &str, inputs: &[JsonValue], run_options: RunOptions) -> TryExecute {
+    let mut out = Vec::new();
+    match try_execute_stream(query, inputs, run_options, |value| {
+        out.push(value);
+        Ok(())
+    }) {
+        TryExecuteStream::Unsupported => TryExecute::Unsupported,
+        TryExecuteStream::Executed(Ok(())) => TryExecute::Executed(Ok(out)),
+        TryExecuteStream::Executed(Err(e)) => TryExecute::Executed(Err(e)),
+    }
+}
+
+pub fn try_execute_stream<F>(
+    query: &str,
+    inputs: &[JsonValue],
+    run_options: RunOptions,
+    mut emit: F,
+) -> TryExecuteStream
+where
+    F: FnMut(JsonValue) -> Result<(), String>,
+{
     let Some(stages) = parse_pipeline(query) else {
-        return TryExecute::Unsupported;
+        return TryExecuteStream::Unsupported;
     };
 
     let mut stream = if run_options.null_input {
@@ -38,26 +71,112 @@ pub fn try_execute(query: &str, inputs: &[JsonValue], run_options: RunOptions) -
         inputs.to_vec()
     };
 
-    for terms in stages {
+    for (stage_idx, terms) in stages.iter().enumerate() {
+        let last_stage = stage_idx + 1 == stages.len();
+        if last_stage {
+            for value in stream {
+                if let Err(e) = run_terms_emit(terms, value, &mut emit) {
+                    return TryExecuteStream::Executed(Err(e));
+                }
+            }
+            return TryExecuteStream::Executed(Ok(()));
+        }
+
         let mut out = Vec::new();
         for value in stream {
-            for term in &terms {
-                match run_stage(term, value.clone()) {
-                    Ok(values) => out.extend(values),
-                    Err(e) => return TryExecute::Executed(Err(e)),
-                }
+            if let Err(e) = run_terms_collect(terms, value, &mut out) {
+                return TryExecuteStream::Executed(Err(e));
             }
         }
         stream = out;
     }
-    TryExecute::Executed(Ok(stream))
+
+    TryExecuteStream::Executed(Ok(()))
+}
+
+fn run_terms_collect(terms: &[Stage], value: JsonValue, out: &mut Vec<JsonValue>) -> Result<(), String> {
+    let terms_len = terms.len();
+    if terms_len == 1 {
+        out.extend(run_stage(&terms[0], value)?);
+        return Ok(());
+    }
+
+    let mut original = Some(value);
+    for (idx, term) in terms.iter().enumerate() {
+        let input = if idx + 1 == terms_len {
+            original.take().expect("value available for last branch")
+        } else {
+            original
+                .as_ref()
+                .expect("value available for branch clone")
+                .clone()
+        };
+        out.extend(run_stage(term, input)?);
+    }
+    Ok(())
+}
+
+fn run_terms_emit<F>(terms: &[Stage], value: JsonValue, emit: &mut F) -> Result<(), String>
+where
+    F: FnMut(JsonValue) -> Result<(), String>,
+{
+    let terms_len = terms.len();
+    if terms_len == 1 {
+        for result in run_stage(&terms[0], value)? {
+            emit(result)?;
+        }
+        return Ok(());
+    }
+
+    let mut original = Some(value);
+    for (idx, term) in terms.iter().enumerate() {
+        let input = if idx + 1 == terms_len {
+            original.take().expect("value available for last branch")
+        } else {
+            original
+                .as_ref()
+                .expect("value available for branch clone")
+                .clone()
+        };
+        for result in run_stage(term, input)? {
+            emit(result)?;
+        }
+    }
+    Ok(())
 }
 
 fn run_stage(stage: &Stage, input: JsonValue) -> Result<Vec<JsonValue>, String> {
     match stage {
         Stage::Literal(v) => Ok(vec![v.clone()]),
         Stage::Path(accessors) => run_path(accessors, input),
+        Stage::SelectTest { path, regex } => run_select_test(path, regex, input),
     }
+}
+
+fn run_select_test(path: &[Accessor], regex: &Regex, input: JsonValue) -> Result<Vec<JsonValue>, String> {
+    let values = run_path(path, input.clone())?;
+    let mut matches_count = 0usize;
+    for value in values {
+        let JsonValue::String(s) = value else {
+            return Err(format!(
+                "{} ({}) cannot be matched, as it is not a string",
+                type_name(&value),
+                value_for_error(&value)
+            ));
+        };
+        if regex.is_match(&s) {
+            matches_count += 1;
+        }
+    }
+    let mut out = Vec::with_capacity(matches_count);
+    if matches_count == 0 {
+        return Ok(out);
+    }
+    for _ in 1..matches_count {
+        out.push(input.clone());
+    }
+    out.push(input);
+    Ok(out)
 }
 
 fn run_path(accessors: &[Accessor], input: JsonValue) -> Result<Vec<JsonValue>, String> {
@@ -65,19 +184,24 @@ fn run_path(accessors: &[Accessor], input: JsonValue) -> Result<Vec<JsonValue>, 
     for accessor in accessors {
         let mut next = Vec::new();
         for value in current {
-            let mut values = apply_accessor(value, accessor)?;
-            next.append(&mut values);
+            apply_accessor_into(value, accessor, &mut next)?;
         }
         current = next;
     }
     Ok(current)
 }
 
-fn apply_accessor(value: JsonValue, accessor: &Accessor) -> Result<Vec<JsonValue>, String> {
-    match accessor {
+fn apply_accessor_into(value: JsonValue, accessor: &Accessor, out: &mut Vec<JsonValue>) -> Result<(), String> {
+    let result = match accessor {
         Accessor::Field(name) | Accessor::FieldOpt(name) => match value {
-            JsonValue::Object(map) => Ok(vec![map.get(name).cloned().unwrap_or(JsonValue::Null)]),
-            JsonValue::Null => Ok(vec![JsonValue::Null]),
+            JsonValue::Object(map) => {
+                out.push(map.get(name).cloned().unwrap_or(JsonValue::Null));
+                Ok(())
+            }
+            JsonValue::Null => {
+                out.push(JsonValue::Null);
+                Ok(())
+            }
             other => Err(format!(
                 "Cannot index {} with string \"{}\"",
                 type_name(&other),
@@ -89,25 +213,37 @@ fn apply_accessor(value: JsonValue, accessor: &Accessor) -> Result<Vec<JsonValue
                 let len = arr.len() as i64;
                 let idx = if *index < 0 { len + *index } else { *index };
                 if idx < 0 || idx >= len {
-                    return Ok(vec![JsonValue::Null]);
+                    out.push(JsonValue::Null);
+                    return Ok(());
                 }
-                Ok(vec![arr[idx as usize].clone()])
+                out.push(arr[idx as usize].clone());
+                Ok(())
             }
-            JsonValue::Null => Ok(vec![JsonValue::Null]),
-            other => Err(format!(
-                "Cannot index {} with number {}",
-                type_name(&other),
-                index
-            )),
+            JsonValue::Null => {
+                out.push(JsonValue::Null);
+                Ok(())
+            }
+            other => Err(format!("Cannot index {} with number", type_name(&other))),
         },
         Accessor::Iter | Accessor::IterOpt => match value {
-            JsonValue::Array(arr) => Ok(arr),
-            JsonValue::Object(map) => Ok(map.into_iter().map(|(_, v)| v).collect()),
-            other => Err(format!("Cannot iterate over {}", type_name(&other))),
+            JsonValue::Array(arr) => {
+                out.extend(arr);
+                Ok(())
+            }
+            JsonValue::Object(map) => {
+                out.extend(map.into_iter().map(|(_, v)| v));
+                Ok(())
+            }
+            other => Err(format!(
+                "Cannot iterate over {} ({})",
+                type_name(&other),
+                value_for_error(&other)
+            )),
         },
-    }
-    .or_else(|e| match accessor {
-        Accessor::FieldOpt(_) | Accessor::IndexOpt(_) | Accessor::IterOpt => Ok(Vec::new()),
+    };
+
+    result.or_else(|e| match accessor {
+        Accessor::FieldOpt(_) | Accessor::IndexOpt(_) | Accessor::IterOpt => Ok(()),
         _ => Err(e),
     })
 }
@@ -120,6 +256,14 @@ fn type_name(v: &JsonValue) -> &'static str {
         JsonValue::String(_) => "string",
         JsonValue::Array(_) => "array",
         JsonValue::Object(_) => "object",
+    }
+}
+
+fn value_for_error(v: &JsonValue) -> String {
+    match v {
+        JsonValue::Null => "null".to_string(),
+        JsonValue::String(s) => format!("{s:?}"),
+        _ => serde_json::to_string(v).unwrap_or_else(|_| "<invalid>".to_string()),
     }
 }
 
@@ -165,57 +309,114 @@ fn parse_terms(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<V
 
 fn parse_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<Stage> {
     if chars.peek().copied() == Some('.') {
-        chars.next();
-        let mut accessors = Vec::new();
-        if matches!(chars.peek().copied(), Some('"')) || ident_start(chars.peek().copied()) {
-            let field = Accessor::Field(parse_field_after_dot(chars)?);
-            accessors.push(if take_optional(chars) {
-                make_optional(field)
-            } else {
-                field
-            });
+        return parse_path_stage(chars);
+    }
+
+    if chars.peek().copied() == Some('s') {
+        if let Some(stage) = parse_select_test_stage(chars) {
+            return Some(stage);
         }
-        loop {
-            skip_ws(chars);
-            match chars.peek().copied() {
-                Some('.') => {
-                    chars.next();
-                    let name = parse_field_after_dot(chars)?;
-                    accessors.push(if take_optional(chars) {
-                        Accessor::FieldOpt(name)
-                    } else {
-                        Accessor::Field(name)
-                    });
-                }
-                Some('[') => {
-                    chars.next();
-                    skip_ws(chars);
-                    let acc = if chars.peek().copied() == Some(']') {
-                        Accessor::Iter
-                    } else if chars.peek().copied() == Some('"') {
-                        Accessor::Field(parse_string(chars)?)
-                    } else {
-                        Accessor::Index(parse_i64(chars)?)
-                    };
-                    skip_ws(chars);
-                    if chars.next() != Some(']') {
-                        return None;
-                    }
-                    let acc = if take_optional(chars) {
-                        make_optional(acc)
-                    } else {
-                        acc
-                    };
-                    accessors.push(acc);
-                }
-                _ => break,
-            }
-        }
-        return Some(Stage::Path(accessors));
     }
 
     let lit = parse_literal(chars)?;
     Some(Stage::Literal(lit))
+}
+
+fn parse_path_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<Stage> {
+    Some(Stage::Path(parse_path_accessors(chars)?))
+}
+
+fn parse_path_accessors(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<Vec<Accessor>> {
+    if chars.next() != Some('.') {
+        return None;
+    }
+    let mut accessors = Vec::new();
+    if matches!(chars.peek().copied(), Some('"')) || ident_start(chars.peek().copied()) {
+        let field = Accessor::Field(parse_field_after_dot(chars)?);
+        accessors.push(if take_optional(chars) {
+            make_optional(field)
+        } else {
+            field
+        });
+    }
+    loop {
+        skip_ws(chars);
+        match chars.peek().copied() {
+            Some('.') => {
+                chars.next();
+                let name = parse_field_after_dot(chars)?;
+                accessors.push(if take_optional(chars) {
+                    Accessor::FieldOpt(name)
+                } else {
+                    Accessor::Field(name)
+                });
+            }
+            Some('[') => {
+                chars.next();
+                skip_ws(chars);
+                let acc = if chars.peek().copied() == Some(']') {
+                    Accessor::Iter
+                } else if chars.peek().copied() == Some('"') {
+                    Accessor::Field(parse_string(chars)?)
+                } else {
+                    Accessor::Index(parse_i64(chars)?)
+                };
+                skip_ws(chars);
+                if chars.next() != Some(']') {
+                    return None;
+                }
+                let acc = if take_optional(chars) {
+                    make_optional(acc)
+                } else {
+                    acc
+                };
+                accessors.push(acc);
+            }
+            _ => break,
+        }
+    }
+    Some(accessors)
+}
+
+fn parse_select_test_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<Stage> {
+    parse_keyword(chars, "select")?;
+    skip_ws(chars);
+    if chars.next() != Some('(') {
+        return None;
+    }
+    skip_ws(chars);
+    let path = parse_path_accessors(chars)?;
+    skip_ws(chars);
+    if chars.next() != Some('|') {
+        return None;
+    }
+    skip_ws(chars);
+    parse_keyword(chars, "test")?;
+    skip_ws(chars);
+    if chars.next() != Some('(') {
+        return None;
+    }
+    skip_ws(chars);
+    let pattern = parse_string(chars)?;
+    skip_ws(chars);
+    if chars.next() != Some(')') {
+        return None;
+    }
+    skip_ws(chars);
+    if chars.next() != Some(')') {
+        return None;
+    }
+    let regex = Regex::new(&pattern).ok()?;
+    Some(Stage::SelectTest { path, regex })
+}
+
+fn parse_keyword(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, expected: &str) -> Option<()> {
+    for ch in expected.chars() {
+        if chars.next() != Some(ch) {
+            return None;
+        }
+    }
+    Some(())
 }
 
 fn ident_start(ch: Option<char>) -> bool {
@@ -445,5 +646,117 @@ mod tests {
             TryExecute::Executed(Ok(values)) => assert_eq!(values, vec![JsonValue::Null]),
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    #[test]
+    fn supports_select_test_regex_filter() {
+        let input = vec![serde_json::json!([
+            {"id": 1, "name": "user0999"},
+            {"id": 2, "name": "user1000"},
+            {"id": 3, "name": "user1999"},
+            {"id": 4, "name": "user2000"}
+        ])];
+        let out = try_execute(
+            ".[] | select(.name | test(\"user1[0-9]{3}$\")) | .id",
+            &input,
+            RunOptions { null_input: false },
+        );
+        match out {
+            TryExecute::Executed(Ok(values)) => {
+                assert_eq!(values, vec![serde_json::json!(2), serde_json::json!(3)])
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_test_errors_on_non_string_like_jq() {
+        let input = vec![serde_json::json!({"name": null})];
+        let out = try_execute(
+            "select(.name | test(\"x\"))",
+            &input,
+            RunOptions { null_input: false },
+        );
+        match out {
+            TryExecute::Executed(Err(err)) => assert_eq!(
+                err,
+                "null (null) cannot be matched, as it is not a string"
+            ),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_regex_syntax_falls_back() {
+        let out = try_execute(
+            "select(.name | test(\"(?=x)\"))",
+            &[serde_json::json!({"name":"x"})],
+            RunOptions { null_input: false },
+        );
+        assert!(matches!(out, TryExecute::Unsupported));
+    }
+
+    #[test]
+    fn native_runtime_errors_match_jq_wording() {
+        let out = try_execute(
+            ".[1]",
+            &[serde_json::json!({})],
+            RunOptions { null_input: false },
+        );
+        match out {
+            TryExecute::Executed(Err(err)) => {
+                assert_eq!(err, "Cannot index object with number");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let out = try_execute(".[]", &[serde_json::json!(1)], RunOptions { null_input: false });
+        match out {
+            TryExecute::Executed(Err(err)) => {
+                assert_eq!(err, "Cannot iterate over number (1)");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_execute_stream_matches_collect_mode() {
+        let input = vec![serde_json::json!([{"id":1},{"id":2},{"id":3}])];
+        let collected = try_execute(".[] | .id", &input, RunOptions { null_input: false });
+        let mut streamed = Vec::new();
+        let streamed_out = try_execute_stream(
+            ".[] | .id",
+            &input,
+            RunOptions { null_input: false },
+            |v| {
+                streamed.push(v);
+                Ok(())
+            },
+        );
+
+        match (collected, streamed_out) {
+            (TryExecute::Executed(Ok(a)), TryExecuteStream::Executed(Ok(()))) => {
+                assert_eq!(a, streamed);
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_execute_stream_propagates_sink_error() {
+        let input = vec![serde_json::json!([1, 2, 3])];
+        let out = try_execute_stream(".[]", &input, RunOptions { null_input: false }, |_v| {
+            Err("sink failed".to_string())
+        });
+        match out {
+            TryExecuteStream::Executed(Err(err)) => assert_eq!(err, "sink failed"),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn support_probe_matches_parser() {
+        assert!(is_supported(".a | .b"));
+        assert!(!is_supported("map(.)"));
     }
 }

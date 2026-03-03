@@ -84,6 +84,37 @@ pub fn run_jq_stream_with_paths_options(
     )?)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeStreamStatus {
+    Unsupported,
+    Executed,
+}
+
+pub fn try_run_jq_native_stream_with_paths_options<F>(
+    query: &str,
+    input_stream: &[JsonValue],
+    run_options: RunOptions,
+    mut emit: F,
+) -> Result<NativeStreamStatus, Error>
+where
+    F: FnMut(JsonValue) -> Result<(), String>,
+{
+    match crate::native_engine::try_execute_stream(
+        query,
+        input_stream,
+        crate::native_engine::RunOptions {
+            null_input: run_options.null_input,
+        },
+        |value| emit(value),
+    ) {
+        crate::native_engine::TryExecuteStream::Unsupported => Ok(NativeStreamStatus::Unsupported),
+        crate::native_engine::TryExecuteStream::Executed(Ok(())) => Ok(NativeStreamStatus::Executed),
+        crate::native_engine::TryExecuteStream::Executed(Err(err)) => {
+            Err(Error::Query(crate::QueryError::Runtime(err)))
+        }
+    }
+}
+
 pub fn parse_jq_input_values(
     input: &str,
     doc_mode: DocMode,
@@ -154,14 +185,23 @@ pub fn format_output_json_lines(
             }
         }
         if compact {
-            lines.push(serde_json::to_string(v).map_err(|e| Error::OutputEncode(e.to_string()))?);
+            let line = serde_json::to_string(v).map_err(|e| Error::OutputEncode(e.to_string()))?;
+            lines.push(jq_style_escape_del(&line));
         } else {
-            lines.push(
-                serde_json::to_string_pretty(v).map_err(|e| Error::OutputEncode(e.to_string()))?,
-            );
+            let line =
+                serde_json::to_string_pretty(v).map_err(|e| Error::OutputEncode(e.to_string()))?;
+            lines.push(jq_style_escape_del(&line));
         }
     }
     Ok(lines.join("\n"))
+}
+
+fn jq_style_escape_del(line: &str) -> String {
+    if line.bytes().any(|b| b == 0x7f) {
+        line.replace('\u{007f}', "\\u007f")
+    } else {
+        line.to_string()
+    }
 }
 
 pub fn format_output_yaml_documents(values: &[JsonValue]) -> Result<String, Error> {
@@ -184,6 +224,20 @@ pub fn format_output_yaml_documents(values: &[JsonValue]) -> Result<String, Erro
 }
 
 pub fn format_query_error(tool: &str, input: &str, err: &crate::QueryError) -> String {
+    if let crate::QueryError::Json(json_err) = err {
+        return format_json_parse_error(tool, input, json_err);
+    }
+    if let crate::QueryError::Runtime(msg) = err {
+        return format!("{tool}: error (at <stdin>:1): {msg}");
+    }
+    if let crate::QueryError::Unsupported(msg) = err {
+        if msg.starts_with("Top-level program not given (try \".\")") {
+            return format!(
+                "{tool}: error: Top-level program not given (try \".\")\n{tool}: 1 compile error"
+            );
+        }
+    }
+
     let base = format!("{tool}: {err}");
     let Some((line, col)) = extract_line_col(&base) else {
         return base;
@@ -193,6 +247,90 @@ pub fn format_query_error(tool: &str, input: &str, err: &crate::QueryError) -> S
         base
     } else {
         format!("{base}\n{ctx}")
+    }
+}
+
+fn format_json_parse_error(tool: &str, input: &str, err: &serde_json::Error) -> String {
+    let raw = err.to_string();
+    let mut col = err.column();
+    let message = if raw.starts_with("control character (\\u0000-\\u001F) found while parsing a string") {
+        // jq reports this one column later than serde_json.
+        col = col.saturating_add(1);
+        "Invalid string: control characters from U+0000 through U+001F must be escaped".to_string()
+    } else if raw.starts_with("key must be a string") {
+        format_object_key_parse_error(input, err).unwrap_or_else(|| "key must be a string".to_string())
+    } else if raw.starts_with("expected `:`") {
+        "Objects must consist of key:value pairs".to_string()
+    } else if raw.starts_with("EOF while parsing a string") {
+        "Unfinished string at EOF".to_string()
+    } else if raw.starts_with("EOF while parsing") {
+        "Unfinished JSON term at EOF".to_string()
+    } else {
+        strip_serde_line_col_suffix(&raw).to_string()
+    };
+
+    format!(
+        "{tool}: parse error: {message} at line {}, column {col}",
+        err.line()
+    )
+}
+
+fn format_object_key_parse_error(input: &str, err: &serde_json::Error) -> Option<String> {
+    let offending = char_at_line_col(input, err.line(), err.column())?;
+    let prev = prev_significant_char_before(input, err.line(), err.column())?;
+    let offending = offending.to_string();
+    match prev {
+        '{' => Some(format!("Expected string key after '{{', not '{offending}'")),
+        ',' => Some(format!(
+            "Expected string key after ',' in object, not '{offending}'"
+        )),
+        _ => None,
+    }
+}
+
+fn prev_significant_char_before(input: &str, line: usize, col: usize) -> Option<char> {
+    let idx = line_col_to_byte_index(input, line, col)?;
+    input[..idx].chars().rev().find(|ch| !ch.is_whitespace())
+}
+
+fn char_at_line_col(input: &str, line: usize, col: usize) -> Option<char> {
+    let idx = line_col_to_byte_index(input, line, col)?;
+    input[idx..].chars().next()
+}
+
+fn line_col_to_byte_index(input: &str, line: usize, col: usize) -> Option<usize> {
+    if line == 0 || col == 0 {
+        return None;
+    }
+    let mut cur_line = 1usize;
+    let mut cur_col = 1usize;
+    for (idx, ch) in input.char_indices() {
+        if cur_line == line && cur_col == col {
+            return Some(idx);
+        }
+        if ch == '\n' {
+            cur_line += 1;
+            cur_col = 1;
+        } else {
+            cur_col += 1;
+        }
+    }
+    None
+}
+
+fn strip_serde_line_col_suffix(msg: &str) -> &str {
+    let marker = " at line ";
+    let Some(idx) = msg.rfind(marker) else {
+        return msg;
+    };
+    let suffix = &msg[idx + marker.len()..];
+    let Some((line, col_part)) = suffix.split_once(" column ") else {
+        return msg;
+    };
+    if line.trim().parse::<usize>().is_ok() && col_part.trim().parse::<usize>().is_ok() {
+        &msg[..idx]
+    } else {
+        msg
     }
 }
 
@@ -306,5 +444,100 @@ mod tests {
         assert!(out.contains("a: 1"));
         assert!(out.contains("---"));
         assert!(out.contains("b: 2"));
+    }
+
+    #[test]
+    fn format_query_error_control_character_matches_jq_text() {
+        let err = serde_json::from_str::<serde_json::Value>("\"\u{1}\"")
+            .expect_err("must fail on unescaped control char");
+        let msg = format_query_error("jq", "", &crate::QueryError::Json(err));
+        assert_eq!(
+            msg,
+            "jq: parse error: Invalid string: control characters from U+0000 through U+001F must be escaped at line 1, column 3"
+        );
+    }
+
+    #[test]
+    fn format_query_error_colon_in_object_matches_jq_text() {
+        let err = serde_json::from_str::<serde_json::Value>("{\"a\":1,\"b\",")
+            .expect_err("must fail on malformed object");
+        let msg = format_query_error("jq", "", &crate::QueryError::Json(err));
+        assert_eq!(
+            msg,
+            "jq: parse error: Objects must consist of key:value pairs at line 1, column 11"
+        );
+    }
+
+    #[test]
+    fn format_query_error_string_key_after_object_start_matches_jq_text() {
+        let input = "{{\"a\":\"b\"}}";
+        let err = serde_json::from_str::<serde_json::Value>(input).expect_err("must fail");
+        let msg = format_query_error("jq", input, &crate::QueryError::Json(err));
+        assert_eq!(
+            msg,
+            "jq: parse error: Expected string key after '{', not '{' at line 1, column 2"
+        );
+    }
+
+    #[test]
+    fn format_query_error_string_key_after_comma_matches_jq_text() {
+        let input = "{\"x\":\"y\",{\"a\":\"b\"}}";
+        let err = serde_json::from_str::<serde_json::Value>(input).expect_err("must fail");
+        let msg = format_query_error("jq", input, &crate::QueryError::Json(err));
+        assert_eq!(
+            msg,
+            "jq: parse error: Expected string key after ',' in object, not '{' at line 1, column 10"
+        );
+    }
+
+    #[test]
+    fn format_query_error_string_key_array_after_object_start_matches_jq_text() {
+        let input = "{[\"a\",\"b\"]}";
+        let err = serde_json::from_str::<serde_json::Value>(input).expect_err("must fail");
+        let msg = format_query_error("jq", input, &crate::QueryError::Json(err));
+        assert_eq!(
+            msg,
+            "jq: parse error: Expected string key after '{', not '[' at line 1, column 2"
+        );
+    }
+
+    #[test]
+    fn format_query_error_string_key_array_after_comma_matches_jq_text() {
+        let input = "{\"x\":\"y\",[\"a\",\"b\"]}";
+        let err = serde_json::from_str::<serde_json::Value>(input).expect_err("must fail");
+        let msg = format_query_error("jq", input, &crate::QueryError::Json(err));
+        assert_eq!(
+            msg,
+            "jq: parse error: Expected string key after ',' in object, not '[' at line 1, column 10"
+        );
+    }
+
+    #[test]
+    fn strip_serde_line_col_suffix_only_removes_valid_suffix() {
+        assert_eq!(
+            strip_serde_line_col_suffix("expected value at line 1 column 2"),
+            "expected value"
+        );
+        assert_eq!(
+            strip_serde_line_col_suffix("hello at line nope column 2"),
+            "hello at line nope column 2"
+        );
+    }
+
+    #[test]
+    fn json_output_escapes_del_like_jq() {
+        let out = format_output_json_lines(&[serde_json::json!(" ~\u{007f}")], true, false)
+            .expect("json output");
+        assert_eq!(out, "\" ~\\u007f\"");
+    }
+
+    #[test]
+    fn format_runtime_error_matches_jq_prefix() {
+        let msg = format_query_error(
+            "jq",
+            "",
+            &crate::QueryError::Runtime("Cannot index object with number".to_string()),
+        );
+        assert_eq!(msg, "jq: error (at <stdin>:1): Cannot index object with number");
     }
 }

@@ -27,7 +27,7 @@ mod time;
 
 use alloc::string::{String, ToString};
 use alloc::{boxed::Box, vec::Vec};
-use bstr::{BStr, ByteSlice};
+use bstr::ByteSlice;
 use jaq_core::box_iter::{box_once, then, BoxIter};
 use jaq_core::{load, Bind, Cv, DataT, Error, Exn, Native, RunPtr, ValR, ValT as _, ValX, ValXs};
 
@@ -685,10 +685,37 @@ fn json_quote(input: &str) -> String {
 }
 
 #[cfg(feature = "format")]
+fn jq_truncate_dumped_string(s: &str, bufsize: usize) -> String {
+    if bufsize == 0 {
+        return String::new();
+    }
+    let bytes = s.as_bytes();
+    let max = bufsize.saturating_sub(1);
+    let mut out = if bytes.len() > max {
+        bytes[..max].to_vec()
+    } else {
+        bytes.to_vec()
+    };
+    if bytes.len() > max && bufsize >= 4 && out.len() >= 3 {
+        let n = out.len();
+        out[n - 1] = b'.';
+        out[n - 2] = b'.';
+        out[n - 3] = b'.';
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(feature = "format")]
+fn jq_type_error_dump(input: &str) -> String {
+    // jq uses jv_dump_string_trunc(..., bufsize=15) in type_error() paths.
+    jq_truncate_dumped_string(&json_quote(input), 15)
+}
+
+#[cfg(feature = "format")]
 fn invalid_uri_encoding<V: ValT>(input: &str) -> Error<V> {
     Error::str(format_args!(
         "string ({}) is not a valid uri encoding",
-        json_quote(input)
+        jq_type_error_dump(input)
     ))
 }
 
@@ -696,7 +723,7 @@ fn invalid_uri_encoding<V: ValT>(input: &str) -> Error<V> {
 fn invalid_base64_data<V: ValT>(input: &str) -> Error<V> {
     Error::str(format_args!(
         "string ({}) is not valid base64 data",
-        json_quote(input)
+        jq_type_error_dump(input)
     ))
 }
 
@@ -704,7 +731,7 @@ fn invalid_base64_data<V: ValT>(input: &str) -> Error<V> {
 fn trailing_base64_byte<V: ValT>(input: &str) -> Error<V> {
     Error::str(format_args!(
         "string ({}) trailing base64 byte found",
-        json_quote(input)
+        jq_type_error_dump(input)
     ))
 }
 
@@ -964,10 +991,15 @@ where
     for<'a> D::V<'a>: ValT,
 {
     fn eprint_raw<V: ValT>(v: &V) {
+        use std::io::Write;
+
         if let Some(s) = v.as_utf8_bytes() {
-            log::error!("{}", BStr::new(s))
+            let _ = std::io::stderr().write_all(s);
         } else {
-            log::error!("{v}")
+            let rendered = v.to_string();
+            if rendered != "null" {
+                let _ = std::io::stderr().write_all(rendered.as_bytes());
+            }
         }
     }
     /// Construct a filter that applies an effect function before returning nothing.

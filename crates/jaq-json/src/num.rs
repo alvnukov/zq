@@ -421,6 +421,68 @@ fn float_cmp(left: f64, right: f64) -> Ordering {
     }
 }
 
+fn expand_decimal_exponent(raw: &str) -> Option<String> {
+    let (negative, rest) = if let Some(r) = raw.strip_prefix('-') {
+        (true, r)
+    } else if let Some(r) = raw.strip_prefix('+') {
+        (false, r)
+    } else {
+        (false, raw)
+    };
+
+    let (mantissa, exponent) = rest.split_once(['e', 'E'])?;
+    let exponent = exponent.parse::<i32>().ok()?;
+    if exponent.unsigned_abs() > 64 {
+        return None;
+    }
+
+    let mut digits = String::new();
+    let mut frac_len = 0i32;
+    let mut seen_dot = false;
+    for ch in mantissa.chars() {
+        if ch == '.' {
+            if seen_dot {
+                return None;
+            }
+            seen_dot = true;
+            continue;
+        }
+        if !ch.is_ascii_digit() {
+            return None;
+        }
+        digits.push(ch);
+        if seen_dot {
+            frac_len += 1;
+        }
+    }
+    if digits.is_empty() {
+        return None;
+    }
+
+    let dec_pos = digits.len() as i32 - frac_len + exponent;
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+
+    if dec_pos <= 0 {
+        out.push('0');
+        out.push('.');
+        out.push_str(&"0".repeat((-dec_pos) as usize));
+        out.push_str(&digits);
+    } else if dec_pos as usize >= digits.len() {
+        out.push_str(&digits);
+        out.push_str(&"0".repeat(dec_pos as usize - digits.len()));
+    } else {
+        let p = dec_pos as usize;
+        out.push_str(&digits[..p]);
+        out.push('.');
+        out.push_str(&digits[p..]);
+    }
+
+    Some(out)
+}
+
 impl fmt::Display for Num {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -430,7 +492,17 @@ impl fmt::Display for Num {
             Self::Float(f64::INFINITY) => write!(f, "Infinity"),
             Self::Float(f64::NEG_INFINITY) => write!(f, "-Infinity"),
             Self::Float(x) => ryu::Buffer::new().format_finite(*x).fmt(f),
-            Self::Dec(n) => write!(f, "{n}"),
+            Self::Dec(n) => match expand_decimal_exponent(n) {
+                Some(expanded) => write!(f, "{expanded}"),
+                None => write!(f, "{n}"),
+            },
         }
     }
+}
+
+#[test]
+fn display_expands_small_decimal_exponents() {
+    assert_eq!(format!("{}", Num::Dec(Rc::from("100e-2"))), "1.00");
+    assert_eq!(format!("{}", Num::Dec(Rc::from("-25e-1"))), "-2.5");
+    assert_eq!(format!("{}", Num::Dec(Rc::from("1E+1000"))), "1E+1000");
 }

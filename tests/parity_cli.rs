@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::io::Write;
+use std::process::Stdio;
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_zq")
@@ -23,6 +25,23 @@ fn run_zq(args: &[&str]) -> Output {
         .current_dir(root())
         .output()
         .expect("run zq")
+}
+
+fn run_zq_stdin(args: &[&str], stdin_data: &str) -> Output {
+    let mut child = Command::new(bin())
+        .args(args)
+        .current_dir(root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn zq");
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_data.as_bytes())
+            .expect("write stdin");
+    }
+    child.wait_with_output().expect("wait zq")
 }
 
 fn stdout_text(out: &Output) -> String {
@@ -64,10 +83,13 @@ fn parity_help_contract() {
         "--doc-mode",
         "-c, --compact-output",
         "-r, --raw-output",
+        "--raw-output0",
         "-R, --raw-input",
         "-s, --slurp",
         "-n, --null-input",
         "-e, --exit-status",
+        "--stream",
+        "--stream-errors",
         "json",
         "yaml",
     ] {
@@ -204,4 +226,23 @@ fn parity_accepts_debug_dump_disasm_flag() {
 fn parity_accepts_seq_flag() {
     let out = run_zq(&["-n", "--seq", "1"]);
     assert_ok(&out, "--seq compatibility");
+}
+
+#[test]
+fn parity_runtime_errors_match_jq_format() {
+    let out = run_zq_stdin(&[".a"], "1\n");
+    assert_fail(&out, "runtime error format");
+    assert_eq!(out.status.code(), Some(5));
+    assert_eq!(
+        stderr_text(&out).trim(),
+        "jq: error (at <stdin>:1): Cannot index number with string \"a\""
+    );
+
+    let out = run_zq_stdin(&[".[1]"], "{}\n");
+    assert_fail(&out, "index runtime error format");
+    assert_eq!(out.status.code(), Some(5));
+    assert_eq!(
+        stderr_text(&out).trim(),
+        "jq: error (at <stdin>:1): Cannot index object with number"
+    );
 }

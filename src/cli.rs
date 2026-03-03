@@ -1,12 +1,16 @@
 use clap::{ArgAction, Parser, ValueEnum};
 
 #[derive(Parser, Debug)]
-#[command(name = "zq", about = "zq runs jq queries on JSON or YAML input")]
+#[command(
+    name = "zq",
+    about = "zq runs jq queries on JSON or YAML input",
+    version,
+    args_override_self = true
+)]
 pub struct Cli {
     #[arg(
         value_name = "FILTER",
-        help = "jq filter expression",
-        required_unless_present = "run_tests"
+        help = "jq filter expression (defaults to . when omitted)"
     )]
     pub query: Option<String>,
     #[arg(
@@ -39,6 +43,13 @@ pub struct Cli {
         help = "Module search path (accepted for jq compatibility)"
     )]
     pub library_path: Vec<String>,
+    #[arg(
+        short = 'f',
+        long = "from-file",
+        value_name = "FILE",
+        help = "Read filter from a file"
+    )]
+    pub from_file: Option<String>,
     #[arg(
         short = 'b',
         long = "binary",
@@ -79,12 +90,45 @@ pub struct Cli {
     )]
     pub compact: bool,
     #[arg(
+        short = 'C',
+        long = "color-output",
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        hide = true,
+        help = "Colorize JSON output"
+    )]
+    pub color_output: bool,
+    #[arg(
+        short = 'M',
+        long = "monochrome-output",
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        hide = true,
+        help = "Disable colorized JSON output"
+    )]
+    pub monochrome_output: bool,
+    #[arg(
         short = 'r',
         long = "raw-output",
         default_value_t = false,
         action = ArgAction::SetTrue
     )]
     pub raw_output: bool,
+    #[arg(
+        short = 'j',
+        long = "join-output",
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        help = "Like --raw-output, but without trailing newline after each output"
+    )]
+    pub join_output: bool,
+    #[arg(
+        long = "raw-output0",
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        help = "Like --raw-output, but print NUL after each output"
+    )]
+    pub raw_output0: bool,
     #[arg(
         short = 'R',
         long = "raw-input",
@@ -129,6 +173,20 @@ pub struct Cli {
         help = "Use application/json-seq framing (jq compatibility, partial support)"
     )]
     pub seq: bool,
+    #[arg(
+        long = "stream",
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        help = "Parse the input in streaming mode (jq compatibility, partial support)"
+    )]
+    pub stream: bool,
+    #[arg(
+        long = "stream-errors",
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        help = "Like --stream, but output parser errors as data"
+    )]
+    pub stream_errors: bool,
     #[arg(
         long = "output-format",
         value_enum,

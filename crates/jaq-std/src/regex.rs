@@ -1,9 +1,10 @@
-//! Helpers to interface with the `regex` crate.
+//! Helpers to interface with Oniguruma regex semantics used by jq.
 
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 use bstr::ByteSlice;
-use regex_bites::bytes::{self as regex, Error, Regex, RegexBuilder};
+use onig::{Regex, RegexOptions, SearchOptions, Syntax};
 
 #[derive(Copy, Clone, Default)]
 pub struct Flags {
@@ -45,82 +46,42 @@ impl Flags {
         Ok(out)
     }
 
-    pub fn ignore_empty(self) -> bool {
-        self.n
-    }
-
     pub fn global(self) -> bool {
         self.g
     }
 
-    fn impact(self, builder: &mut RegexBuilder) -> &mut RegexBuilder {
-        builder
-            .case_insensitive(self.i)
-            .multi_line(self.m)
-            .dot_matches_new_line(self.s)
-            .swap_greed(self.l)
-            .ignore_whitespace(self.x)
-    }
-
-    pub fn regex(self, re: &str) -> Result<Regex, Error> {
-        let mut builder = RegexBuilder::new(re);
-        self.impact(&mut builder).build()
-    }
-}
-
-type CharIndices<'a> =
-    core::iter::Chain<bstr::CharIndices<'a>, core::iter::Once<(usize, usize, char)>>;
-
-/// Mapping between byte and character indices.
-pub struct ByteChar<'a>(core::iter::Peekable<core::iter::Enumerate<CharIndices<'a>>>);
-
-impl<'a> ByteChar<'a> {
-    pub fn new(s: &'a [u8]) -> Self {
-        let last = core::iter::once((s.len(), 0, '\0'));
-        Self(s.char_indices().chain(last).enumerate().peekable())
-    }
-
-    /// Convert byte offset to UTF-8 character offset.
-    ///
-    /// This needs to be called with monotonically increasing values of `byte_offset`.
-    fn char_of_byte(&mut self, byte_offset: usize) -> Option<usize> {
-        loop {
-            let (char_i, (byte_i, _, _char)) = self.0.peek()?;
-            if byte_offset == *byte_i {
-                return Some(*char_i);
-            } else {
-                self.0.next();
-            }
+    pub fn regex(self, re: &str) -> Result<Regex, onig::Error> {
+        let mut options = RegexOptions::REGEX_OPTION_CAPTURE_GROUP;
+        if self.i {
+            options |= RegexOptions::REGEX_OPTION_IGNORECASE;
         }
+        if self.x {
+            options |= RegexOptions::REGEX_OPTION_EXTEND;
+        }
+        if self.m {
+            options |= RegexOptions::REGEX_OPTION_MULTILINE;
+        }
+        if self.s {
+            options |= RegexOptions::REGEX_OPTION_SINGLELINE;
+        }
+        if self.l {
+            options |= RegexOptions::REGEX_OPTION_FIND_LONGEST;
+        }
+        if self.n {
+            options |= RegexOptions::REGEX_OPTION_FIND_NOT_EMPTY;
+        }
+        Regex::with_options(re, options, Syntax::perl_ng())
     }
 }
 
-pub struct Match<B, S> {
+pub struct Match<B> {
     pub offset: isize,
     pub length: usize,
     pub string: B,
-    pub name: Option<S>,
+    pub name: Option<String>,
 }
 
-impl<'a> Match<&'a [u8], &'a str> {
-    pub fn new(bc: &mut ByteChar, m: regex::Match<'a>, name: Option<&'a str>) -> Self {
-        Self {
-            offset: bc.char_of_byte(m.start()).unwrap() as isize,
-            length: m.as_bytes().chars().count(),
-            string: m.as_bytes(),
-            name,
-        }
-    }
-
-    pub fn unmatched(name: Option<&'a str>) -> Self {
-        Self {
-            offset: -1,
-            length: 0,
-            string: &[],
-            name,
-        }
-    }
-
+impl<'a> Match<&'a [u8]> {
     pub fn fields<T: From<isize> + From<String> + 'a>(
         &self,
         f: impl Fn(&'a [u8]) -> T,
@@ -131,14 +92,107 @@ impl<'a> Match<&'a [u8], &'a str> {
             ("string", f(self.string)),
         ]
         .into_iter()
-        .chain(self.name.iter().map(|n| ("name", (*n).to_string().into())))
+        .chain(
+            self.name
+                .as_ref()
+                .map(|n| ("name", n.clone().into()))
+                .into_iter(),
+        )
         .map(|(k, v)| (k.to_string().into(), v))
     }
 }
 
-pub enum Part<B, S> {
-    Matches(Vec<Match<B, S>>),
+pub enum Part<B> {
+    Matches(Vec<Match<B>>),
     Mismatch(B),
+}
+
+fn utf8_char_offset(s: &[u8], byte_offset: usize) -> usize {
+    s[..byte_offset].chars().count()
+}
+
+fn utf8_char_len(s: &[u8], start: usize, end: usize) -> usize {
+    s[start..end].chars().count()
+}
+
+fn advance_one_char_boundary(text: &str, byte_offset: usize) -> usize {
+    if byte_offset >= text.len() {
+        return text.len().saturating_add(1);
+    }
+    let step = text[byte_offset..]
+        .chars()
+        .next()
+        .map(|c| c.len_utf8())
+        .unwrap_or(1);
+    byte_offset.saturating_add(step)
+}
+
+fn capture_name_by_group(re: &Regex) -> Vec<Option<String>> {
+    let mut names = vec![None; re.captures_len().saturating_add(1)];
+    re.foreach_name(|name, groups| {
+        for g in groups {
+            let idx = *g as usize;
+            if idx < names.len() {
+                names[idx] = Some(name.to_string());
+            }
+        }
+        true
+    });
+    names
+}
+
+fn build_zero_width_match<'a>(
+    s: &'a [u8],
+    region: &onig::Region,
+    name_by_group: &[Option<String>],
+    byte_offset: usize,
+) -> Vec<Match<&'a [u8]>> {
+    let idx = utf8_char_offset(s, byte_offset) as isize;
+    let mut out = Vec::with_capacity(region.len());
+    for i in 0..region.len() {
+        out.push(Match {
+            offset: idx,
+            length: 0,
+            string: &s[byte_offset..byte_offset],
+            name: if i == 0 {
+                None
+            } else {
+                name_by_group.get(i).cloned().flatten()
+            },
+        });
+    }
+    out
+}
+
+fn build_non_zero_width_match<'a>(
+    s: &'a [u8],
+    region: &onig::Region,
+    name_by_group: &[Option<String>],
+) -> Vec<Match<&'a [u8]>> {
+    let mut out = Vec::with_capacity(region.len());
+    for i in 0..region.len() {
+        let name = if i == 0 {
+            None
+        } else {
+            name_by_group.get(i).cloned().flatten()
+        };
+        let Some((beg, end)) = region.pos(i) else {
+            out.push(Match {
+                offset: -1,
+                length: 0,
+                string: &s[0..0],
+                name,
+            });
+            continue;
+        };
+        out.push(Match {
+            offset: utf8_char_offset(s, beg) as isize,
+            length: utf8_char_len(s, beg, end),
+            string: &s[beg..end],
+            name,
+        });
+    }
+    out
 }
 
 /// Apply a regular expression to the given input value.
@@ -146,52 +200,135 @@ pub enum Part<B, S> {
 /// `sm` indicates whether to
 /// 1. output strings that do *not* match the regex, and
 /// 2. output the matches.
-pub fn regex<'a>(
-    s: &'a [u8],
-    re: &'a Regex,
-    flags: Flags,
-    sm: (bool, bool),
-) -> Vec<Part<&'a [u8], &'a str>> {
+pub fn regex<'a>(s: &'a [u8], re: &'a Regex, flags: Flags, sm: (bool, bool)) -> Vec<Part<&'a [u8]>> {
     // mismatches & matches
     let (mi, ma) = sm;
 
-    let mut last_byte = 0;
-    let mut bc = ByteChar::new(s);
     let mut out = Vec::new();
+    let mut last_byte = 0usize;
+    let mut start_byte = 0usize;
+    let end_byte = s.len();
+    let mut region = onig::Region::new();
+    let name_by_group = capture_name_by_group(re);
 
-    for c in re.captures_iter(s) {
-        let whole = c.get(0).unwrap();
-        if flags.ignore_empty() && whole.as_bytes().is_empty() {
-            continue;
-        }
-        let matches = c
-            .iter()
-            .zip(re.capture_names())
-            .enumerate()
-            .filter_map(|(idx, (m, n))| {
-                if idx == 0 {
-                    m.map(|m| Match::new(&mut bc, m, None))
-                } else {
-                    let name = Some(n.unwrap_or(""));
-                    Some(match m {
-                        Some(m) => Match::new(&mut bc, m, name),
-                        None => Match::unmatched(name),
-                    })
-                }
-            });
+    let Ok(text) = core::str::from_utf8(s) else {
         if mi {
-            out.push(Part::Mismatch(&s[last_byte..whole.start()]));
-            last_byte = whole.end();
+            out.push(Part::Mismatch(s));
         }
+        return out;
+    };
+
+    while start_byte <= end_byte {
+        region.clear();
+        let Some(_) = re.search_with_options(
+            text,
+            start_byte,
+            end_byte,
+            SearchOptions::SEARCH_OPTION_NONE,
+            Some(&mut region),
+        ) else {
+            break;
+        };
+
+        let Some((beg0, end0)) = region.pos(0) else {
+            break;
+        };
+
+        if mi {
+            out.push(Part::Mismatch(&s[last_byte..beg0]));
+            last_byte = end0;
+        }
+
         if ma {
-            out.push(Part::Matches(matches.collect()));
+            if end0 == beg0 {
+                out.push(Part::Matches(build_zero_width_match(
+                    s,
+                    &region,
+                    &name_by_group,
+                    beg0,
+                )));
+            } else {
+                out.push(Part::Matches(build_non_zero_width_match(
+                    s,
+                    &region,
+                    &name_by_group,
+                )));
+            }
         }
+
         if !flags.global() {
             break;
         }
+
+        // Keep jq behavior for zero-width global matches: advance to avoid infinite loops.
+        start_byte = if end0 == beg0 {
+            advance_one_char_boundary(text, end0)
+        } else {
+            end0
+        };
     }
+
     if mi {
         out.push(Part::Mismatch(&s[last_byte..]));
     }
+
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{regex, Flags, Part};
+
+    fn as_matches(parts: Vec<Part<&[u8]>>) -> Vec<Vec<(isize, usize, String)>> {
+        parts
+            .into_iter()
+            .filter_map(|p| match p {
+                Part::Matches(ms) => Some(
+                    ms.into_iter()
+                        .map(|m| (m.offset, m.length, String::from_utf8_lossy(m.string).to_string()))
+                        .collect::<Vec<_>>(),
+                ),
+                Part::Mismatch(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn onig_zero_width_capture_offsets_match_jq_17() {
+        let flags = Flags::new("g").expect("flags");
+        let re = flags.regex("( )*").expect("regex");
+        let parts = as_matches(regex(b"abc", &re, flags, (false, true)));
+        assert_eq!(parts[0][1].0, 0);
+        assert_eq!(parts[0][1].1, 0);
+        assert_eq!(parts[0][1].2, "");
+    }
+
+    #[test]
+    fn onig_combining_mark_word_boundary_length() {
+        let flags = Flags::new("").expect("flags");
+        let re = flags.regex(".+?\\b").expect("regex");
+        let input = "a\u{0304} two-codepoint grapheme".as_bytes();
+        let parts = as_matches(regex(input, &re, flags, (false, true)));
+        assert_eq!(parts[0][0].1, 2);
+        assert_eq!(parts[0][0].2, "a\u{0304}");
+    }
+
+    #[test]
+    fn onig_positive_lookahead_global_matches_once_like_jq() {
+        let flags = Flags::new("g").expect("flags");
+        let re = flags.regex("(?=u)").expect("regex");
+        let parts = as_matches(regex(b"qux", &re, flags, (false, true)));
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0][0].0, 1);
+    }
+
+    #[test]
+    fn onig_global_includes_terminal_empty_match() {
+        let flags = Flags::new("g").expect("flags");
+        let re = flags.regex("[^a-z]*(?<x>[a-z]*)").expect("regex");
+        let parts = as_matches(regex(b"123foo456bar", &re, flags, (false, true)));
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[2][0], (12, 0, "".to_string()));
+        assert_eq!(parts[2][1], (12, 0, "".to_string()));
+    }
 }

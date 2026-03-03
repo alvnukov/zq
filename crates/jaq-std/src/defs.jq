@@ -1,7 +1,7 @@
 def empty: {}[] as $x | .;
 def null:  [][0];
 
-def stderr:      (       stderr_empty  as $x | .), .;
+def stderr:      ((if . == null then "null" else . end | stderr_empty) as $x | .), .;
 def debug:       (        debug_empty  as $x | .), .;
 def debug(msgs): ((msgs | debug_empty) as $x | .), .;
 def error:                error_empty  as $x | .    ;

@@ -1,7 +1,7 @@
 # zq
 
 [![CI](https://github.com/alvnukov/zq/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/alvnukov/zq/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/alvnukov/zq/main/.github/badges/coverage.json)](https://github.com/alvnukov/zq/actions/workflows/ci.yml)
+[![Coverage](https://raw.githubusercontent.com/alvnukov/zq/main/.github/badges/coverage.svg)](https://github.com/alvnukov/zq/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/tag/alvnukov/zq?sort=semver&label=release)](https://github.com/alvnukov/zq/releases)
 [![Homebrew Tap](https://img.shields.io/badge/homebrew-alvnukov%2Ftap-2e7d32?logo=homebrew)](https://github.com/alvnukov/homebrew-tap)
 [![License](https://img.shields.io/github/license/alvnukov/zq)](LICENSE)

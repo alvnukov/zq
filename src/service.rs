@@ -570,8 +570,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         }
     }
 
-    if cfg!(not(feature = "legacy-jaq"))
-        && matches!(cli.output_format, OutputFormat::Json)
+    if matches!(cli.output_format, OutputFormat::Json)
         && !cli.raw_output0
         && query_uses_stderr_builtin(base_query.as_str())
     {

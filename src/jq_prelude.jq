@@ -1,4 +1,4 @@
-# jq-compat prelude for the built-in jaq runtime.
+# jq-compat prelude for the built-in native zq runtime.
 
 # zq keeps exact big integers/decimals, so jq compatibility checks should
 # follow decimal-capable expectations.

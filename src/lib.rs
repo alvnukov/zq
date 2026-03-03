@@ -1,7 +1,4 @@
 mod native_engine;
-#[cfg(feature = "legacy-jaq")]
-mod query;
-#[cfg(not(feature = "legacy-jaq"))]
 #[path = "query_native.rs"]
 mod query;
 mod yamlmerge;

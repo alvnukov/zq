@@ -18,7 +18,6 @@ pub enum TryExecuteStream {
     Executed(Result<(), String>),
 }
 
-#[cfg_attr(feature = "legacy-jaq", allow(dead_code))]
 pub fn is_supported(query: &str) -> bool {
     parse_pipeline(query).is_some()
 }

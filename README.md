@@ -8,15 +8,7 @@ Input can be JSON or YAML (auto-detected).
 
 ## Engine source layout
 
-The query runtime is integrated into this repository as first-party crates:
-
-- `crates/jaq-core`
-- `crates/jaq-std`
-- `crates/jaq-json`
-- `crates/jaq-fmts`
-- `crates/jaq-all`
-
-`zq` uses local `path` dependencies to these crates, so engine behavior can be changed directly in this repo.
+`zq` uses a native in-repo query runtime (no `jaq` dependency).
 
 ## CLI usage
 

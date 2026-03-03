@@ -95,6 +95,13 @@ pub struct Cli {
     )]
     pub run_tests_take: Option<usize>,
     #[arg(
+        long = "diff",
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        help = "Semantic diff mode (compare JSON/YAML inputs like dyff)"
+    )]
+    pub diff: bool,
+    #[arg(
         short = 'c',
         long = "compact-output",
         visible_alias = "compact",

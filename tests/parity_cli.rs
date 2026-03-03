@@ -150,6 +150,7 @@ fn parity_help_contract() {
         "--seq",
         "--stream",
         "--stream-errors",
+        "--diff",
         "--arg name value",
         "--argjson name value",
         "--slurpfile name file",
@@ -440,4 +441,66 @@ fn parity_missing_input_file_exits_with_io_code() {
     assert_fail(&out, "missing input file");
     assert_exit_code(&out, 2, "missing input file");
     assert_stderr_contains(&out, "jq: error:", "missing input file");
+}
+
+#[test]
+fn parity_diff_mode_reports_semantic_equality() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let left = td.path().join("left.yaml");
+    let right = td.path().join("right.json");
+    std::fs::write(&left, "a: 1\nb:\n  c: [1,2]\n").expect("write left");
+    std::fs::write(&right, "{\"b\":{\"c\":[1,2]},\"a\":1}\n").expect("write right");
+
+    let left_s = left.to_string_lossy().into_owned();
+    let right_s = right.to_string_lossy().into_owned();
+    let out = run_zq(&["--diff", &left_s, &right_s]);
+    assert_ok(&out, "--diff semantic equality");
+    assert_exit_code(&out, 0, "--diff semantic equality");
+    assert_stdout_trim_eq(&out, "No semantic differences.", "--diff semantic equality");
+}
+
+#[test]
+fn parity_diff_mode_reports_structural_changes() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let left = td.path().join("left.json");
+    let right = td.path().join("right.json");
+    std::fs::write(&left, "{\"a\":1,\"b\":[1,2],\"drop\":true}\n").expect("write left");
+    std::fs::write(&right, "{\"a\":2,\"b\":[1,3,4],\"add\":\"x\"}\n").expect("write right");
+
+    let left_s = left.to_string_lossy().into_owned();
+    let right_s = right.to_string_lossy().into_owned();
+    let out = run_zq(&["--diff", &left_s, &right_s]);
+    assert_fail(&out, "--diff structural changes");
+    assert_exit_code(&out, 1, "--diff structural changes");
+    let text = stdout_text(&out);
+    assert!(text.contains("Found"), "stdout:\n{text}");
+    assert!(text.contains("~ $.a"), "stdout:\n{text}");
+    assert!(text.contains("~ $.b[1]"), "stdout:\n{text}");
+    assert!(text.contains("+ $.add"), "stdout:\n{text}");
+    assert!(text.contains("- $.drop"), "stdout:\n{text}");
+}
+
+#[test]
+fn parity_diff_mode_supports_stdin_vs_file() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let right = td.path().join("right.yaml");
+    std::fs::write(&right, "x: [1, 2]\n").expect("write right");
+    let right_s = right.to_string_lossy().into_owned();
+
+    let out = run_zq_stdin(&["--diff", &right_s], "{\"x\":[1,2]}\n");
+    assert_ok(&out, "--diff stdin vs file");
+    assert_exit_code(&out, 0, "--diff stdin vs file");
+    assert_stdout_trim_eq(&out, "No semantic differences.", "--diff stdin vs file");
+}
+
+#[test]
+fn parity_diff_mode_rejects_double_stdin() {
+    let out = run_zq(&["--diff", "-", "-"]);
+    assert_fail(&out, "--diff - -");
+    assert_exit_code(&out, 5, "--diff - -");
+    assert_stderr_contains(
+        &out,
+        "does not support reading both sides from stdin",
+        "--diff - -",
+    );
 }

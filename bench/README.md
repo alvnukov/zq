@@ -2,6 +2,14 @@
 
 Scripts in this directory benchmark `zq` vs `jq` on NDJSON input and can profile each case.
 
+## Prerequisites
+
+- `jq` must be available in `PATH`.
+- `zq` release binary is expected at `target/release/zq` (scripts build it automatically by default).
+- For profiling:
+  - macOS: `sample`
+  - Linux: `perf`
+
 ## Files
 
 - `cases.tsv`: benchmark case name + jq filter.
@@ -30,3 +38,12 @@ Outputs are written to `.tmp/bench/`:
 - `stdin_results.tsv`
 - `jq_*.times`, `zq_*.times`
 - `profiles/*`
+
+## Useful env vars
+
+- `ROWS`: number of generated rows for `gen_data_ndjson.sh` (default `200000`)
+- `REPEATS`: benchmark repeats for each case in `run_stdin_bench.sh` (default `9`)
+- `DATA`: dataset path for benchmark/profile scripts
+- `BUILD_RELEASE=0`: skip rebuilding `zq` if binary is already present
+- `ZQ_BIN`: custom `zq` binary path
+- `OUT_DIR`: profile output directory for `profile_each_case.sh`

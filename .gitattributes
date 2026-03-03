@@ -1,0 +1,2 @@
+# Generated jq fixture bundles; keep them out of language statistics.
+src/fixtures_*.inc linguist-generated=true

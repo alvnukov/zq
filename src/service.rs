@@ -2,7 +2,7 @@ use clap::{error::ErrorKind, Parser};
 use serde::Serialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
@@ -440,6 +440,21 @@ enum InputData {
     Mapped(memmap2::Mmap),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemanticDiffKind {
+    Added,
+    Removed,
+    Changed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticDiff {
+    kind: SemanticDiffKind,
+    path: String,
+    left: Option<JsonValue>,
+    right: Option<JsonValue>,
+}
+
 impl InputData {
     fn as_str_lossy(&self) -> Cow<'_, str> {
         match self {
@@ -452,6 +467,11 @@ impl InputData {
 }
 
 fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
+    if cli.diff && !cli.run_tests.is_empty() {
+        return Err(Error::Query(
+            "--diff mode cannot be combined with --run-tests".to_string(),
+        ));
+    }
     if !cli.run_tests.is_empty() {
         let mut paths: Vec<String> = cli
             .run_tests
@@ -464,6 +484,9 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
             paths.push("-".to_string());
         }
         return run_tests_mode_many(&cli, &paths);
+    }
+    if cli.diff {
+        return run_diff_mode(&cli);
     }
     if cli.debug_dump_disasm {
         // jq's disasm output is only used by compatibility tests as a stable
@@ -727,6 +750,267 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         return Ok(exit_status_from_outputs(&out));
     }
     Ok(0)
+}
+
+fn run_diff_mode(cli: &Cli) -> Result<i32, Error> {
+    if cli.from_file.is_some() {
+        return Err(Error::Query(
+            "--diff mode cannot be combined with -f/--from-file".to_string(),
+        ));
+    }
+    if cli.input_legacy.is_some() {
+        return Err(Error::Query(
+            "--diff mode cannot be combined with --input (use positional LEFT RIGHT)".to_string(),
+        ));
+    }
+    let (left_path, right_path) = resolve_diff_paths(cli)?;
+
+    let left_input = read_input(&left_path)?;
+    let left_text = left_input.as_str_lossy();
+    let left_docs = parse_diff_docs(left_text.as_ref(), &left_path, "LEFT")?;
+
+    let right_input = read_input(&right_path)?;
+    let right_text = right_input.as_str_lossy();
+    let right_docs = parse_diff_docs(right_text.as_ref(), &right_path, "RIGHT")?;
+
+    let diffs = collect_semantic_doc_diffs(&left_docs, &right_docs);
+    if diffs.is_empty() {
+        println!("No semantic differences.");
+        return Ok(0);
+    }
+
+    print_semantic_diff_report(&diffs)?;
+    Ok(1)
+}
+
+fn resolve_diff_paths(cli: &Cli) -> Result<(String, String), Error> {
+    match (&cli.query, &cli.input_file) {
+        (Some(left), Some(right)) => {
+            if left == "-" && right == "-" {
+                return Err(Error::Query(
+                    "--diff mode does not support reading both sides from stdin".to_string(),
+                ));
+            }
+            Ok((left.clone(), right.clone()))
+        }
+        (Some(right), None) => {
+            if right == "-" {
+                return Err(Error::Query(
+                    "--diff mode requires at least one file path".to_string(),
+                ));
+            }
+            Ok(("-".to_string(), right.clone()))
+        }
+        (None, Some(_)) => Err(Error::Query(
+            "--diff mode expects positional paths as LEFT RIGHT".to_string(),
+        )),
+        (None, None) => Err(Error::Query(
+            "--diff mode expects LEFT RIGHT (or a single RIGHT to compare stdin against RIGHT)"
+                .to_string(),
+        )),
+    }
+}
+
+fn parse_diff_docs(input: &str, path: &str, side: &str) -> Result<Vec<JsonValue>, Error> {
+    zq::parse_native_input_values_auto(input)
+        .map(|parsed| parsed.values)
+        .map_err(|err| {
+            Error::Query(format!(
+                "--diff: cannot parse {side} input `{path}`: {}",
+                zq::format_query_error("jq", input, &err)
+            ))
+        })
+}
+
+fn collect_semantic_doc_diffs(
+    left_docs: &[JsonValue],
+    right_docs: &[JsonValue],
+) -> Vec<SemanticDiff> {
+    let mut diffs = Vec::new();
+    if left_docs.len() == 1 && right_docs.len() == 1 {
+        collect_semantic_diffs("$", &left_docs[0], &right_docs[0], &mut diffs);
+        return diffs;
+    }
+
+    let max_len = left_docs.len().max(right_docs.len());
+    for idx in 0..max_len {
+        let path = format!("$[{idx}]");
+        match (left_docs.get(idx), right_docs.get(idx)) {
+            (Some(left), Some(right)) => {
+                collect_semantic_diffs(path.as_str(), left, right, &mut diffs)
+            }
+            (Some(left), None) => diffs.push(SemanticDiff {
+                kind: SemanticDiffKind::Removed,
+                path,
+                left: Some(left.clone()),
+                right: None,
+            }),
+            (None, Some(right)) => diffs.push(SemanticDiff {
+                kind: SemanticDiffKind::Added,
+                path,
+                left: None,
+                right: Some(right.clone()),
+            }),
+            (None, None) => {}
+        }
+    }
+    diffs
+}
+
+fn collect_semantic_diffs(
+    path: &str,
+    left: &JsonValue,
+    right: &JsonValue,
+    out: &mut Vec<SemanticDiff>,
+) {
+    if left == right {
+        return;
+    }
+
+    match (left, right) {
+        (JsonValue::Object(left_map), JsonValue::Object(right_map)) => {
+            let mut keys = BTreeSet::new();
+            keys.extend(left_map.keys().cloned());
+            keys.extend(right_map.keys().cloned());
+
+            for key in keys {
+                let key_path = join_object_path(path, &key);
+                match (left_map.get(&key), right_map.get(&key)) {
+                    (Some(left_value), Some(right_value)) => {
+                        collect_semantic_diffs(key_path.as_str(), left_value, right_value, out)
+                    }
+                    (Some(left_value), None) => out.push(SemanticDiff {
+                        kind: SemanticDiffKind::Removed,
+                        path: key_path,
+                        left: Some(left_value.clone()),
+                        right: None,
+                    }),
+                    (None, Some(right_value)) => out.push(SemanticDiff {
+                        kind: SemanticDiffKind::Added,
+                        path: key_path,
+                        left: None,
+                        right: Some(right_value.clone()),
+                    }),
+                    (None, None) => {}
+                }
+            }
+        }
+        (JsonValue::Array(left_items), JsonValue::Array(right_items)) => {
+            let max_len = left_items.len().max(right_items.len());
+            for idx in 0..max_len {
+                let item_path = format!("{path}[{idx}]");
+                match (left_items.get(idx), right_items.get(idx)) {
+                    (Some(left_value), Some(right_value)) => {
+                        collect_semantic_diffs(item_path.as_str(), left_value, right_value, out)
+                    }
+                    (Some(left_value), None) => out.push(SemanticDiff {
+                        kind: SemanticDiffKind::Removed,
+                        path: item_path,
+                        left: Some(left_value.clone()),
+                        right: None,
+                    }),
+                    (None, Some(right_value)) => out.push(SemanticDiff {
+                        kind: SemanticDiffKind::Added,
+                        path: item_path,
+                        left: None,
+                        right: Some(right_value.clone()),
+                    }),
+                    (None, None) => {}
+                }
+            }
+        }
+        _ => out.push(SemanticDiff {
+            kind: SemanticDiffKind::Changed,
+            path: path.to_string(),
+            left: Some(left.clone()),
+            right: Some(right.clone()),
+        }),
+    }
+}
+
+fn join_object_path(base: &str, key: &str) -> String {
+    if is_simple_path_key(key) {
+        return format!("{base}.{key}");
+    }
+    let escaped = serde_json::to_string(key).unwrap_or_else(|_| "\"<invalid-key>\"".to_string());
+    format!("{base}[{escaped}]")
+}
+
+fn is_simple_path_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(ch) if ch == '_' || ch.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn print_semantic_diff_report(diffs: &[SemanticDiff]) -> Result<(), Error> {
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    let mut changed = 0usize;
+    let stdout = io::stdout();
+    let mut writer = io::BufWriter::new(stdout.lock());
+
+    writeln!(writer, "Found {} semantic differences:", diffs.len())?;
+    for diff in diffs {
+        match diff.kind {
+            SemanticDiffKind::Added => {
+                added += 1;
+                let value = diff
+                    .right
+                    .as_ref()
+                    .expect("added diff always has right value");
+                writeln!(
+                    writer,
+                    "+ {}: {}",
+                    diff.path,
+                    render_semantic_diff_value(value)?
+                )?;
+            }
+            SemanticDiffKind::Removed => {
+                removed += 1;
+                let value = diff
+                    .left
+                    .as_ref()
+                    .expect("removed diff always has left value");
+                writeln!(
+                    writer,
+                    "- {}: {}",
+                    diff.path,
+                    render_semantic_diff_value(value)?
+                )?;
+            }
+            SemanticDiffKind::Changed => {
+                changed += 1;
+                let left = diff
+                    .left
+                    .as_ref()
+                    .expect("changed diff always has left value");
+                let right = diff
+                    .right
+                    .as_ref()
+                    .expect("changed diff always has right value");
+                writeln!(
+                    writer,
+                    "~ {}: {} -> {}",
+                    diff.path,
+                    render_semantic_diff_value(left)?,
+                    render_semantic_diff_value(right)?
+                )?;
+            }
+        }
+    }
+    writeln!(
+        writer,
+        "Summary: changed={changed}, added={added}, removed={removed}"
+    )?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn render_semantic_diff_value(value: &JsonValue) -> Result<String, Error> {
+    serde_json::to_string(value).map_err(|e| Error::Query(format!("encode json: {e}")))
 }
 
 fn build_custom_input_stream(
@@ -3602,6 +3886,120 @@ mod tests {
         let compile_cli = parse_cli_for_test(&["if"]);
         let status = run_with(compile_cli, CliCompatArgs::default()).expect("compile special");
         assert_eq!(status, 3);
+    }
+
+    #[test]
+    fn resolve_diff_paths_contract() {
+        let cli = parse_cli_for_test(&["--diff", "left.yaml", "right.json"]);
+        assert_eq!(
+            resolve_diff_paths(&cli).expect("two-file diff"),
+            ("left.yaml".to_string(), "right.json".to_string())
+        );
+
+        let cli = parse_cli_for_test(&["--diff", "right.yaml"]);
+        assert_eq!(
+            resolve_diff_paths(&cli).expect("stdin vs file diff"),
+            ("-".to_string(), "right.yaml".to_string())
+        );
+
+        let cli = parse_cli_for_test(&["--diff"]);
+        let err = resolve_diff_paths(&cli).expect_err("missing paths");
+        assert!(format!("{err}").contains("expects LEFT RIGHT"));
+
+        let cli = parse_cli_for_test(&["--diff", "-", "-"]);
+        let err = resolve_diff_paths(&cli).expect_err("double stdin must fail");
+        assert!(format!("{err}").contains("both sides from stdin"));
+    }
+
+    #[test]
+    fn semantic_diff_collector_reports_changed_added_removed_paths() {
+        let left_docs = vec![serde_json::json!({
+            "a": 1,
+            "b": [1, 2],
+            "drop": true,
+            "keep": {"x": 1}
+        })];
+        let right_docs = vec![serde_json::json!({
+            "a": 2,
+            "add": "x",
+            "b": [1, 3, 4],
+            "keep": {"x": 1}
+        })];
+
+        let diffs = collect_semantic_doc_diffs(&left_docs, &right_docs);
+        assert_eq!(diffs.len(), 5);
+        assert_eq!(
+            diffs[0],
+            SemanticDiff {
+                kind: SemanticDiffKind::Changed,
+                path: "$.a".to_string(),
+                left: Some(serde_json::json!(1)),
+                right: Some(serde_json::json!(2)),
+            }
+        );
+        assert_eq!(
+            diffs[1],
+            SemanticDiff {
+                kind: SemanticDiffKind::Added,
+                path: "$.add".to_string(),
+                left: None,
+                right: Some(serde_json::json!("x")),
+            }
+        );
+        assert_eq!(
+            diffs[2],
+            SemanticDiff {
+                kind: SemanticDiffKind::Changed,
+                path: "$.b[1]".to_string(),
+                left: Some(serde_json::json!(2)),
+                right: Some(serde_json::json!(3)),
+            }
+        );
+        assert_eq!(
+            diffs[3],
+            SemanticDiff {
+                kind: SemanticDiffKind::Added,
+                path: "$.b[2]".to_string(),
+                left: None,
+                right: Some(serde_json::json!(4)),
+            }
+        );
+        assert_eq!(
+            diffs[4],
+            SemanticDiff {
+                kind: SemanticDiffKind::Removed,
+                path: "$.drop".to_string(),
+                left: Some(serde_json::json!(true)),
+                right: None,
+            }
+        );
+    }
+
+    #[test]
+    fn run_with_diff_mode_returns_expected_statuses() {
+        let td = tempfile::TempDir::new().expect("tempdir");
+        let left = td.path().join("left.yaml");
+        let right_equal = td.path().join("right-equal.json");
+        let right_diff = td.path().join("right-diff.json");
+        std::fs::write(&left, "a: 1\nb:\n  - 2\n").expect("write left");
+        std::fs::write(&right_equal, "{\"b\":[2],\"a\":1}\n").expect("write right equal");
+        std::fs::write(&right_diff, "{\"a\":2,\"b\":[2]}\n").expect("write right diff");
+
+        let equal_cli = parse_cli_for_test(&[
+            "--diff",
+            left.to_str().expect("utf8 path"),
+            right_equal.to_str().expect("utf8 path"),
+        ]);
+        let equal_status = run_with(equal_cli, CliCompatArgs::default()).expect("equal diff");
+        assert_eq!(equal_status, 0);
+
+        let diff_cli = parse_cli_for_test(&[
+            "--diff",
+            left.to_str().expect("utf8 path"),
+            right_diff.to_str().expect("utf8 path"),
+        ]);
+        let diff_status = run_with(diff_cli, CliCompatArgs::default()).expect("different diff");
+        assert_eq!(diff_status, 1);
     }
 
     #[test]

@@ -84,7 +84,7 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - name: Checkout
@@ -103,6 +103,42 @@ jobs:
 
       - name: Generate coverage report
         run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+
+      - name: Update coverage badge data
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          lf="$(awk -F: '/^LF:/{sum += $2} END {print sum + 0}' lcov.info)"
+          lh="$(awk -F: '/^LH:/{sum += $2} END {print sum + 0}' lcov.info)"
+          pct="$(awk -v lh="$lh" -v lf="$lf" 'BEGIN { if (lf == 0) printf "0.00"; else printf "%.2f", (100*lh/lf) }')"
+          color="$(awk -v p="$pct" 'BEGIN {
+            if (p >= 90) print "brightgreen";
+            else if (p >= 80) print "green";
+            else if (p >= 70) print "yellowgreen";
+            else if (p >= 60) print "yellow";
+            else if (p >= 50) print "orange";
+            else print "red";
+          }')"
+          mkdir -p .github/badges
+          cat > .github/badges/coverage.json <<EOF
+          {"schemaVersion":1,"label":"coverage","message":"${pct}%","color":"${color}"}
+          EOF
+
+      - name: Commit coverage badge data
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- .github/badges/coverage.json; then
+            echo "Coverage badge is up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/badges/coverage.json
+          git commit -m "chore: update coverage badge [skip ci]"
+          git push origin HEAD:main
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

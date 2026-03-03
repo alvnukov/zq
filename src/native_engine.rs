@@ -20,8 +20,11 @@ enum Stage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Accessor {
     Field(String),
+    FieldOpt(String),
     Index(i64),
+    IndexOpt(i64),
     Iter,
+    IterOpt,
 }
 
 pub fn try_execute(query: &str, inputs: &[JsonValue], run_options: RunOptions) -> TryExecute {
@@ -72,7 +75,7 @@ fn run_path(accessors: &[Accessor], input: JsonValue) -> Result<Vec<JsonValue>, 
 
 fn apply_accessor(value: JsonValue, accessor: &Accessor) -> Result<Vec<JsonValue>, String> {
     match accessor {
-        Accessor::Field(name) => match value {
+        Accessor::Field(name) | Accessor::FieldOpt(name) => match value {
             JsonValue::Object(map) => Ok(vec![map.get(name).cloned().unwrap_or(JsonValue::Null)]),
             JsonValue::Null => Ok(vec![JsonValue::Null]),
             other => Err(format!(
@@ -81,7 +84,7 @@ fn apply_accessor(value: JsonValue, accessor: &Accessor) -> Result<Vec<JsonValue
                 name
             )),
         },
-        Accessor::Index(index) => match value {
+        Accessor::Index(index) | Accessor::IndexOpt(index) => match value {
             JsonValue::Array(arr) => {
                 let len = arr.len() as i64;
                 let idx = if *index < 0 { len + *index } else { *index };
@@ -97,12 +100,16 @@ fn apply_accessor(value: JsonValue, accessor: &Accessor) -> Result<Vec<JsonValue
                 index
             )),
         },
-        Accessor::Iter => match value {
+        Accessor::Iter | Accessor::IterOpt => match value {
             JsonValue::Array(arr) => Ok(arr),
             JsonValue::Object(map) => Ok(map.into_iter().map(|(_, v)| v).collect()),
             other => Err(format!("Cannot iterate over {}", type_name(&other))),
         },
     }
+    .or_else(|e| match accessor {
+        Accessor::FieldOpt(_) | Accessor::IndexOpt(_) | Accessor::IterOpt => Ok(Vec::new()),
+        _ => Err(e),
+    })
 }
 
 fn type_name(v: &JsonValue) -> &'static str {
@@ -161,14 +168,24 @@ fn parse_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<S
         chars.next();
         let mut accessors = Vec::new();
         if matches!(chars.peek().copied(), Some('"')) || ident_start(chars.peek().copied()) {
-            accessors.push(Accessor::Field(parse_field_after_dot(chars)?));
+            let field = Accessor::Field(parse_field_after_dot(chars)?);
+            accessors.push(if take_optional(chars) {
+                make_optional(field)
+            } else {
+                field
+            });
         }
         loop {
             skip_ws(chars);
             match chars.peek().copied() {
                 Some('.') => {
                     chars.next();
-                    accessors.push(Accessor::Field(parse_field_after_dot(chars)?));
+                    let name = parse_field_after_dot(chars)?;
+                    accessors.push(if take_optional(chars) {
+                        Accessor::FieldOpt(name)
+                    } else {
+                        Accessor::Field(name)
+                    });
                 }
                 Some('[') => {
                     chars.next();
@@ -184,6 +201,11 @@ fn parse_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<S
                     if chars.next() != Some(']') {
                         return None;
                     }
+                    let acc = if take_optional(chars) {
+                        make_optional(acc)
+                    } else {
+                        acc
+                    };
                     accessors.push(acc);
                 }
                 _ => break,
@@ -243,6 +265,25 @@ fn parse_string(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<
         }
     }
     None
+}
+
+fn take_optional(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    skip_ws(chars);
+    if chars.peek().copied() == Some('?') {
+        chars.next();
+        true
+    } else {
+        false
+    }
+}
+
+fn make_optional(acc: Accessor) -> Accessor {
+    match acc {
+        Accessor::Field(s) => Accessor::FieldOpt(s),
+        Accessor::Index(i) => Accessor::IndexOpt(i),
+        Accessor::Iter => Accessor::IterOpt,
+        other => other,
+    }
 }
 
 fn parse_i64(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<i64> {
@@ -355,10 +396,6 @@ mod tests {
             try_execute("map(.)", &[JsonValue::Null], RunOptions { null_input: false }),
             TryExecute::Unsupported
         ));
-        assert!(matches!(
-            try_execute(".a?", &[JsonValue::Null], RunOptions { null_input: false }),
-            TryExecute::Unsupported
-        ));
     }
 
     #[test]
@@ -384,6 +421,28 @@ mod tests {
             TryExecute::Executed(Ok(values)) => {
                 assert_eq!(values, vec![serde_json::json!(1), serde_json::json!(2)])
             }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn supports_optional_path_access() {
+        let out = try_execute(".a?", &[serde_json::json!(1)], RunOptions { null_input: false });
+        match out {
+            TryExecute::Executed(Ok(values)) => assert!(values.is_empty()),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let out = try_execute(".[]?", &[serde_json::json!(1)], RunOptions { null_input: false });
+        match out {
+            TryExecute::Executed(Ok(values)) => assert!(values.is_empty()),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+
+        let out =
+            try_execute(".missing?", &[serde_json::json!({"a": 1})], RunOptions { null_input: false });
+        match out {
+            TryExecute::Executed(Ok(values)) => assert_eq!(values, vec![JsonValue::Null]),
             other => panic!("unexpected outcome: {other:?}"),
         }
     }

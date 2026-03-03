@@ -1,4 +1,26 @@
-use serde_json::Value as JsonValue;
+use jaq_all::data::{self, Filter as JaqFilter, Runner as JaqRunner};
+use jaq_all::fmts::read::{self as jaq_read, json as jaq_json_read};
+use jaq_all::jaq_core::{
+    compile::{Compiler, Undefined as CompileUndefined},
+    load::{
+        self as core_load, import,
+        lex as core_lex,
+        lex::StrPart,
+        parse::{self as core_parse, BinaryOp, Term},
+        Arena, File, Loader, Modules,
+    },
+    Vars,
+};
+use jaq_all::json::Val as JaqValue;
+use serde_json::{Map as JsonMap, Value as JsonValue};
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::Path;
+use std::path::PathBuf;
+
+const JQ_PRELUDE: &str = include_str!("jq_prelude.jq");
+const DEFAULT_LIBRARY_PATHS: [&str; 3] = ["~/.jq", "$ORIGIN/../lib/jq", "$ORIGIN/../lib"];
+const MODULEMETA_GLOBAL: &str = "$__zq_modulemeta";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -8,19 +30,38 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("yaml: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    #[error("{0}")]
+    Thrown(JsonValue),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputKind {
+    JsonStream,
+    YamlDocs,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedInput {
+    pub kind: InputKind,
+    pub values: Vec<JsonValue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RunOptions {
+    pub null_input: bool,
 }
 
 #[allow(dead_code)]
-pub fn run_json_query(_query: &str, _input: &str) -> Result<Vec<JsonValue>, Error> {
-    let input_value: JsonValue = match serde_json::from_str(_input) {
+pub fn run_json_query(query: &str, input: &str) -> Result<Vec<JsonValue>, Error> {
+    let input_value: JsonValue = match serde_json::from_str(input) {
         Ok(v) => v,
-        Err(json_err) => match parse_yaml_json_with_merge(_input) {
+        Err(json_err) => match parse_yaml_json_with_merge(input) {
             Ok(v) => v,
             Err(Error::Yaml(_)) => return Err(Error::Json(json_err)),
             Err(e) => return Err(e),
         },
     };
-    eval_query(_query, vec![input_value])
+    run_query_stream(query, vec![input_value])
 }
 
 #[allow(dead_code)]
@@ -33,21 +74,141 @@ pub fn run_yaml_query(query: &str, input: &str) -> Result<Vec<JsonValue>, Error>
         },
         Err(e) => return Err(e),
     };
-    eval_query(query, vec![as_json])
+    run_query_stream(query, vec![as_json])
 }
 
 pub fn run_query_stream(
     query: &str,
     input_stream: Vec<JsonValue>,
 ) -> Result<Vec<JsonValue>, Error> {
-    eval_query(query, input_stream)
+    run_query_stream_with_paths_and_options(query, input_stream, &[], RunOptions::default())
 }
 
+pub fn run_query_stream_with_paths(
+    query: &str,
+    input_stream: Vec<JsonValue>,
+    library_paths: &[String],
+) -> Result<Vec<JsonValue>, Error> {
+    run_query_stream_with_paths_and_options(query, input_stream, library_paths, RunOptions::default())
+}
+
+pub fn run_query_stream_with_paths_and_options(
+    query: &str,
+    input_stream: Vec<JsonValue>,
+    library_paths: &[String],
+    run_options: RunOptions,
+) -> Result<Vec<JsonValue>, Error> {
+    let inputs = input_stream
+        .into_iter()
+        .map(json_to_jaq)
+        .collect::<Result<Vec<_>, _>>()?;
+    let outputs = execute_query(query, inputs, library_paths, run_options)?;
+    outputs
+        .iter()
+        .map(jaq_to_json)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+pub fn run_query_stream_jsonish(
+    query: &str,
+    input_jsonish: &str,
+    library_paths: &[String],
+) -> Result<Vec<String>, Error> {
+    let outputs = run_query_stream_jsonish_values(query, input_jsonish, library_paths)?;
+    outputs
+        .iter()
+        .map(stringify_jsonish_value)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+pub fn run_query_stream_jsonish_values(
+    query: &str,
+    input_jsonish: &str,
+    library_paths: &[String],
+) -> Result<Vec<JaqValue>, Error> {
+    let prepared = prepare_query_with_paths(query, library_paths)?;
+    prepared.run_jsonish_values(input_jsonish)
+}
+
+pub struct PreparedQuery {
+    compiled: CompiledProgram,
+}
+
+impl PreparedQuery {
+    pub fn run_jsonish(&self, input_jsonish: &str) -> Result<Vec<String>, Error> {
+        let outputs = self.run_jsonish_values(input_jsonish)?;
+        outputs
+            .iter()
+            .map(stringify_jsonish_value)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    pub fn run_jsonish_values(&self, input_jsonish: &str) -> Result<Vec<JaqValue>, Error> {
+        let input = parse_jsonish_value(input_jsonish)?;
+        run_compiled_query(&self.compiled, vec![input], RunOptions::default())
+    }
+
+    pub fn run_jsonish_lenient(&self, input_jsonish: &str) -> Result<Vec<String>, Error> {
+        let outputs = self.run_jsonish_values_lenient(input_jsonish)?;
+        outputs
+            .iter()
+            .map(stringify_jsonish_value)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    pub fn run_jsonish_values_lenient(&self, input_jsonish: &str) -> Result<Vec<JaqValue>, Error> {
+        let input = parse_jsonish_value(input_jsonish)?;
+        run_compiled_query_lenient(&self.compiled, vec![input])
+    }
+}
+
+pub fn prepare_query_with_paths(query: &str, library_paths: &[String]) -> Result<PreparedQuery, Error> {
+    let compiled = compile_program(query, library_paths)?;
+    Ok(PreparedQuery { compiled })
+}
+
+pub fn validate_query(query: &str) -> Result<(), Error> {
+    validate_query_with_paths(query, &[])
+}
+
+pub fn validate_query_with_paths(query: &str, library_paths: &[String]) -> Result<(), Error> {
+    compile_program(query, library_paths).map(|_| ())
+}
+
+pub fn normalize_jsonish_line(line: &str) -> Result<String, Error> {
+    let value = parse_jsonish_value(line)?;
+    stringify_jsonish_value(&value)
+}
+
+pub fn jsonish_equal(left: &str, right: &str) -> Result<bool, Error> {
+    let left = parse_jsonish_value(left)?;
+    let right = parse_jsonish_value(right)?;
+    Ok(left == right)
+}
+
+#[allow(dead_code)]
 pub fn parse_input_docs_prefer_json(input: &str) -> Result<Vec<JsonValue>, Error> {
-    match serde_json::from_str::<JsonValue>(input) {
-        Ok(v) => Ok(vec![v]),
+    match parse_json_value_stream(input) {
+        Ok(v) => Ok(v),
         Err(json_err) => match parse_yaml_json_docs_with_merge(input) {
             Ok(v) => Ok(v),
+            Err(Error::Yaml(_)) => Err(Error::Json(json_err)),
+            Err(e) => Err(e),
+        },
+    }
+}
+
+pub fn parse_input_values_auto(input: &str) -> Result<ParsedInput, Error> {
+    match parse_json_value_stream(input) {
+        Ok(values) => Ok(ParsedInput {
+            kind: InputKind::JsonStream,
+            values,
+        }),
+        Err(json_err) => match parse_yaml_json_docs_with_merge(input) {
+            Ok(values) => Ok(ParsedInput {
+                kind: InputKind::YamlDocs,
+                values,
+            }),
             Err(Error::Yaml(_)) => Err(Error::Json(json_err)),
             Err(e) => Err(e),
         },
@@ -66,9 +227,34 @@ pub fn parse_input_docs_prefer_yaml(input: &str) -> Result<Vec<JsonValue>, Error
     }
 }
 
-fn eval_query(query: &str, input_stream: Vec<JsonValue>) -> Result<Vec<JsonValue>, Error> {
-    let compiled = compile_query(query)?;
-    eval_compiled_query(&compiled, input_stream)
+fn execute_query(
+    query: &str,
+    inputs: Vec<JaqValue>,
+    library_paths: &[String],
+    run_options: RunOptions,
+) -> Result<Vec<JaqValue>, Error> {
+    let inputs_json = inputs
+        .iter()
+        .map(jaq_to_json)
+        .collect::<Result<Vec<_>, _>>()?;
+    match crate::native_engine::try_execute(
+        query,
+        &inputs_json,
+        crate::native_engine::RunOptions {
+            null_input: run_options.null_input,
+        },
+    ) {
+        crate::native_engine::TryExecute::Executed(Ok(values)) => {
+            return values.into_iter().map(json_to_jaq).collect();
+        }
+        crate::native_engine::TryExecute::Executed(Err(e)) => {
+            return Err(Error::Unsupported(e));
+        }
+        crate::native_engine::TryExecute::Unsupported => {}
+    }
+
+    let compiled = compile_program(query, library_paths)?;
+    run_compiled_query(&compiled, inputs, run_options)
 }
 
 #[allow(dead_code)]
@@ -89,2381 +275,1113 @@ fn parse_yaml_json_docs_with_merge(input: &str) -> Result<Vec<JsonValue>, Error>
         .collect()
 }
 
-#[derive(Debug, Clone)]
-enum CompiledQuery {
-    Identity,
-    Collect(Box<CompiledQuery>),
-    Comma(Vec<CompiledQuery>),
-    Alt(Box<CompiledQuery>, Box<CompiledQuery>),
-    AddExpr(Box<CompiledQuery>, Box<CompiledQuery>),
-    SubExpr(Box<CompiledQuery>, Box<CompiledQuery>),
-    MulExpr(Box<CompiledQuery>, Box<CompiledQuery>),
-    DivExpr(Box<CompiledQuery>, Box<CompiledQuery>),
-    IfElse {
-        cond: Box<CompiledQuery>,
-        then_q: Box<CompiledQuery>,
-        else_q: Box<CompiledQuery>,
-    },
-    Pipeline(Vec<CompiledStage>),
-    Issue2593,
+struct CompiledProgram {
+    filter: JaqFilter,
+    runtime_vars: Vec<JaqValue>,
 }
 
-#[derive(Debug, Clone)]
-enum CompiledStage {
-    Select(CompiledPredicate),
-    Map(Box<CompiledQuery>),
-    MapPath(Vec<PathToken>),
-    DotIter,
-    DotIterField(String),
-    Length,
-    KeysIter,
-    Keys,
-    Type,
-    ToString,
-    Add,
-    Sort,
-    Reverse,
-    Min,
-    Max,
-    Not,
-    Empty,
-    Values,
-    ToNumber,
-    Split(Box<CompiledQuery>),
-    Join(Box<CompiledQuery>),
-    Index(Box<CompiledQuery>),
-    RIndex(Box<CompiledQuery>),
-    Contains(Box<CompiledQuery>),
-    StartsWith(Box<CompiledQuery>),
-    EndsWith(Box<CompiledQuery>),
-    Subquery(Box<CompiledQuery>),
-    Has(String),
-    DotPath(Vec<PathToken>),
-    Literal(JsonValue),
-    Identity,
-}
-
-#[derive(Debug, Clone)]
-enum CompiledPredicate {
-    And(Box<CompiledPredicate>, Box<CompiledPredicate>),
-    Or(Box<CompiledPredicate>, Box<CompiledPredicate>),
-    Eq(Box<CompiledQuery>, Box<CompiledQuery>),
-    Ne(Box<CompiledQuery>, Box<CompiledQuery>),
-    Gt(Box<CompiledQuery>, Box<CompiledQuery>),
-    Ge(Box<CompiledQuery>, Box<CompiledQuery>),
-    Lt(Box<CompiledQuery>, Box<CompiledQuery>),
-    Le(Box<CompiledQuery>, Box<CompiledQuery>),
-    EqPathLiteral(Vec<PathToken>, JsonValue),
-    NePathLiteral(Vec<PathToken>, JsonValue),
-    Truthy(Box<CompiledQuery>),
-}
-
-#[derive(Debug, Clone)]
-enum PathToken {
-    Iter,
-    Field(String),
-    FieldIter(String),
-    Index(i64),
-    FieldIndex(String, i64),
-    Slice(Option<i64>, Option<i64>),
-    FieldSlice(String, Option<i64>, Option<i64>),
-}
-
-fn compile_query(query: &str) -> Result<CompiledQuery, Error> {
-    let mut q = query.trim();
-    while let Some(inner) = strip_outer_parens(q) {
-        q = inner.trim();
-    }
-    if q.is_empty() || q == "." {
-        return Ok(CompiledQuery::Identity);
-    }
-    if is_issue2593_pattern(q) {
-        return Ok(CompiledQuery::Issue2593);
-    }
-    if let Some((cond, then_expr, else_expr)) = parse_if_then_else(q) {
-        return Ok(CompiledQuery::IfElse {
-            cond: Box::new(compile_query(cond)?),
-            then_q: Box::new(compile_query(then_expr)?),
-            else_q: Box::new(compile_query(else_expr)?),
-        });
-    }
-    if q.starts_with('[') && q.ends_with(']') {
-        let inner = q[1..q.len() - 1].trim();
-        return Ok(CompiledQuery::Collect(Box::new(compile_query(inner)?)));
-    }
-    let parts = split_top_level(q, ',')
-        .into_iter()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>();
-    if parts.len() > 1 {
-        let mut compiled = Vec::with_capacity(parts.len());
-        for p in parts {
-            compiled.push(compile_query(p)?);
-        }
-        return Ok(CompiledQuery::Comma(compiled));
-    }
-    if let Some((l, r)) = split_once_top_level(q, "//") {
-        return Ok(CompiledQuery::Alt(
-            Box::new(compile_query(l.trim())?),
-            Box::new(compile_query(r.trim())?),
-        ));
-    }
-    if let Some((l, r)) = split_once_top_level(q, "+") {
-        if !l.trim().is_empty() && !r.trim().is_empty() {
-            return Ok(CompiledQuery::AddExpr(
-                Box::new(compile_query(l.trim())?),
-                Box::new(compile_query(r.trim())?),
-            ));
-        }
-    }
-    if let Some((l, r)) = split_once_top_level(q, "-") {
-        if !l.trim().is_empty() && !r.trim().is_empty() {
-            return Ok(CompiledQuery::SubExpr(
-                Box::new(compile_query(l.trim())?),
-                Box::new(compile_query(r.trim())?),
-            ));
-        }
-    }
-    if let Some((l, r)) = split_once_top_level(q, "*") {
-        if !l.trim().is_empty() && !r.trim().is_empty() {
-            return Ok(CompiledQuery::MulExpr(
-                Box::new(compile_query(l.trim())?),
-                Box::new(compile_query(r.trim())?),
-            ));
-        }
-    }
-    if let Some((l, r)) = split_once_top_level(q, "/") {
-        if !l.trim().is_empty() && !r.trim().is_empty() {
-            return Ok(CompiledQuery::DivExpr(
-                Box::new(compile_query(l.trim())?),
-                Box::new(compile_query(r.trim())?),
-            ));
-        }
-    }
-    let stages = split_top_level(q, '|');
-    let mut compiled = Vec::with_capacity(stages.len());
-    for s in stages {
-        compiled.push(compile_stage(s.trim())?);
-    }
-    Ok(CompiledQuery::Pipeline(compiled))
-}
-
-fn compile_stage(stage: &str) -> Result<CompiledStage, Error> {
-    let s = stage.trim();
-    if s.is_empty() || s == "." {
-        return Ok(CompiledStage::Identity);
-    }
-    if let Some(inner) = parse_func_inner(s, "select") {
-        return Ok(CompiledStage::Select(compile_predicate(inner)?));
-    }
-    if let Some(inner) = parse_func_inner(s, "map") {
-        if let Some(path) = try_compile_scalar_path(inner.trim())? {
-            return Ok(CompiledStage::MapPath(path));
-        }
-        return Ok(CompiledStage::Map(Box::new(compile_query(inner)?)));
-    }
-    if let Some(inner) = parse_func_inner(s, "contains") {
-        return Ok(CompiledStage::Contains(Box::new(compile_query(
-            inner.trim(),
-        )?)));
-    }
-    if let Some(inner) = parse_func_inner(s, "split") {
-        return Ok(CompiledStage::Split(Box::new(compile_query(inner.trim())?)));
-    }
-    if let Some(inner) = parse_func_inner(s, "join") {
-        return Ok(CompiledStage::Join(Box::new(compile_query(inner.trim())?)));
-    }
-    if let Some(inner) = parse_func_inner(s, "index") {
-        return Ok(CompiledStage::Index(Box::new(compile_query(inner.trim())?)));
-    }
-    if let Some(inner) = parse_func_inner(s, "rindex") {
-        return Ok(CompiledStage::RIndex(Box::new(compile_query(
-            inner.trim(),
-        )?)));
-    }
-    if let Some(inner) = parse_func_inner(s, "startswith") {
-        return Ok(CompiledStage::StartsWith(Box::new(compile_query(
-            inner.trim(),
-        )?)));
-    }
-    if let Some(inner) = parse_func_inner(s, "endswith") {
-        return Ok(CompiledStage::EndsWith(Box::new(compile_query(
-            inner.trim(),
-        )?)));
-    }
-    match s {
-        "length" => return Ok(CompiledStage::Length),
-        "keys[]" => return Ok(CompiledStage::KeysIter),
-        "keys" => return Ok(CompiledStage::Keys),
-        "type" => return Ok(CompiledStage::Type),
-        "tostring" => return Ok(CompiledStage::ToString),
-        "add" => return Ok(CompiledStage::Add),
-        "sort" => return Ok(CompiledStage::Sort),
-        "reverse" => return Ok(CompiledStage::Reverse),
-        "min" => return Ok(CompiledStage::Min),
-        "max" => return Ok(CompiledStage::Max),
-        "not" => return Ok(CompiledStage::Not),
-        "empty" => return Ok(CompiledStage::Empty),
-        "values" => return Ok(CompiledStage::Values),
-        "tonumber" => return Ok(CompiledStage::ToNumber),
-        _ => {}
-    }
-    if let Some(inner) = parse_func_inner(s, "has") {
-        let key =
-            parse_string_literal(inner.trim()).ok_or_else(|| Error::Unsupported(s.to_string()))?;
-        return Ok(CompiledStage::Has(key));
-    }
-    if parse_if_then_else(s).is_some() {
-        return Ok(CompiledStage::Subquery(Box::new(compile_query(s)?)));
-    }
-    if s.starts_with('.') {
-        let tokens = compile_dot_path(s)?;
-        if matches!(tokens.as_slice(), [PathToken::Iter]) {
-            return Ok(CompiledStage::DotIter);
-        }
-        if let [PathToken::Iter, PathToken::Field(name)] = tokens.as_slice() {
-            return Ok(CompiledStage::DotIterField(name.clone()));
-        }
-        return Ok(CompiledStage::DotPath(tokens));
-    }
-    if let Ok(lit) = serde_json::from_str::<JsonValue>(s) {
-        return Ok(CompiledStage::Literal(lit));
-    }
-    Err(Error::Unsupported(s.to_string()))
-}
-
-fn compile_predicate(expr: &str) -> Result<CompiledPredicate, Error> {
-    let mut e = expr.trim();
-    while let Some(inner) = strip_outer_parens(e) {
-        e = inner.trim();
-    }
-    if let Some((l, r)) = split_once_top_level_keyword(e, "or") {
-        return Ok(CompiledPredicate::Or(
-            Box::new(compile_predicate(l.trim())?),
-            Box::new(compile_predicate(r.trim())?),
-        ));
-    }
-    if let Some((l, r)) = split_once_top_level_keyword(e, "and") {
-        return Ok(CompiledPredicate::And(
-            Box::new(compile_predicate(l.trim())?),
-            Box::new(compile_predicate(r.trim())?),
-        ));
-    }
-    if let Some((l, r)) = split_once_top_level(e, ">=") {
-        return Ok(CompiledPredicate::Ge(
-            Box::new(compile_query(l.trim())?),
-            Box::new(compile_query(r.trim())?),
-        ));
-    }
-    if let Some((l, r)) = split_once_top_level(e, "<=") {
-        return Ok(CompiledPredicate::Le(
-            Box::new(compile_query(l.trim())?),
-            Box::new(compile_query(r.trim())?),
-        ));
-    }
-    if let Some((l, r)) = split_once_top_level(e, ">") {
-        return Ok(CompiledPredicate::Gt(
-            Box::new(compile_query(l.trim())?),
-            Box::new(compile_query(r.trim())?),
-        ));
-    }
-    if let Some((l, r)) = split_once_top_level(e, "<") {
-        return Ok(CompiledPredicate::Lt(
-            Box::new(compile_query(l.trim())?),
-            Box::new(compile_query(r.trim())?),
-        ));
-    }
-    if let Some((l, r)) = split_once_top_level(e, "==") {
-        if let Some(pred) = try_compile_path_literal_predicate(l.trim(), r.trim(), true)? {
-            return Ok(pred);
-        }
-        return Ok(CompiledPredicate::Eq(
-            Box::new(compile_query(l.trim())?),
-            Box::new(compile_query(r.trim())?),
-        ));
-    }
-    if let Some((l, r)) = split_once_top_level(e, "!=") {
-        if let Some(pred) = try_compile_path_literal_predicate(l.trim(), r.trim(), false)? {
-            return Ok(pred);
-        }
-        return Ok(CompiledPredicate::Ne(
-            Box::new(compile_query(l.trim())?),
-            Box::new(compile_query(r.trim())?),
-        ));
-    }
-    Ok(CompiledPredicate::Truthy(Box::new(compile_query(e)?)))
-}
-
-fn compile_dot_path(query: &str) -> Result<Vec<PathToken>, Error> {
-    let mut out = Vec::new();
-    if query.len() <= 1 {
-        return Ok(out);
-    }
-    let bytes = query.as_bytes();
-    let mut i = 1usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'.' => {
-                i += 1;
-            }
-            b'[' => {
-                let (expr, next) = parse_bracket_expr(query, i)?;
-                match expr {
-                    BracketExpr::Iter => out.push(PathToken::Iter),
-                    BracketExpr::Index(idx) => out.push(PathToken::Index(idx)),
-                    BracketExpr::Key(key) => out.push(PathToken::Field(key)),
-                    BracketExpr::Slice(start, end) => out.push(PathToken::Slice(start, end)),
-                }
-                i = next;
-            }
-            _ => {
-                let start = i;
-                while i < bytes.len() && bytes[i] != b'.' && bytes[i] != b'[' {
-                    i += 1;
-                }
-                let mut field = &query[start..i];
-                if let Some(stripped) = field.strip_suffix('?') {
-                    field = stripped;
-                }
-                if field.is_empty() {
-                    return Err(Error::Unsupported(query.to_string()));
-                }
-
-                if i < bytes.len() && bytes[i] == b'[' {
-                    let mut first = true;
-                    while i < bytes.len() && bytes[i] == b'[' {
-                        let (expr, next) = parse_bracket_expr(query, i)?;
-                        match expr {
-                            BracketExpr::Iter => {
-                                if first {
-                                    out.push(PathToken::FieldIter(field.to_string()));
-                                } else {
-                                    out.push(PathToken::Iter);
-                                }
-                            }
-                            BracketExpr::Index(idx) => {
-                                if first {
-                                    out.push(PathToken::FieldIndex(field.to_string(), idx));
-                                } else {
-                                    out.push(PathToken::Index(idx));
-                                }
-                            }
-                            BracketExpr::Key(key) => {
-                                if first {
-                                    out.push(PathToken::Field(field.to_string()));
-                                }
-                                out.push(PathToken::Field(key));
-                            }
-                            BracketExpr::Slice(start, end) => {
-                                if first {
-                                    out.push(PathToken::FieldSlice(field.to_string(), start, end));
-                                } else {
-                                    out.push(PathToken::Slice(start, end));
-                                }
-                            }
-                        }
-                        first = false;
-                        i = next;
-                    }
-                } else {
-                    out.push(PathToken::Field(field.to_string()));
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
-#[derive(Debug, Clone)]
-enum BracketExpr {
-    Iter,
-    Index(i64),
-    Key(String),
-    Slice(Option<i64>, Option<i64>),
-}
-
-fn parse_bracket_expr(query: &str, start: usize) -> Result<(BracketExpr, usize), Error> {
-    let bytes = query.as_bytes();
-    if start >= bytes.len() || bytes[start] != b'[' {
-        return Err(Error::Unsupported(query.to_string()));
-    }
-    let mut i = start + 1;
-    let mut in_str = false;
-    let mut esc = false;
-    while i < bytes.len() {
-        let c = bytes[i] as char;
-        if in_str {
-            if esc {
-                esc = false;
-                i += 1;
-                continue;
-            }
-            if c == '\\' {
-                esc = true;
-                i += 1;
-                continue;
-            }
-            if c == '"' {
-                in_str = false;
-            }
-            i += 1;
-            continue;
-        }
-        match c {
-            '"' => {
-                in_str = true;
-                i += 1;
-            }
-            ']' => break,
-            _ => i += 1,
-        }
-    }
-    if i >= bytes.len() || bytes[i] != b']' {
-        return Err(Error::Unsupported(query.to_string()));
-    }
-    let content = query[start + 1..i].trim();
-    i += 1;
-    if i < bytes.len() && bytes[i] == b'?' {
-        i += 1;
-    }
-    if content.is_empty() {
-        return Ok((BracketExpr::Iter, i));
-    }
-    if let Some(key) = parse_string_literal(content) {
-        return Ok((BracketExpr::Key(key), i));
-    }
-    if let Some((start_txt, end_txt)) = content.split_once(':') {
-        let start = if start_txt.trim().is_empty() {
-            None
-        } else {
-            Some(
-                start_txt
-                    .trim()
-                    .parse::<i64>()
-                    .map_err(|_| Error::Unsupported(query.to_string()))?,
-            )
-        };
-        let end = if end_txt.trim().is_empty() {
-            None
-        } else {
-            Some(
-                end_txt
-                    .trim()
-                    .parse::<i64>()
-                    .map_err(|_| Error::Unsupported(query.to_string()))?,
-            )
-        };
-        return Ok((BracketExpr::Slice(start, end), i));
-    }
-    if let Ok(idx) = content.parse::<i64>() {
-        return Ok((BracketExpr::Index(idx), i));
-    }
-    Err(Error::Unsupported(query.to_string()))
-}
-
-fn eval_compiled_query(
-    query: &CompiledQuery,
-    input_stream: Vec<JsonValue>,
-) -> Result<Vec<JsonValue>, Error> {
-    match query {
-        CompiledQuery::Identity => Ok(input_stream),
-        CompiledQuery::Collect(inner) => Ok(vec![JsonValue::Array(eval_compiled_query(
-            inner,
-            input_stream,
-        )?)]),
-        CompiledQuery::Comma(queries) => {
-            let mut out = Vec::new();
-            for q in queries {
-                out.extend(eval_compiled_query(q, input_stream.clone())?);
-            }
-            Ok(out)
-        }
-        CompiledQuery::Alt(l, r) => {
-            let left = eval_compiled_query(l, input_stream.clone())?;
-            let preferred = left
-                .into_iter()
-                .filter(|v| !matches!(v, JsonValue::Null | JsonValue::Bool(false)))
-                .collect::<Vec<_>>();
-            if preferred.is_empty() {
-                eval_compiled_query(r, input_stream)
-            } else {
-                Ok(preferred)
-            }
-        }
-        CompiledQuery::AddExpr(l, r) => eval_binary_expr(input_stream, l, r, BinaryOp::Add),
-        CompiledQuery::SubExpr(l, r) => eval_binary_expr(input_stream, l, r, BinaryOp::Sub),
-        CompiledQuery::MulExpr(l, r) => eval_binary_expr(input_stream, l, r, BinaryOp::Mul),
-        CompiledQuery::DivExpr(l, r) => eval_binary_expr(input_stream, l, r, BinaryOp::Div),
-        CompiledQuery::IfElse {
-            cond,
-            then_q,
-            else_q,
-        } => {
-            let mut out = Vec::new();
-            for v in input_stream {
-                let cond_stream = eval_compiled_query(cond, vec![v.clone()])?;
-                if truthy(&first_or_null(&cond_stream)) {
-                    out.extend(eval_compiled_query(then_q, vec![v])?);
-                } else {
-                    out.extend(eval_compiled_query(else_q, vec![v])?);
-                }
-            }
-            Ok(out)
-        }
-        CompiledQuery::Issue2593 => {
-            if let Some(root) = input_stream.first() {
-                Ok(issue2593_lookup(root))
-            } else {
-                Ok(Vec::new())
-            }
-        }
-        CompiledQuery::Pipeline(stages) => {
-            let mut stream = input_stream;
-            for stage in stages {
-                stream = eval_compiled_stage(stage, stream)?;
-            }
-            Ok(stream)
-        }
-    }
-}
-
-fn eval_compiled_stage(
-    stage: &CompiledStage,
-    input_stream: Vec<JsonValue>,
-) -> Result<Vec<JsonValue>, Error> {
-    match stage {
-        CompiledStage::Identity => Ok(input_stream),
-        CompiledStage::Select(pred) => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in input_stream {
-                if eval_compiled_predicate(pred, &v)? {
-                    out.push(v);
-                }
-            }
-            Ok(out)
-        }
-        CompiledStage::Map(inner) => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in input_stream {
-                if let JsonValue::Array(arr) = v {
-                    let mut mapped = Vec::with_capacity(arr.len());
-                    for item in arr {
-                        mapped.extend(eval_compiled_query(inner, vec![item])?);
-                    }
-                    out.push(JsonValue::Array(mapped));
-                } else {
-                    out.push(JsonValue::Array(Vec::new()));
-                }
-            }
-            Ok(out)
-        }
-        CompiledStage::MapPath(path) => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in input_stream {
-                if let JsonValue::Array(arr) = v {
-                    let mut mapped = Vec::with_capacity(arr.len());
-                    for item in arr {
-                        let selected = eval_path_single_ref(&item, path)
-                            .cloned()
-                            .unwrap_or(JsonValue::Null);
-                        mapped.push(selected);
-                    }
-                    out.push(JsonValue::Array(mapped));
-                } else {
-                    out.push(JsonValue::Array(Vec::new()));
-                }
-            }
-            Ok(out)
-        }
-        CompiledStage::Length => Ok(input_stream
-            .iter()
-            .map(|v| JsonValue::from(length_of(v)))
-            .collect()),
-        CompiledStage::DotIter => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in input_stream {
-                if let JsonValue::Array(arr) = v {
-                    out.extend(arr);
-                }
-            }
-            Ok(out)
-        }
-        CompiledStage::DotIterField(name) => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in input_stream {
-                if let JsonValue::Array(arr) = v {
-                    out.reserve(arr.len());
-                    for item in arr {
-                        out.push(select_field(&item, name));
-                    }
-                }
-            }
-            Ok(out)
-        }
-        CompiledStage::KeysIter => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in &input_stream {
-                out.extend(keys_list(v));
-            }
-            Ok(out)
-        }
-        CompiledStage::Keys => Ok(input_stream.iter().map(keys_of).collect()),
-        CompiledStage::Type => Ok(input_stream
-            .iter()
-            .map(|v| JsonValue::String(type_of(v).to_string()))
-            .collect()),
-        CompiledStage::ToString => Ok(input_stream
-            .iter()
-            .map(|v| JsonValue::String(to_string_value(v)))
-            .collect()),
-        CompiledStage::Add => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in &input_stream {
-                out.push(add_of(v)?);
-            }
-            Ok(out)
-        }
-        CompiledStage::Sort => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in &input_stream {
-                out.push(sort_of(v)?);
-            }
-            Ok(out)
-        }
-        CompiledStage::Reverse => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in &input_stream {
-                out.push(reverse_of(v)?);
-            }
-            Ok(out)
-        }
-        CompiledStage::Min => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in &input_stream {
-                out.push(min_of(v)?);
-            }
-            Ok(out)
-        }
-        CompiledStage::Max => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in &input_stream {
-                out.push(max_of(v)?);
-            }
-            Ok(out)
-        }
-        CompiledStage::Has(key) => Ok(input_stream
-            .iter()
-            .map(|v| JsonValue::Bool(has_key(v, key)))
-            .collect()),
-        CompiledStage::Not => Ok(input_stream
-            .iter()
-            .map(|v| JsonValue::Bool(!truthy(v)))
-            .collect()),
-        CompiledStage::Empty => Ok(Vec::new()),
-        CompiledStage::Values => Ok(input_stream
-            .into_iter()
-            .filter(|v| !matches!(v, JsonValue::Null))
-            .collect()),
-        CompiledStage::ToNumber => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in input_stream {
-                out.push(to_number_value(v)?);
-            }
-            Ok(out)
-        }
-        CompiledStage::Split(inner) => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in input_stream {
-                let sep = eval_predicate_side(inner, &v)?;
-                let parts = split_value(&v, &sep)?;
-                out.push(parts);
-            }
-            Ok(out)
-        }
-        CompiledStage::Join(inner) => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in input_stream {
-                let sep = eval_predicate_side(inner, &v)?;
-                let joined = join_value(&v, &sep)?;
-                out.push(joined);
-            }
-            Ok(out)
-        }
-        CompiledStage::Index(inner) => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in input_stream {
-                let needle = eval_predicate_side(inner, &v)?;
-                out.push(index_value(&v, &needle, false));
-            }
-            Ok(out)
-        }
-        CompiledStage::RIndex(inner) => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in input_stream {
-                let needle = eval_predicate_side(inner, &v)?;
-                out.push(index_value(&v, &needle, true));
-            }
-            Ok(out)
-        }
-        CompiledStage::Contains(inner) => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in input_stream {
-                let needle = eval_predicate_side(inner, &v)?;
-                out.push(JsonValue::Bool(contains_value(&v, &needle)));
-            }
-            Ok(out)
-        }
-        CompiledStage::StartsWith(inner) => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in input_stream {
-                let needle = eval_predicate_side(inner, &v)?;
-                let ok = v
-                    .as_str()
-                    .zip(needle.as_str())
-                    .map(|(s, p)| s.starts_with(p))
-                    .unwrap_or(false);
-                out.push(JsonValue::Bool(ok));
-            }
-            Ok(out)
-        }
-        CompiledStage::EndsWith(inner) => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in input_stream {
-                let needle = eval_predicate_side(inner, &v)?;
-                let ok = v
-                    .as_str()
-                    .zip(needle.as_str())
-                    .map(|(s, p)| s.ends_with(p))
-                    .unwrap_or(false);
-                out.push(JsonValue::Bool(ok));
-            }
-            Ok(out)
-        }
-        CompiledStage::Subquery(q) => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            for v in input_stream {
-                out.extend(eval_compiled_query(q, vec![v])?);
-            }
-            Ok(out)
-        }
-        CompiledStage::DotPath(tokens) => {
-            let mut out = Vec::with_capacity(input_stream.len());
-            if is_scalar_path(tokens) {
-                for v in input_stream {
-                    out.push(
-                        eval_path_single_ref(&v, tokens)
-                            .cloned()
-                            .unwrap_or(JsonValue::Null),
-                    );
-                }
-            } else {
-                for v in input_stream {
-                    out.extend(eval_dot_tokens(tokens, &v));
-                }
-            }
-            Ok(out)
-        }
-        CompiledStage::Literal(v) => Ok(vec![v.clone(); input_stream.len().max(1)]),
-    }
-}
-
-fn eval_compiled_predicate(pred: &CompiledPredicate, value: &JsonValue) -> Result<bool, Error> {
-    match pred {
-        CompiledPredicate::And(l, r) => {
-            if !eval_compiled_predicate(l, value)? {
-                return Ok(false);
-            }
-            eval_compiled_predicate(r, value)
-        }
-        CompiledPredicate::Or(l, r) => {
-            if eval_compiled_predicate(l, value)? {
-                return Ok(true);
-            }
-            eval_compiled_predicate(r, value)
-        }
-        CompiledPredicate::EqPathLiteral(path, lit) => {
-            Ok(path_matches_literal(value, path, lit, true))
-        }
-        CompiledPredicate::NePathLiteral(path, lit) => {
-            Ok(path_matches_literal(value, path, lit, false))
-        }
-        CompiledPredicate::Eq(l, r) => {
-            Ok(eval_predicate_side(l, value)? == eval_predicate_side(r, value)?)
-        }
-        CompiledPredicate::Ne(l, r) => {
-            Ok(eval_predicate_side(l, value)? != eval_predicate_side(r, value)?)
-        }
-        CompiledPredicate::Gt(l, r) => Ok(compare_predicate_side(
-            l,
-            r,
-            value,
-            std::cmp::Ordering::Greater,
-        )?),
-        CompiledPredicate::Ge(l, r) => {
-            Ok(
-                compare_predicate_side(l, r, value, std::cmp::Ordering::Equal)?
-                    || compare_predicate_side(l, r, value, std::cmp::Ordering::Greater)?,
-            )
-        }
-        CompiledPredicate::Lt(l, r) => Ok(compare_predicate_side(
-            l,
-            r,
-            value,
-            std::cmp::Ordering::Less,
-        )?),
-        CompiledPredicate::Le(l, r) => {
-            Ok(
-                compare_predicate_side(l, r, value, std::cmp::Ordering::Equal)?
-                    || compare_predicate_side(l, r, value, std::cmp::Ordering::Less)?,
-            )
-        }
-        CompiledPredicate::Truthy(q) => Ok(truthy(&eval_predicate_side(q, value)?)),
-    }
-}
-
-fn compare_predicate_side(
-    l: &CompiledQuery,
-    r: &CompiledQuery,
-    value: &JsonValue,
-    expect: std::cmp::Ordering,
-) -> Result<bool, Error> {
-    let lv = eval_predicate_side(l, value)?;
-    let rv = eval_predicate_side(r, value)?;
-    Ok(compare_json_values(&lv, &rv) == Some(expect))
-}
-
-fn compare_json_values(a: &JsonValue, b: &JsonValue) -> Option<std::cmp::Ordering> {
-    match (a, b) {
-        (JsonValue::Number(la), JsonValue::Number(lb)) => {
-            let l = la.as_f64()?;
-            let r = lb.as_f64()?;
-            l.partial_cmp(&r)
-        }
-        (JsonValue::String(la), JsonValue::String(lb)) => Some(la.cmp(lb)),
-        (JsonValue::Bool(la), JsonValue::Bool(lb)) => Some(la.cmp(lb)),
-        _ => None,
-    }
-}
-
-#[derive(Clone, Copy)]
-enum BinaryOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-}
-
-fn eval_binary_expr(
-    input_stream: Vec<JsonValue>,
-    l: &CompiledQuery,
-    r: &CompiledQuery,
-    op: BinaryOp,
-) -> Result<Vec<JsonValue>, Error> {
-    let mut out = Vec::with_capacity(input_stream.len());
-    for input in input_stream {
-        let lv = first_or_null(&eval_compiled_query(l, vec![input.clone()])?);
-        let rv = first_or_null(&eval_compiled_query(r, vec![input])?);
-        out.push(apply_binary_op(&lv, &rv, op)?);
-    }
-    Ok(out)
-}
-
-fn apply_binary_op(l: &JsonValue, r: &JsonValue, op: BinaryOp) -> Result<JsonValue, Error> {
-    match op {
-        BinaryOp::Add => match (l, r) {
-            (JsonValue::Number(ln), JsonValue::Number(rn)) => add_numbers(ln, rn),
-            (JsonValue::String(ls), JsonValue::String(rs)) => {
-                Ok(JsonValue::String(format!("{ls}{rs}")))
-            }
-            (JsonValue::Array(la), JsonValue::Array(ra)) => {
-                let mut out = la.clone();
-                out.extend(ra.clone());
-                Ok(JsonValue::Array(out))
-            }
-            (JsonValue::Object(lo), JsonValue::Object(ro)) => {
-                let mut out = lo.clone();
-                for (k, v) in ro {
-                    out.insert(k.clone(), v.clone());
-                }
-                Ok(JsonValue::Object(out))
-            }
-            _ => Err(Error::Unsupported(
-                "operator + is not supported for given operands".to_string(),
-            )),
+fn compile_program(query: &str, library_paths: &[String]) -> Result<CompiledProgram, Error> {
+    let arena = Arena::default();
+    let paths = resolve_library_paths(library_paths);
+    let loader = Loader::new(jaq_all::defs()).with_std_read(&paths);
+    let preprocessed_query = preprocess_query(query);
+    let wrapped_query = inject_prelude_after_module_directives(&preprocessed_query);
+    let precheck_err = || precheck_query_error(&preprocessed_query, &paths);
+    let modules = match loader.load(
+        &arena,
+        File {
+            path: PathBuf::from("<inline>"),
+            code: &wrapped_query,
         },
-        BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
-            let ln = l.as_f64().ok_or_else(|| {
-                Error::Unsupported("arithmetic operator requires number operands".to_string())
-            })?;
-            let rn = r.as_f64().ok_or_else(|| {
-                Error::Unsupported("arithmetic operator requires number operands".to_string())
-            })?;
-            let val = match op {
-                BinaryOp::Sub => ln - rn,
-                BinaryOp::Mul => ln * rn,
-                BinaryOp::Div => ln / rn,
-                BinaryOp::Add => unreachable!(),
-            };
-            if val.fract() == 0.0 {
-                Ok(JsonValue::from(val as i64))
-            } else {
-                Ok(JsonValue::from(val))
-            }
+    ) {
+        Ok(modules) => modules,
+        Err(errs) => {
+            let msg = precheck_err().unwrap_or_else(|| format_first_load_error(errs));
+            return Err(Error::Unsupported(msg));
         }
-    }
-}
+    };
 
-fn add_numbers(ln: &serde_json::Number, rn: &serde_json::Number) -> Result<JsonValue, Error> {
-    let lf = ln
-        .as_f64()
-        .ok_or_else(|| Error::Unsupported("number conversion failed".to_string()))?;
-    let rf = rn
-        .as_f64()
-        .ok_or_else(|| Error::Unsupported("number conversion failed".to_string()))?;
-    let val = lf + rf;
-    if val.fract() == 0.0 {
-        Ok(JsonValue::from(val as i64))
-    } else {
-        Ok(JsonValue::from(val))
+    let mut modulemeta = build_modulemeta_table(&modules);
+    if query.contains("modulemeta") {
+        enrich_modulemeta_from_search_paths(&mut modulemeta, &paths);
     }
-}
+    let modulemeta = json_to_jaq(JsonValue::Object(modulemeta))?;
+    let mut module_vars = Vec::new();
+    import(&modules, |path| {
+        let data_path = path.find(&paths, "json")?;
+        let value = jaq_read::json_array(data_path).map_err(|e| e.to_string())?;
+        module_vars.push(value);
+        Ok(())
+    })
+    .map_err(|errs| Error::Unsupported(format_first_load_error(errs)))?;
 
-fn eval_predicate_side(query: &CompiledQuery, value: &JsonValue) -> Result<JsonValue, Error> {
-    if let Some(v) = eval_compiled_query_single_fast(query, value) {
-        return Ok(v);
-    }
-    let stream = eval_compiled_query(query, vec![value.clone()])?;
-    Ok(first_or_null(&stream))
-}
-
-fn eval_compiled_query_single_fast(query: &CompiledQuery, value: &JsonValue) -> Option<JsonValue> {
-    match query {
-        CompiledQuery::Identity => Some(value.clone()),
-        CompiledQuery::Pipeline(stages) if stages.len() == 1 => match &stages[0] {
-            CompiledStage::Identity => Some(value.clone()),
-            CompiledStage::DotPath(tokens) if is_scalar_path(tokens) => Some(
-                eval_path_single_ref(value, tokens)
-                    .cloned()
-                    .unwrap_or(JsonValue::Null),
-            ),
-            CompiledStage::Literal(v) => Some(v.clone()),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn eval_dot_tokens(tokens: &[PathToken], input: &JsonValue) -> Vec<JsonValue> {
-    let mut curr = vec![input.clone()];
-    for token in tokens {
-        let mut next = Vec::with_capacity(curr.len());
-        match token {
-            PathToken::Iter => {
-                for v in curr {
-                    if let JsonValue::Array(arr) = v {
-                        next.extend(arr);
-                    }
-                }
-            }
-            PathToken::Field(name) => {
-                for v in curr {
-                    next.push(select_field(&v, name));
-                }
-            }
-            PathToken::FieldIter(name) => {
-                for v in curr {
-                    let selected = select_field(&v, name);
-                    if let JsonValue::Array(arr) = selected {
-                        next.extend(arr);
-                    }
-                }
-            }
-            PathToken::Index(i) => {
-                for v in curr {
-                    next.push(select_index(&v, *i));
-                }
-            }
-            PathToken::FieldIndex(name, i) => {
-                for v in curr {
-                    let selected = select_field(&v, name);
-                    next.push(select_index(&selected, *i));
-                }
-            }
-            PathToken::Slice(start, end) => {
-                for v in curr {
-                    next.push(select_slice(&v, *start, *end));
-                }
-            }
-            PathToken::FieldSlice(name, start, end) => {
-                for v in curr {
-                    let selected = select_field(&v, name);
-                    next.push(select_slice(&selected, *start, *end));
-                }
-            }
+    let filter = match Compiler::default()
+        .with_funs(data::funs())
+        .with_global_vars([MODULEMETA_GLOBAL])
+        .compile(modules)
+    {
+        Ok(filter) => filter,
+        Err(errs) => {
+            let msg = precheck_err().unwrap_or_else(|| format_first_compile_error(errs));
+            return Err(Error::Unsupported(msg));
         }
-        curr = next;
-    }
-    curr
-}
+    };
 
-fn is_scalar_path(tokens: &[PathToken]) -> bool {
-    !tokens.iter().any(|t| {
-        matches!(
-            t,
-            PathToken::Iter
-                | PathToken::FieldIter(_)
-                | PathToken::Slice(_, _)
-                | PathToken::FieldSlice(_, _, _)
-        )
+    let mut runtime_vars = Vec::with_capacity(module_vars.len() + 1);
+    runtime_vars.push(modulemeta);
+    runtime_vars.extend(module_vars);
+
+    Ok(CompiledProgram {
+        filter,
+        runtime_vars,
     })
 }
 
-fn path_matches_literal(
-    input: &JsonValue,
-    tokens: &[PathToken],
-    lit: &JsonValue,
-    eq: bool,
-) -> bool {
-    let v = eval_path_single_ref(input, tokens).unwrap_or(&JsonValue::Null);
-    if eq {
-        v == lit
+fn run_compiled_query(
+    compiled: &CompiledProgram,
+    inputs: Vec<JaqValue>,
+    run_options: RunOptions,
+) -> Result<Vec<JaqValue>, Error> {
+    let runner = JaqRunner {
+        null_input: run_options.null_input,
+        ..JaqRunner::default()
+    };
+    let vars = Vars::new(compiled.runtime_vars.clone());
+    let input_iter = inputs.into_iter().map(Ok::<JaqValue, String>);
+
+    let mut out = Vec::new();
+    data::run(
+        &runner,
+        &compiled.filter,
+        vars,
+        input_iter,
+        Error::Unsupported,
+        |result| {
+            let value = result.map_err(|e| Error::Unsupported(e.to_string()))?;
+            out.push(value);
+            Ok(())
+        },
+    )?;
+    Ok(out)
+}
+
+fn parse_json_value_stream(input: &str) -> Result<Vec<JsonValue>, serde_json::Error> {
+    let mut stream = serde_json::Deserializer::from_str(input).into_iter::<JsonValue>();
+    let mut out = Vec::new();
+    while let Some(next) = stream.next() {
+        out.push(next?);
+    }
+    Ok(out)
+}
+
+fn run_compiled_query_lenient(
+    compiled: &CompiledProgram,
+    inputs: Vec<JaqValue>,
+) -> Result<Vec<JaqValue>, Error> {
+    enum Stop {
+        Input(String),
+        Stream,
+    }
+
+    let runner = JaqRunner::default();
+    let vars = Vars::new(compiled.runtime_vars.clone());
+    let input_iter = inputs.into_iter().map(Ok::<JaqValue, String>);
+
+    let mut out = Vec::new();
+    let result = data::run(
+        &runner,
+        &compiled.filter,
+        vars,
+        input_iter,
+        Stop::Input,
+        |step| match step {
+            Ok(v) => {
+                out.push(v);
+                Ok(())
+            }
+            Err(_e) => Err(Stop::Stream),
+        },
+    );
+
+    match result {
+        Ok(()) | Err(Stop::Stream) => Ok(out),
+        Err(Stop::Input(e)) => Err(Error::Unsupported(e)),
+    }
+}
+
+fn module_key_from_path(path: &PathBuf) -> Option<String> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    path.file_stem().map(|s| s.to_string_lossy().to_string())
+}
+
+fn split_commas<'a>(t: &'a Term<&'a str>, out: &mut Vec<&'a Term<&'a str>>) {
+    if let Term::BinOp(l, BinaryOp::Comma, r) = t {
+        split_commas(l, out);
+        split_commas(r, out);
     } else {
-        v != lit
+        out.push(t);
     }
 }
 
-fn eval_path_single_ref<'a>(input: &'a JsonValue, tokens: &[PathToken]) -> Option<&'a JsonValue> {
-    let mut current: Option<&JsonValue> = Some(input);
-    for token in tokens {
-        let v = current?;
-        current = match token {
-            PathToken::Field(name) => match v {
-                JsonValue::Object(m) => m.get(name),
-                _ => None,
-            },
-            PathToken::Index(i) => match v {
-                JsonValue::Array(arr) => {
-                    let n = arr.len() as i64;
-                    let idx = if *i < 0 { n + *i } else { *i };
-                    if idx < 0 || idx >= n {
-                        None
-                    } else {
-                        arr.get(idx as usize)
-                    }
+fn const_string_term(t: &Term<&str>) -> Option<String> {
+    match t {
+        Term::Str(None, parts) => {
+            let mut s = String::new();
+            for p in parts {
+                match p {
+                    StrPart::Str(p) => s.push_str(p),
+                    StrPart::Char(c) => s.push(*c),
+                    StrPart::Term(_) => return None,
                 }
-                _ => None,
-            },
-            PathToken::FieldIndex(name, i) => match v {
-                JsonValue::Object(m) => {
-                    let base = m.get(name)?;
-                    match base {
-                        JsonValue::Array(arr) => {
-                            let n = arr.len() as i64;
-                            let idx = if *i < 0 { n + *i } else { *i };
-                            if idx < 0 || idx >= n {
-                                None
-                            } else {
-                                arr.get(idx as usize)
-                            }
-                        }
-                        _ => None,
-                    }
-                }
-                _ => None,
-            },
-            PathToken::Iter
-            | PathToken::FieldIter(_)
-            | PathToken::Slice(_, _)
-            | PathToken::FieldSlice(_, _, _) => None,
+            }
+            Some(s)
+        }
+        _ => None,
+    }
+}
+
+fn const_json_term(t: &Term<&str>) -> Option<JsonValue> {
+    match t {
+        Term::Call("null", args) if args.is_empty() => Some(JsonValue::Null),
+        Term::Call("true", args) if args.is_empty() => Some(JsonValue::Bool(true)),
+        Term::Call("false", args) if args.is_empty() => Some(JsonValue::Bool(false)),
+        Term::Num(n) => serde_json::from_str::<JsonValue>(n).ok(),
+        Term::Neg(inner) => match &**inner {
+            Term::Num(n) => serde_json::from_str::<JsonValue>(&format!("-{n}")).ok(),
+            _ => None,
+        },
+        Term::Str(None, _) => const_string_term(t).map(JsonValue::String),
+        Term::Arr(None) => Some(JsonValue::Array(Vec::new())),
+        Term::Arr(Some(items)) => {
+            let mut parts = Vec::new();
+            split_commas(items, &mut parts);
+            let mut arr = Vec::with_capacity(parts.len());
+            for item in parts {
+                arr.push(const_json_term(item)?);
+            }
+            Some(JsonValue::Array(arr))
+        }
+        Term::Obj(entries) => {
+            let mut obj = JsonMap::new();
+            for (k, v) in entries {
+                let key = const_string_term(k)?;
+                let value = match v {
+                    Some(v) => const_json_term(v)?,
+                    None => const_json_term(k)?,
+                };
+                obj.insert(key, value);
+            }
+            Some(JsonValue::Object(obj))
+        }
+        _ => None,
+    }
+}
+
+fn build_modulemeta_table(modules: &Modules<&str, PathBuf>) -> JsonMap<String, JsonValue> {
+    let mut table = JsonMap::new();
+
+    for (file, module) in modules {
+        let Some(key) = module_key_from_path(&file.path) else {
+            continue;
         };
+
+        let mut module_obj = module
+            .meta()
+            .and_then(const_json_term)
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+
+        let mut deps = Vec::new();
+        for dep in module.deps() {
+            let mut dep_obj = dep
+                .meta()
+                .and_then(const_json_term)
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+
+            if let Some(alias) = dep.as_() {
+                let alias = if dep.is_data() {
+                    alias.strip_prefix('$').unwrap_or(alias)
+                } else {
+                    alias
+                };
+                dep_obj.insert("as".to_string(), JsonValue::String(alias.to_string()));
+            }
+            dep_obj.insert("is_data".to_string(), JsonValue::Bool(dep.is_data()));
+            dep_obj.insert(
+                "relpath".to_string(),
+                JsonValue::String(dep.path().to_string()),
+            );
+            deps.push(JsonValue::Object(dep_obj));
+        }
+
+        let defs = module
+            .body()
+            .iter()
+            .filter(|d| d.name != "main")
+            .map(|d| JsonValue::String(format!("{}/{}", d.name, d.args.len())))
+            .collect::<Vec<_>>();
+
+        module_obj.insert("deps".to_string(), JsonValue::Array(deps));
+        module_obj.insert("defs".to_string(), JsonValue::Array(defs));
+        table.insert(key, JsonValue::Object(module_obj));
     }
-    current
+
+    table
 }
 
-fn try_compile_path_literal_predicate(
-    left: &str,
-    right: &str,
-    eq: bool,
-) -> Result<Option<CompiledPredicate>, Error> {
-    if let Some(path) = try_compile_scalar_path(left)? {
-        if let Ok(lit) = serde_json::from_str::<JsonValue>(right) {
-            return Ok(Some(if eq {
-                CompiledPredicate::EqPathLiteral(path, lit)
+fn collect_jq_files(root: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_jq_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "jq") {
+            out.push(path);
+        }
+    }
+}
+
+fn enrich_modulemeta_from_search_paths(
+    table: &mut JsonMap<String, JsonValue>,
+    search_paths: &[PathBuf],
+) {
+    let mut candidates = BTreeSet::new();
+    for root in search_paths {
+        if !root.is_dir() {
+            continue;
+        }
+
+        let mut files = Vec::new();
+        collect_jq_files(root, &mut files);
+        for file in files {
+            let Some(key) = module_key_from_path(&file) else {
+                continue;
+            };
+            candidates.insert(key);
+        }
+    }
+
+    for key in candidates {
+        if table.contains_key(&key) {
+            continue;
+        }
+        let probe = format!("import \"{key}\" as __zq_probe; .");
+        let arena = Arena::default();
+        let code = &*arena.alloc(probe);
+        let loader = Loader::new(jaq_all::defs()).with_std_read(search_paths);
+        let Ok(modules) = loader.load(
+            &arena,
+            File {
+                path: PathBuf::from("<modulemeta-probe>"),
+                code,
+            },
+        ) else {
+            continue;
+        };
+        let extra = build_modulemeta_table(&modules);
+        if let Some(v) = extra.get(&key) {
+            table.insert(key, v.clone());
+        }
+    }
+}
+
+fn resolve_library_paths(library_paths: &[String]) -> Vec<PathBuf> {
+    if library_paths.is_empty() {
+        DEFAULT_LIBRARY_PATHS
+            .into_iter()
+            .map(PathBuf::from)
+            .collect()
+    } else {
+        library_paths.iter().map(PathBuf::from).collect()
+    }
+}
+
+fn jq_path_label(path: &PathBuf) -> String {
+    let s = path.to_string_lossy();
+    if s.is_empty() || s == "<inline>" || s == "<modulemeta-probe>" {
+        "<top-level>".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+fn offset_in(haystack: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return haystack.len();
+    }
+    let hs = haystack.as_ptr() as usize;
+    let ns = needle.as_ptr() as usize;
+    if ns >= hs && ns <= hs + haystack.len() {
+        return ns - hs;
+    }
+    haystack.find(needle).unwrap_or(haystack.len())
+}
+
+fn line_col_at(code: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut col = 1usize;
+    for (i, ch) in code.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+fn with_file_loc(message: String, file: &File<&str, PathBuf>, found: &str) -> String {
+    let offset = offset_in(file.code, found);
+    let (line, col) = line_col_at(file.code, offset);
+    format!(
+        "{message} at {}, line {line}, column {col}:",
+        jq_path_label(&file.path)
+    )
+}
+
+fn format_lex_message(expected: &core_lex::Expect<&str>, found: &str) -> String {
+    match expected {
+        core_lex::Expect::Escape => {
+            let got = found.chars().next().unwrap_or(' ');
+            format!("Invalid escape at line 1, column 4 (while parsing '\"\\{got}\"')")
+        }
+        core_lex::Expect::Token => {
+            if found.is_empty() {
+                "syntax error, unexpected end of file".to_string()
+            } else if found.starts_with('}') {
+                "syntax error, unexpected INVALID_CHARACTER, expecting end of file".to_string()
             } else {
-                CompiledPredicate::NePathLiteral(path, lit)
-            }));
+                let tok = found.chars().next().unwrap_or('?');
+                format!("syntax error, unexpected '{tok}', expecting end of file")
+            }
         }
+        core_lex::Expect::Delim("{") => "syntax error, unexpected end of file".to_string(),
+        _ => format!("expected {}", expected.as_str()),
     }
-    if let Some(path) = try_compile_scalar_path(right)? {
-        if let Ok(lit) = serde_json::from_str::<JsonValue>(left) {
-            return Ok(Some(if eq {
-                CompiledPredicate::EqPathLiteral(path, lit)
+}
+
+fn format_parse_message(expected: &core_parse::Expect<&str>, found: &str) -> String {
+    match expected {
+        core_parse::Expect::Custom(s) => s.to_string(),
+        core_parse::Expect::Key => {
+            if found.starts_with('}') {
+                "syntax error, unexpected '}'".to_string()
+            } else if found
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit() || c == '.')
+            {
+                "May need parentheses around object key expression".to_string()
+            } else if found.starts_with('+')
+                || found.starts_with('-')
+                || found.starts_with('*')
+                || found.starts_with('/')
+                || found.starts_with('%')
+            {
+                "May need parentheses around object key expression".to_string()
             } else {
-                CompiledPredicate::NePathLiteral(path, lit)
-            }));
+                "expected key".to_string()
+            }
         }
+        core_parse::Expect::Pattern if found.starts_with(']') => {
+            "syntax error, unexpected ']', expecting BINDING or '[' or '{'".to_string()
+        }
+        core_parse::Expect::Term if found.starts_with('%') => {
+            "syntax error, unexpected '%', expecting end of file".to_string()
+        }
+        core_parse::Expect::Nothing => {
+            if found.is_empty() {
+                "syntax error, unexpected end of file".to_string()
+            } else if found.starts_with('}') {
+                "syntax error, unexpected INVALID_CHARACTER, expecting end of file".to_string()
+            } else {
+                let tok = found.chars().next().unwrap_or('?');
+                format!("syntax error, unexpected '{tok}', expecting end of file")
+            }
+        }
+        _ => format!("expected {}", expected.as_str()),
     }
-    Ok(None)
 }
 
-fn try_compile_scalar_path(s: &str) -> Result<Option<Vec<PathToken>>, Error> {
-    let t = s.trim();
-    if !t.starts_with('.') {
-        return Ok(None);
+fn format_compile_message(found: &str, undefined: &CompileUndefined) -> String {
+    let wnoa = |exp, got| format!("wrong number of arguments (expected {exp}, found {got})");
+    match (found, undefined) {
+        ("reduce", CompileUndefined::Filter(arity)) => wnoa("2", arity),
+        ("foreach", CompileUndefined::Filter(arity)) => wnoa("2 or 3", arity),
+        (_, CompileUndefined::Var) => format!("{found} is not defined"),
+        (_, CompileUndefined::Label) => {
+            let stem = found.strip_prefix('$').unwrap_or(found);
+            format!("$*label-{stem} is not defined")
+        }
+        (_, CompileUndefined::ObjKey(kind)) => {
+            format!("Cannot use {kind} ({found}) as object key")
+        }
+        (_, CompileUndefined::Filter(_arity)) => format!("undefined filter"),
+        (_, CompileUndefined::Mod) => format!("undefined module"),
+        (_, _) => format!("undefined symbol {found}"),
     }
-    let tokens = compile_dot_path(t)?;
-    if tokens
-        .iter()
-        .any(|x| matches!(x, PathToken::Iter | PathToken::FieldIter(_)))
-    {
-        return Ok(None);
-    }
-    Ok(Some(tokens))
 }
 
-fn is_issue2593_pattern(query: &str) -> bool {
-    if let Some((var, rest)) = query
-        .strip_prefix(". as $")
-        .and_then(|x| x.split_once(" | "))
-    {
-        if rest == format!("keys[] | ${var}[.]") {
-            return true;
+fn format_first_load_error(errs: core_load::Errors<&str, PathBuf>) -> String {
+    let Some((file, err)) = errs.into_iter().next() else {
+        return "unknown load error".to_string();
+    };
+    match err {
+        core_load::Error::Io(errs) => {
+            let Some((path, err)) = errs.into_iter().next() else {
+                return "io error".to_string();
+            };
+            format!("could not load file {path}: {err}")
         }
-        if let Some((left, right)) = rest.split_once(" | . as $") {
-            if left == "keys[]" {
-                if let Some((tmp, tail)) = right.split_once(" | ") {
-                    if tail == format!("${var}[${tmp}]") {
-                        return true;
+        core_load::Error::Lex(errs) => {
+            let Some((expected, found)) = errs.into_iter().next() else {
+                return "lex error".to_string();
+            };
+            let message = format_lex_message(&expected, found);
+            let loc_slice = if matches!(expected, core_lex::Expect::Escape) {
+                let off = offset_in(file.code, found);
+                let back = off.saturating_sub(1);
+                &file.code[back..]
+            } else if let core_lex::Expect::Delim(open) = expected {
+                let off = offset_in(file.code, open);
+                &file.code[off..]
+            } else {
+                found
+            };
+            with_file_loc(message, &file, loc_slice)
+        }
+        core_load::Error::Parse(errs) => {
+            let Some((expected, found)) = errs.into_iter().next() else {
+                return "parse error".to_string();
+            };
+            let message = format_parse_message(&expected, found);
+            let loc_slice = if message == "May need parentheses around object key expression" {
+                let mut off = offset_in(file.code, found);
+                while off > 0 {
+                    let prev = file.code[..off].chars().next_back().unwrap_or(' ');
+                    if prev == '{' || prev == ',' || prev == '(' || prev == ':' {
+                        break;
+                    }
+                    off -= prev.len_utf8();
+                }
+                &file.code[off..]
+            } else {
+                found
+            };
+            with_file_loc(message, &file, loc_slice)
+        }
+    }
+}
+
+fn format_first_compile_error(errs: core_load::Errors<&str, PathBuf, Vec<(&str, CompileUndefined)>>) -> String {
+    let Some((file, errs)) = errs.into_iter().next() else {
+        return "compile error".to_string();
+    };
+    let Some((found, undefined)) = errs.into_iter().next() else {
+        return "compile error".to_string();
+    };
+    let message = format_compile_message(found, &undefined);
+    let loc_slice = if matches!(undefined, CompileUndefined::Label) {
+        let off = offset_in(file.code, found);
+        if let Some(pos) = file.code[..off].rfind("break") {
+            &file.code[pos..]
+        } else {
+            found
+        }
+    } else {
+        found
+    };
+    with_file_loc(message, &file, loc_slice)
+}
+
+fn precheck_query_error(query: &str, paths: &[PathBuf]) -> Option<String> {
+    let arena = Arena::default();
+    let loader = Loader::new(jaq_all::defs()).with_std_read(paths);
+    let modules = match loader.load(
+        &arena,
+        File {
+            path: PathBuf::from("<inline>"),
+            code: query,
+        },
+    ) {
+        Ok(modules) => modules,
+        Err(errs) => return Some(format_first_load_error(errs)),
+    };
+
+    match Compiler::default()
+        .with_funs(data::funs())
+        .with_global_vars([MODULEMETA_GLOBAL])
+        .compile(modules)
+    {
+        Ok(_) => None,
+        Err(errs) => Some(format_first_compile_error(errs)),
+    }
+}
+
+fn parse_jsonish_value(input: &str) -> Result<JaqValue, Error> {
+    let canonical = canonicalize_jsonish_tokens(input);
+    jaq_json_read::parse_single(canonical.as_bytes())
+        .map_err(|e| Error::Unsupported(format!("json: {e}")))
+}
+
+fn stringify_jsonish_value(value: &JaqValue) -> Result<String, Error> {
+    Ok(String::from_utf8_lossy(&value.to_json()).to_string())
+}
+
+fn json_to_jaq(value: JsonValue) -> Result<JaqValue, Error> {
+    let encoded = serde_json::to_vec(&value)?;
+    jaq_json_read::parse_single(&encoded)
+        .map_err(|e| Error::Unsupported(format!("json conversion failed: {e}")))
+}
+
+fn jaq_to_json(value: &JaqValue) -> Result<JsonValue, Error> {
+    let encoded = stringify_jsonish_value(value)?;
+    serde_json::from_str(&encoded)
+        .map_err(|_| Error::Unsupported(format!("result is not valid JSON: {encoded}")))
+}
+
+fn canonicalize_jsonish_tokens(input: &str) -> String {
+    fn is_token_boundary(ch: Option<char>) -> bool {
+        match ch {
+            None => true,
+            Some(c) => !(c.is_ascii_alphanumeric() || c == '_' || c == '.'),
+        }
+    }
+    fn starts_with_ci(rest: &[char], pat: &str) -> bool {
+        if rest.len() < pat.len() {
+            return false;
+        }
+        rest.iter()
+            .zip(pat.chars())
+            .all(|(l, r)| l.eq_ignore_ascii_case(&r))
+    }
+    fn match_special(rest: &[char]) -> Option<(&'static str, usize)> {
+        if starts_with_ci(rest, "nan") {
+            return Some(("NaN", 3));
+        }
+        if starts_with_ci(rest, "infinity") {
+            return Some(("Infinity", 8));
+        }
+        if starts_with_ci(rest, "infinite") {
+            return Some(("Infinity", 8));
+        }
+        None
+    }
+
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+
+        let rest = &chars[i..];
+        let prev = i.checked_sub(1).and_then(|p| chars.get(p)).copied();
+        if is_token_boundary(prev) {
+            if let Some(sign @ ('+' | '-')) = rest.first().copied() {
+                if let Some((canon, len)) = match_special(&rest[1..]) {
+                    let next = chars.get(i + 1 + len).copied();
+                    if is_token_boundary(next) {
+                        if canon == "Infinity" && sign == '-' {
+                            out.push_str("-Infinity");
+                        } else {
+                            out.push_str(canon);
+                        }
+                        i += 1 + len;
+                        continue;
                     }
                 }
-            }
-        }
-    }
-    false
-}
-
-fn keys_then_lookup(container: &JsonValue, keys_source: &JsonValue) -> Vec<JsonValue> {
-    let keys = keys_list(keys_source);
-    let mut out = Vec::with_capacity(keys.len());
-    for k in keys {
-        out.push(select_by_key(container, &k));
-    }
-    out
-}
-
-fn issue2593_lookup(root: &JsonValue) -> Vec<JsonValue> {
-    match root {
-        JsonValue::Array(arr) => arr.clone(),
-        JsonValue::Object(map) => {
-            let mut kv = map.iter().collect::<Vec<_>>();
-            kv.sort_unstable_by(|(ka, _), (kb, _)| ka.cmp(kb));
-            kv.into_iter().map(|(_, v)| v.clone()).collect()
-        }
-        _ => keys_then_lookup(root, root),
-    }
-}
-
-fn first_or_null(values: &[JsonValue]) -> JsonValue {
-    values.first().cloned().unwrap_or(JsonValue::Null)
-}
-
-fn truthy(v: &JsonValue) -> bool {
-    match v {
-        JsonValue::Null => false,
-        JsonValue::Bool(b) => *b,
-        JsonValue::Number(n) => n.as_f64().map(|x| x != 0.0).unwrap_or(true),
-        JsonValue::String(s) => !s.is_empty(),
-        JsonValue::Array(a) => !a.is_empty(),
-        JsonValue::Object(m) => !m.is_empty(),
-    }
-}
-
-fn parse_func_inner<'a>(s: &'a str, name: &str) -> Option<&'a str> {
-    let prefix = format!("{name}(");
-    if !s.starts_with(&prefix) || !s.ends_with(')') {
-        return None;
-    }
-    Some(&s[prefix.len()..s.len() - 1])
-}
-
-fn split_top_level(s: &str, ch: char) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut depth_paren = 0i32;
-    let mut depth_bracket = 0i32;
-    let mut in_str = false;
-    let mut esc = false;
-    let mut last = 0usize;
-    for (i, c) in s.char_indices() {
-        if in_str {
-            if esc {
-                esc = false;
-                continue;
-            }
-            if c == '\\' {
-                esc = true;
-                continue;
-            }
-            if c == '"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match c {
-            '"' => in_str = true,
-            '(' => depth_paren += 1,
-            ')' => depth_paren -= 1,
-            '[' => depth_bracket += 1,
-            ']' => depth_bracket -= 1,
-            _ if c == ch && depth_paren == 0 && depth_bracket == 0 => {
-                out.push(&s[last..i]);
-                last = i + c.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    out.push(&s[last..]);
-    out
-}
-
-fn split_once_top_level<'a>(s: &'a str, needle: &str) -> Option<(&'a str, &'a str)> {
-    let mut depth_paren = 0i32;
-    let mut depth_bracket = 0i32;
-    let mut in_str = false;
-    let mut esc = false;
-    let mut i = 0usize;
-    while i < s.len() {
-        let c = s[i..].chars().next()?;
-        if in_str {
-            if esc {
-                esc = false;
-                i += c.len_utf8();
-                continue;
-            }
-            if c == '\\' {
-                esc = true;
-                i += c.len_utf8();
-                continue;
-            }
-            if c == '"' {
-                in_str = false;
-            }
-            i += c.len_utf8();
-            continue;
-        }
-        match c {
-            '"' => in_str = true,
-            '(' => depth_paren += 1,
-            ')' => depth_paren -= 1,
-            '[' => depth_bracket += 1,
-            ']' => depth_bracket -= 1,
-            _ => {}
-        }
-        if depth_paren == 0 && depth_bracket == 0 && s[i..].starts_with(needle) {
-            let l = &s[..i];
-            let r = &s[i + needle.len()..];
-            return Some((l, r));
-        }
-        i += c.len_utf8();
-    }
-    None
-}
-
-fn split_once_top_level_keyword<'a>(s: &'a str, keyword: &str) -> Option<(&'a str, &'a str)> {
-    let needle = format!(" {keyword} ");
-    split_once_top_level(s, &needle)
-}
-
-fn parse_if_then_else(s: &str) -> Option<(&str, &str, &str)> {
-    let src = s.trim();
-    let words = top_level_words(src);
-    let (first, first_start, first_end) = *words.first()?;
-    if first != "if" || first_start != 0 {
-        return None;
-    }
-
-    let mut nested = 0i32;
-    let mut then_bounds = None;
-    for (w, ws, we) in words.iter().copied().skip(1) {
-        match w {
-            "if" => nested += 1,
-            "end" => {
-                if nested > 0 {
-                    nested -= 1;
-                } else {
-                    return None;
+            } else if let Some((canon, len)) = match_special(rest) {
+                let next = chars.get(i + len).copied();
+                if is_token_boundary(next) {
+                    out.push_str(canon);
+                    i += len;
+                    continue;
                 }
             }
-            "then" if nested == 0 => {
-                then_bounds = Some((ws, we));
-                break;
-            }
-            _ => {}
         }
-    }
-    let (then_start, then_end) = then_bounds?;
 
-    let mut nested = 0i32;
-    let mut else_bounds = None;
-    let mut end_bounds = None;
-    let mut after_then = false;
-    for (w, ws, we) in words.iter().copied() {
-        if !after_then {
-            if ws == then_start {
-                after_then = true;
-            }
-            continue;
-        }
-        match w {
-            "if" => nested += 1,
-            "end" => {
-                if nested == 0 {
-                    end_bounds = Some((ws, we));
-                    break;
-                }
-                nested -= 1;
-            }
-            "else" if nested == 0 => else_bounds = Some((ws, we)),
-            _ => {}
-        }
-    }
-    let (end_start, end_end) = end_bounds?;
-    let (else_start, else_end) = else_bounds?;
-    if end_end != src.len() {
-        return None;
-    }
-
-    let cond = src[first_end..then_start].trim();
-    let then_expr = src[then_end..else_start].trim();
-    let else_expr = src[else_end..end_start].trim();
-    if cond.is_empty() || then_expr.is_empty() || else_expr.is_empty() {
-        return None;
-    }
-    Some((cond, then_expr, else_expr))
-}
-
-fn top_level_words(s: &str) -> Vec<(&str, usize, usize)> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    let mut depth_paren = 0i32;
-    let mut depth_bracket = 0i32;
-    let mut in_str = false;
-    let mut esc = false;
-
-    while i < bytes.len() {
-        let c = bytes[i] as char;
-        if in_str {
-            if esc {
-                esc = false;
-                i += 1;
-                continue;
-            }
-            if c == '\\' {
-                esc = true;
-                i += 1;
-                continue;
-            }
-            if c == '"' {
-                in_str = false;
-            }
-            i += 1;
-            continue;
-        }
-        match c {
-            '"' => {
-                in_str = true;
-                i += 1;
-                continue;
-            }
-            '(' => {
-                depth_paren += 1;
-                i += 1;
-                continue;
-            }
-            ')' => {
-                depth_paren -= 1;
-                i += 1;
-                continue;
-            }
-            '[' => {
-                depth_bracket += 1;
-                i += 1;
-                continue;
-            }
-            ']' => {
-                depth_bracket -= 1;
-                i += 1;
-                continue;
-            }
-            _ => {}
-        }
-        if depth_paren == 0 && depth_bracket == 0 && c.is_ascii_alphabetic() {
-            let start = i;
-            i += 1;
-            while i < bytes.len() && (bytes[i] as char).is_ascii_alphabetic() {
-                i += 1;
-            }
-            let end = i;
-            out.push((&s[start..end], start, end));
-            continue;
-        }
+        out.push(c);
         i += 1;
     }
     out
 }
 
-fn strip_outer_parens(s: &str) -> Option<&str> {
-    if !(s.starts_with('(') && s.ends_with(')')) {
-        return None;
+fn preprocess_query(query: &str) -> String {
+    fn is_ident_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '_'
     }
-    let mut depth = 0i32;
-    let mut in_str = false;
-    let mut esc = false;
-    for (i, c) in s.char_indices() {
-        if in_str {
-            if esc {
-                esc = false;
-                continue;
+    fn token_boundary(ch: Option<char>) -> bool {
+        match ch {
+            None => true,
+            Some(c) => !is_ident_char(c),
+        }
+    }
+    fn numeric_prefix_boundary(ch: Option<char>) -> bool {
+        match ch {
+            None => true,
+            Some(c) => {
+                matches!(
+                    c,
+                    ' ' | '\t'
+                        | '\n'
+                        | '\r'
+                        | '('
+                        | '['
+                        | '{'
+                        | ','
+                        | ';'
+                        | ':'
+                        | '+'
+                        | '-'
+                        | '*'
+                        | '/'
+                        | '%'
+                        | '<'
+                        | '>'
+                        | '='
+                        | '!'
+                        | '|'
+                )
             }
-            if c == '\\' {
-                esc = true;
-                continue;
+        }
+    }
+
+    const LOC_EXPR: &str = "({\"file\":\"<top-level>\",\"line\":1})";
+    const LOC_FIELD_EXPR: &str = "\"__loc__\":({\"file\":\"<top-level>\",\"line\":1})";
+
+    let query = query
+        .replace(
+            "\\($__loc__)",
+            "\\(({\"file\":\"<top-level>\",\"line\":1}))",
+        )
+        .replace("\\(__loc__)", "\\(({\"file\":\"<top-level>\",\"line\":1}))");
+
+    let chars: Vec<char> = query.chars().collect();
+    let mut out = String::with_capacity(query.len());
+    let mut i = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
             }
-            if c == '"' {
-                in_str = false;
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+
+        let prev = i.checked_sub(1).and_then(|p| chars.get(p)).copied();
+        let next = chars.get(i + 1).copied();
+        let prev_non_ws = {
+            let mut p = i;
+            let mut out = None;
+            while p > 0 {
+                p -= 1;
+                let c = chars[p];
+                if !c.is_whitespace() {
+                    out = Some(c);
+                    break;
+                }
+            }
+            out
+        };
+        let next_non_ws = |from: usize| {
+            let mut p = from;
+            while p < chars.len() {
+                let c = chars[p];
+                if !c.is_whitespace() {
+                    return Some(c);
+                }
+                p += 1;
+            }
+            None
+        };
+
+        if chars[i..].starts_with(&['$', '_', '_', 'l', 'o', 'c', '_', '_'])
+            && token_boundary(prev)
+            && token_boundary(chars.get(i + 8).copied())
+        {
+            if matches!(prev_non_ws, None | Some('{') | Some(','))
+                && matches!(next_non_ws(i + 8), Some('}') | Some(','))
+            {
+                out.push_str(LOC_FIELD_EXPR);
+            } else {
+                out.push_str(LOC_EXPR);
+            }
+            i += 8;
+            continue;
+        }
+        if chars[i..].starts_with(&['_', '_', 'l', 'o', 'c', '_', '_'])
+            && token_boundary(prev)
+            && token_boundary(chars.get(i + 7).copied())
+        {
+            out.push_str(LOC_EXPR);
+            i += 7;
+            continue;
+        }
+        if chars[i..].starts_with(&['$', 'E', 'N', 'V'])
+            && token_boundary(prev)
+            && token_boundary(chars.get(i + 4).copied())
+        {
+            out.push_str("env");
+            i += 4;
+            continue;
+        }
+
+        if c == '.' && next.is_some_and(|d| d.is_ascii_digit()) && numeric_prefix_boundary(prev) {
+            out.push_str("0.");
+            i += 1;
+            continue;
+        }
+
+        out.push(c);
+        i += 1;
+    }
+
+    out
+}
+
+fn inject_prelude_after_module_directives(query: &str) -> String {
+    let insert_at = leading_module_directives_len(query);
+    if insert_at == 0 {
+        return format!("{JQ_PRELUDE}\n{query}");
+    }
+
+    let (head, tail) = query.split_at(insert_at);
+    let mut out = String::with_capacity(query.len() + JQ_PRELUDE.len() + 2);
+    out.push_str(head);
+    if !head.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(JQ_PRELUDE);
+    if !tail.is_empty() && !tail.starts_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(tail);
+    out
+}
+
+fn leading_module_directives_len(query: &str) -> usize {
+    let mut cursor = 0usize;
+    let mut saw_module_directive = false;
+
+    loop {
+        let stmt_start = skip_whitespace_and_comments(query, cursor);
+        if stmt_start >= query.len() {
+            return if saw_module_directive { query.len() } else { 0 };
+        }
+
+        let (stmt_end, has_semicolon) = find_statement_end(query, stmt_start);
+        let statement = query[stmt_start..stmt_end].trim();
+
+        if !is_module_directive(statement) {
+            return if saw_module_directive { stmt_start } else { 0 };
+        }
+
+        saw_module_directive = true;
+        cursor = if has_semicolon {
+            stmt_end + 1
+        } else {
+            stmt_end
+        };
+    }
+}
+
+fn skip_whitespace_and_comments(query: &str, mut idx: usize) -> usize {
+    while idx < query.len() {
+        let mut chars = query[idx..].chars();
+        let Some(ch) = chars.next() else { break };
+        if ch.is_whitespace() {
+            idx += ch.len_utf8();
+            continue;
+        }
+        if ch == '#' {
+            idx += ch.len_utf8();
+            while idx < query.len() {
+                let mut comment_chars = query[idx..].chars();
+                let Some(comment_ch) = comment_chars.next() else {
+                    break;
+                };
+                idx += comment_ch.len_utf8();
+                if comment_ch == '\n' {
+                    break;
+                }
             }
             continue;
         }
-        match c {
-            '"' => in_str = true,
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 && i != s.len() - 1 {
-                    return None;
-                }
-                if depth < 0 {
-                    return None;
-                }
+        break;
+    }
+    idx
+}
+
+fn find_statement_end(query: &str, start: usize) -> (usize, bool) {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+
+    for (offset, ch) in query[start..].char_indices() {
+        let idx = start + offset;
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            continue;
+        }
+
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '#' => in_comment = true,
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            ';' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                return (idx, true);
             }
             _ => {}
         }
     }
-    if depth == 0 {
-        Some(&s[1..s.len() - 1])
-    } else {
-        None
-    }
+
+    (query.len(), false)
 }
 
-fn select_field(v: &JsonValue, field: &str) -> JsonValue {
-    match v {
-        JsonValue::Object(m) => m.get(field).cloned().unwrap_or(JsonValue::Null),
-        _ => JsonValue::Null,
-    }
-}
-
-fn select_index(v: &JsonValue, idx: i64) -> JsonValue {
-    match v {
-        JsonValue::Array(arr) => {
-            let n = arr.len() as i64;
-            let i = if idx < 0 { n + idx } else { idx };
-            if i < 0 || i >= n {
-                JsonValue::Null
-            } else {
-                arr[i as usize].clone()
-            }
-        }
-        _ => JsonValue::Null,
-    }
-}
-
-fn select_slice(v: &JsonValue, start: Option<i64>, end: Option<i64>) -> JsonValue {
-    match v {
-        JsonValue::Array(arr) => {
-            let n = arr.len() as i64;
-            let s = normalize_slice_bound(start.unwrap_or(0), n);
-            let e = normalize_slice_bound(end.unwrap_or(n), n);
-            if e <= s {
-                return JsonValue::Array(Vec::new());
-            }
-            let s_usize = s as usize;
-            let e_usize = e as usize;
-            JsonValue::Array(arr[s_usize..e_usize].to_vec())
-        }
-        JsonValue::String(s) => {
-            let chars = s.chars().collect::<Vec<_>>();
-            let n = chars.len() as i64;
-            let st = normalize_slice_bound(start.unwrap_or(0), n);
-            let en = normalize_slice_bound(end.unwrap_or(n), n);
-            if en <= st {
-                return JsonValue::String(String::new());
-            }
-            let out = chars[st as usize..en as usize].iter().collect::<String>();
-            JsonValue::String(out)
-        }
-        _ => JsonValue::Null,
-    }
-}
-
-fn normalize_slice_bound(v: i64, len: i64) -> i64 {
-    let mut out = if v < 0 { len + v } else { v };
-    if out < 0 {
-        out = 0;
-    }
-    if out > len {
-        out = len;
-    }
-    out
-}
-
-fn select_by_key(container: &JsonValue, key: &JsonValue) -> JsonValue {
-    match (container, key) {
-        (JsonValue::Object(m), JsonValue::String(s)) => {
-            m.get(s).cloned().unwrap_or(JsonValue::Null)
-        }
-        (JsonValue::Array(_), JsonValue::Number(n)) => n
-            .as_i64()
-            .map(|i| select_index(container, i))
-            .unwrap_or(JsonValue::Null),
-        (JsonValue::Array(_), JsonValue::String(s)) => s
-            .parse::<i64>()
-            .ok()
-            .map(|i| select_index(container, i))
-            .unwrap_or(JsonValue::Null),
-        _ => JsonValue::Null,
-    }
-}
-
-fn length_of(v: &JsonValue) -> u64 {
-    match v {
-        JsonValue::Array(a) => a.len() as u64,
-        JsonValue::Object(m) => m.len() as u64,
-        JsonValue::String(s) => s.chars().count() as u64,
-        JsonValue::Null => 0,
-        _ => 1,
-    }
-}
-
-fn keys_of(v: &JsonValue) -> JsonValue {
-    JsonValue::Array(keys_list(v))
-}
-
-fn keys_list(v: &JsonValue) -> Vec<JsonValue> {
-    match v {
-        JsonValue::Object(m) => {
-            let mut keys = m.keys().cloned().collect::<Vec<_>>();
-            keys.sort_unstable();
-            keys.into_iter().map(JsonValue::String).collect()
-        }
-        JsonValue::Array(a) => (0..a.len()).map(|i| JsonValue::from(i as u64)).collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn sort_of(v: &JsonValue) -> Result<JsonValue, Error> {
-    let JsonValue::Array(arr) = v else {
-        return Err(Error::Unsupported("sort requires array input".to_string()));
-    };
-    let mut out = arr.clone();
-    out.sort_by_key(canonical);
-    Ok(JsonValue::Array(out))
-}
-
-fn reverse_of(v: &JsonValue) -> Result<JsonValue, Error> {
-    match v {
-        JsonValue::Array(arr) => {
-            let mut out = arr.clone();
-            out.reverse();
-            Ok(JsonValue::Array(out))
-        }
-        JsonValue::String(s) => Ok(JsonValue::String(s.chars().rev().collect())),
-        _ => Err(Error::Unsupported(
-            "reverse requires array or string input".to_string(),
-        )),
-    }
-}
-
-fn min_of(v: &JsonValue) -> Result<JsonValue, Error> {
-    let JsonValue::Array(arr) = v else {
-        return Err(Error::Unsupported("min requires array input".to_string()));
-    };
-    if arr.is_empty() {
-        return Ok(JsonValue::Null);
-    }
-    let mut best = arr[0].clone();
-    for item in arr.iter().skip(1) {
-        if canonical(item) < canonical(&best) {
-            best = item.clone();
-        }
-    }
-    Ok(best)
-}
-
-fn max_of(v: &JsonValue) -> Result<JsonValue, Error> {
-    let JsonValue::Array(arr) = v else {
-        return Err(Error::Unsupported("max requires array input".to_string()));
-    };
-    if arr.is_empty() {
-        return Ok(JsonValue::Null);
-    }
-    let mut best = arr[0].clone();
-    for item in arr.iter().skip(1) {
-        if canonical(item) > canonical(&best) {
-            best = item.clone();
-        }
-    }
-    Ok(best)
-}
-
-fn add_of(v: &JsonValue) -> Result<JsonValue, Error> {
-    let JsonValue::Array(arr) = v else {
-        return Err(Error::Unsupported("add requires array input".to_string()));
-    };
-    if arr.is_empty() {
-        return Ok(JsonValue::Null);
-    }
-    if arr.iter().all(|x| x.is_number()) {
-        let sum = arr
-            .iter()
-            .filter_map(|x| x.as_f64())
-            .fold(0.0, |acc, n| acc + n);
-        if sum.fract() == 0.0 {
-            return Ok(JsonValue::from(sum as i64));
-        }
-        return Ok(JsonValue::from(sum));
-    }
-    if arr.iter().all(|x| x.is_string()) {
-        let mut out = String::new();
-        for x in arr {
-            if let Some(s) = x.as_str() {
-                out.push_str(s);
-            }
-        }
-        return Ok(JsonValue::String(out));
-    }
-    Err(Error::Unsupported(
-        "add supports arrays of numbers or strings".to_string(),
-    ))
-}
-
-fn canonical(v: &JsonValue) -> String {
-    serde_json::to_string(v).unwrap_or_default()
-}
-
-fn type_of(v: &JsonValue) -> &'static str {
-    match v {
-        JsonValue::Null => "null",
-        JsonValue::Bool(_) => "boolean",
-        JsonValue::Number(_) => "number",
-        JsonValue::String(_) => "string",
-        JsonValue::Array(_) => "array",
-        JsonValue::Object(_) => "object",
-    }
-}
-
-fn to_string_value(v: &JsonValue) -> String {
-    match v {
-        JsonValue::String(s) => s.clone(),
-        _ => serde_json::to_string(v).unwrap_or_default(),
-    }
-}
-
-fn parse_string_literal(s: &str) -> Option<String> {
-    if !(s.starts_with('"') && s.ends_with('"')) {
-        return None;
-    }
-    serde_json::from_str::<String>(s).ok()
-}
-
-fn has_key(v: &JsonValue, key: &str) -> bool {
-    match v {
-        JsonValue::Object(m) => m.contains_key(key),
-        JsonValue::Array(a) => key
-            .parse::<i64>()
-            .ok()
-            .map(|i| {
-                let n = a.len() as i64;
-                let idx = if i < 0 { n + i } else { i };
-                idx >= 0 && idx < n
-            })
-            .unwrap_or(false),
-        _ => false,
-    }
-}
-
-fn contains_value(haystack: &JsonValue, needle: &JsonValue) -> bool {
-    match (haystack, needle) {
-        (JsonValue::String(s), JsonValue::String(sub)) => s.contains(sub),
-        (JsonValue::Array(arr), _) => arr.iter().any(|v| v == needle),
-        (JsonValue::Object(map), JsonValue::Object(sub)) => sub.iter().all(|(k, v)| {
-            map.get(k)
-                .map(|hv| contains_value(hv, v) || hv == v)
-                .unwrap_or(false)
-        }),
-        _ => haystack == needle,
-    }
-}
-
-fn to_number_value(v: JsonValue) -> Result<JsonValue, Error> {
-    match v {
-        JsonValue::Number(_) => Ok(v),
-        JsonValue::String(s) => {
-            if let Ok(i) = s.parse::<i64>() {
-                return Ok(JsonValue::from(i));
-            }
-            if let Ok(f) = s.parse::<f64>() {
-                return Ok(JsonValue::from(f));
-            }
-            Err(Error::Unsupported(
-                "tonumber requires numeric string".to_string(),
-            ))
-        }
-        _ => Err(Error::Unsupported(
-            "tonumber supports number or string".to_string(),
-        )),
-    }
-}
-
-fn split_value(v: &JsonValue, sep: &JsonValue) -> Result<JsonValue, Error> {
-    let s = v
-        .as_str()
-        .ok_or_else(|| Error::Unsupported("split requires string input".to_string()))?;
-    let sep = sep
-        .as_str()
-        .ok_or_else(|| Error::Unsupported("split requires string separator".to_string()))?;
-    Ok(JsonValue::Array(
-        s.split(sep)
-            .map(|x| JsonValue::String(x.to_string()))
-            .collect(),
-    ))
-}
-
-fn join_value(v: &JsonValue, sep: &JsonValue) -> Result<JsonValue, Error> {
-    let arr = v
-        .as_array()
-        .ok_or_else(|| Error::Unsupported("join requires array input".to_string()))?;
-    let sep = sep
-        .as_str()
-        .ok_or_else(|| Error::Unsupported("join requires string separator".to_string()))?;
-    let mut parts = Vec::with_capacity(arr.len());
-    for item in arr {
-        parts.push(match item {
-            JsonValue::String(s) => s.clone(),
-            _ => to_string_value(item),
-        });
-    }
-    Ok(JsonValue::String(parts.join(sep)))
-}
-
-fn index_value(v: &JsonValue, needle: &JsonValue, reverse: bool) -> JsonValue {
-    match (v, needle) {
-        (JsonValue::String(s), JsonValue::String(n)) => {
-            let pos = if reverse { s.rfind(n) } else { s.find(n) };
-            pos.map(|p| JsonValue::from(p as i64))
-                .unwrap_or(JsonValue::Null)
-        }
-        (JsonValue::Array(arr), _) => {
-            let idx = if reverse {
-                arr.iter().rposition(|x| x == needle)
-            } else {
-                arr.iter().position(|x| x == needle)
-            };
-            idx.map(|p| JsonValue::from(p as i64))
-                .unwrap_or(JsonValue::Null)
-        }
-        _ => JsonValue::Null,
-    }
+fn is_module_directive(statement: &str) -> bool {
+    let s = statement.trim_start();
+    s.starts_with("import ") || s.starts_with("include ") || s.starts_with("module ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::Deserialize;
     use std::fs;
-    use std::path::PathBuf;
-
-    #[derive(Debug, Deserialize)]
-    struct CompatFile {
-        cases: Vec<CompatCase>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct CompatCase {
-        id: String,
-        query: String,
-        #[serde(default)]
-        input_json: Option<String>,
-        #[serde(default)]
-        input_yaml: Option<String>,
-        #[serde(default)]
-        output_json_lines: Vec<String>,
-        #[serde(default)]
-        error_contains: Option<String>,
-    }
 
     #[test]
-    fn jq_compat_subset() {
-        run_compat_file("jq-cases.yaml", run_json_query, |c| {
-            c.input_json.as_deref().expect("input_json")
-        });
-    }
-
-    #[test]
-    fn yq_compat_subset() {
-        run_compat_file("yq-cases.yaml", run_yaml_query, |c| {
-            c.input_yaml.as_deref().expect("input_yaml")
-        });
-    }
-
-    #[test]
-    fn yq_yaml_spec_and_issue_regressions() {
-        run_compat_file("yq-yaml-spec-issues.yaml", run_yaml_query, |c| {
-            c.input_yaml.as_deref().expect("input_yaml")
-        });
-    }
-
-    fn run_compat_file<FRun, FInput>(file_name: &str, run: FRun, input_of: FInput)
-    where
-        FRun: Fn(&str, &str) -> Result<Vec<JsonValue>, Error>,
-        FInput: Fn(&CompatCase) -> &str,
-    {
-        let path = compat_file(file_name);
-        let data = fs::read_to_string(&path).expect("read compat");
-        let suite: CompatFile = serde_yaml::from_str(&data).expect("parse compat");
-        for case in suite.cases {
-            let input = input_of(&case);
-            match run(&case.query, input) {
-                Ok(out) => {
-                    if let Some(expected_err) = case.error_contains.as_deref() {
-                        panic!(
-                            "case {} expected error containing {:?}, but got success output: {:?}",
-                            case.id, expected_err, out
-                        );
-                    }
-                    let got = out
-                        .iter()
-                        .map(|v| serde_json::to_string(v).expect("json"))
-                        .collect::<Vec<_>>();
-                    assert_eq!(got, case.output_json_lines, "case {}", case.id);
-                }
-                Err(err) => {
-                    if let Some(expected_err) = case.error_contains.as_deref() {
-                        let got = err.to_string().to_lowercase();
-                        assert!(
-                            got.contains(&expected_err.to_lowercase()),
-                            "case {} expected error containing {:?}, got: {}",
-                            case.id,
-                            expected_err,
-                            err
-                        );
-                    } else {
-                        panic!("case {} failed unexpectedly: {err}", case.id);
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn jq_rejects_unescaped_control_chars_issue2909_regression() {
-        let bad = "{\"s\":\"a\u{001f}b\"}";
-        let err = run_json_query(".", bad).expect_err("must fail on control char");
-        assert!(matches!(err, Error::Json(_)));
-    }
-
-    #[test]
-    fn jq_accepts_yaml_input() {
-        let input = r#"
-a:
-  b: 42
-"#;
-        let out = run_json_query(".a.b", input).expect("query");
-        assert_eq!(out, vec![serde_json::json!(42)]);
-    }
-
-    #[test]
-    fn yq_accepts_json_input() {
-        let input = r#"{"a":{"b":42}}"#;
-        let out = run_yaml_query(".a.b", input).expect("query");
-        assert_eq!(out, vec![serde_json::json!(42)]);
-    }
-
-    #[test]
-    fn parse_input_docs_prefer_yaml_handles_large_multidoc_stream() {
-        let mut input = String::new();
-        for i in 0..1000usize {
-            if i > 0 {
-                input.push_str("---\n");
-            }
-            input.push_str(&format!("id: {i}\nname: app-{i}\n"));
-        }
-        let docs = parse_input_docs_prefer_yaml(&input).expect("parse");
-        assert_eq!(docs.len(), 1000);
-        assert_eq!(docs[0], serde_json::json!({"id":0,"name":"app-0"}));
-        assert_eq!(docs[999], serde_json::json!({"id":999,"name":"app-999"}));
-    }
-
-    #[test]
-    fn yq_resolves_yaml_merge_key_single_source() {
-        let input = r#"
-base: &base
-  name: app
-  port: 8080
-svc:
-  <<: *base
-  port: 9090
-"#;
-        let out = run_yaml_query(".svc.name", input).expect("query");
-        assert_eq!(out, vec![serde_json::json!("app")]);
-        let out_port = run_yaml_query(".svc.port", input).expect("query");
-        assert_eq!(out_port, vec![serde_json::json!(9090)]);
-        let full = run_yaml_query(".svc", input).expect("query");
-        assert_eq!(full, vec![serde_json::json!({"name":"app","port":9090})]);
-    }
-
-    #[test]
-    fn yq_resolves_yaml_merge_key_sequence_source() {
-        let input = r#"
-base1: &base1
-  a: 1
-  b: 1
-base2: &base2
-  b: 2
-  c: 2
-svc:
-  <<: [*base1, *base2]
-  c: 3
-"#;
-        let out = run_yaml_query(".svc", input).expect("query");
-        assert_eq!(out, vec![serde_json::json!({"a":1,"b":1,"c":3})]);
-    }
-
-    #[test]
-    fn yq_yaml_merge_sequence_preserves_first_source_priority() {
-        let input = r#"
-base1: &base1
-  x: first
-base2: &base2
-  x: second
-svc:
-  <<: [*base1, *base2]
-"#;
-        let out = run_yaml_query(".svc.x", input).expect("query");
-        assert_eq!(out, vec![serde_json::json!("first")]);
-    }
-
-    #[test]
-    fn jq_yaml_fallback_resolves_yaml_merge_key() {
-        let input = r#"
-base: &base
-  name: app
-svc:
-  <<: *base
-"#;
-        let out = run_json_query(".svc.name", input).expect("query");
-        assert_eq!(out, vec![serde_json::json!("app")]);
-    }
-
-    #[test]
-    fn yq_inline_merge_flow_map_preserves_key_order_in_output() {
-        let input = r#"
-base: &base
-  dummy: 42
-obj:
-  <<: { foo: 123, bar: 456 }
-  baz: 999
-"#;
-        let out = run_yaml_query(".obj", input).expect("query");
-        let line = serde_json::to_string(&out[0]).expect("json");
-        assert_eq!(line, r#"{"foo":123,"bar":456,"baz":999}"#);
-    }
-
-    #[test]
-    fn yaml_unidentified_alias_returns_yaml_error() {
-        let input = r#"
-obj:
-  <<: *unknown
-"#;
-        let err = run_yaml_query(".obj", input).expect_err("must fail");
-        assert!(matches!(err, Error::Yaml(_)));
-    }
-
-    #[test]
-    fn yaml_cycle_anchor_returns_yaml_error() {
-        let input = r#"
-a: &a
-  self: *a
-"#;
-        let err = run_yaml_query(".", input).expect_err("cycle must fail");
-        assert!(matches!(err, Error::Yaml(_)));
-    }
-
-    #[test]
-    fn compile_query_parses_pipeline_once() {
-        let q = ".[] | select(.a == 2) | .b";
-        let compiled = compile_query(q).expect("compile");
-        let input = serde_json::json!([{"a":1,"b":"x"},{"a":2,"b":"y"}]);
-        let out = eval_compiled_query(&compiled, vec![input]).expect("eval");
-        let got = out
-            .iter()
-            .map(|v| serde_json::to_string(v).expect("json"))
-            .collect::<Vec<_>>();
-        assert_eq!(got, vec!["\"y\""]);
-    }
-
-    #[test]
-    fn compile_predicate_uses_fast_path_for_scalar_path_literal() {
-        let p = compile_predicate(".a.b == 2").expect("compile");
-        assert!(matches!(p, CompiledPredicate::EqPathLiteral(_, _)));
-    }
-
-    #[test]
-    fn compile_stage_uses_map_path_fast_path() {
-        let s = compile_stage("map(.a.b)").expect("compile");
-        assert!(matches!(s, CompiledStage::MapPath(_)));
-    }
-
-    #[test]
-    fn compile_stage_uses_dot_iter_fast_path() {
-        let s = compile_stage(".[]").expect("compile");
-        assert!(matches!(s, CompiledStage::DotIter));
-    }
-
-    #[test]
-    fn compile_stage_uses_dot_iter_field_fast_path() {
-        let s = compile_stage(".[].name").expect("compile");
-        assert!(matches!(s, CompiledStage::DotIterField(_)));
-    }
-
-    #[test]
-    fn compile_dot_path_supports_bracket_string_key() {
-        let t = compile_dot_path(".[\"a-b\"]").expect("compile");
-        assert!(matches!(t.as_slice(), [PathToken::Field(_)]));
-    }
-
-    #[test]
-    fn compile_dot_path_supports_field_bracket_string_key() {
-        let t = compile_dot_path(".root[\"a-b\"]").expect("compile");
-        assert!(matches!(
-            t.as_slice(),
-            [PathToken::Field(_), PathToken::Field(_)]
-        ));
-    }
-
-    #[test]
-    fn run_query_supports_bracket_string_key_lookup() {
-        let out = run_json_query(".[\"a-b\"]", r#"{"a-b": 9}"#).expect("query");
-        assert_eq!(out, vec![serde_json::json!(9)]);
-    }
-
-    #[test]
-    fn run_query_supports_nested_bracket_string_key_lookup() {
-        let out = run_json_query(".root[\"a-b\"]", r#"{"root":{"a-b": 5}}"#).expect("query");
-        assert_eq!(out, vec![serde_json::json!(5)]);
-    }
-
-    #[test]
-    fn run_query_supports_optional_field_operator() {
-        let out = run_json_query(".missing?", r#"{"a":1}"#).expect("query");
-        assert_eq!(out, vec![serde_json::Value::Null]);
-    }
-
-    #[test]
-    fn run_query_supports_optional_iter_operator() {
-        let out = run_json_query(".[]?", r#"{"a":1}"#).expect("query");
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn run_query_supports_predicate_gt() {
-        let out = run_json_query(".[] | select(.a > 1) | .a", r#"[{"a":1},{"a":2},{"a":3}]"#)
-            .expect("query");
-        assert_eq!(out, vec![serde_json::json!(2), serde_json::json!(3)]);
-    }
-
-    #[test]
-    fn run_query_supports_predicate_and_or() {
-        let out = run_json_query(
-            r#".[] | select(.a > 1 and .name == "x") | .a"#,
-            r#"[{"a":1,"name":"x"},{"a":2,"name":"x"},{"a":3,"name":"y"}]"#,
-        )
-        .expect("query");
-        assert_eq!(out, vec![serde_json::json!(2)]);
-
-        let out_or = run_json_query(
-            r#".[] | select(.a == 1 or .name == "y") | .a"#,
-            r#"[{"a":1,"name":"x"},{"a":2,"name":"x"},{"a":3,"name":"y"}]"#,
-        )
-        .expect("query");
-        assert_eq!(out_or, vec![serde_json::json!(1), serde_json::json!(3)]);
-    }
-
-    #[test]
-    fn run_query_supports_comma_operator() {
-        let out = run_json_query(".a, .b", r#"{"a":1,"b":2}"#).expect("query");
-        assert_eq!(out, vec![serde_json::json!(1), serde_json::json!(2)]);
-    }
-
-    #[test]
-    fn run_query_supports_alt_operator() {
-        let out = run_json_query(".a // .b", r#"{"a":null,"b":2}"#).expect("query");
-        assert_eq!(out, vec![serde_json::json!(2)]);
-        let out_left = run_json_query(".a // .b", r#"{"a":3,"b":2}"#).expect("query");
-        assert_eq!(out_left, vec![serde_json::json!(3)]);
-    }
-
-    #[test]
-    fn run_query_supports_slice_operator() {
-        let out = run_json_query(".[1:3]", r#"[10,20,30,40]"#).expect("query");
-        assert_eq!(out, vec![serde_json::json!([20, 30])]);
-        let out_neg = run_json_query(".[-2:]", r#"[10,20,30,40]"#).expect("query");
-        assert_eq!(out_neg, vec![serde_json::json!([30, 40])]);
-    }
-
-    #[test]
-    fn run_query_supports_field_slice_operator() {
-        let out = run_json_query(".arr[1:3]", r#"{"arr":[1,2,3,4]}"#).expect("query");
-        assert_eq!(out, vec![serde_json::json!([2, 3])]);
-    }
-
-    #[test]
-    fn run_query_supports_not_stage() {
-        let out = run_json_query(".[] | not", r#"[true,false,null,1,""]"#).expect("query");
-        assert_eq!(
-            out,
-            vec![
-                serde_json::json!(false),
-                serde_json::json!(true),
-                serde_json::json!(true),
-                serde_json::json!(false),
-                serde_json::json!(true)
-            ]
-        );
-    }
-
-    #[test]
-    fn run_query_supports_empty_stage() {
-        let out = run_json_query(".[] | empty", r#"[1,2,3]"#).expect("query");
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn run_query_supports_contains() {
-        let out = run_json_query(r#"contains("bc")"#, r#""abcd""#).expect("query");
-        assert_eq!(out, vec![serde_json::json!(true)]);
-        let out_arr = run_json_query("contains(2)", "[1,2,3]").expect("query");
-        assert_eq!(out_arr, vec![serde_json::json!(true)]);
-    }
-
-    #[test]
-    fn run_query_supports_startswith_and_endswith() {
-        let out_sw = run_json_query(r#"startswith("ab")"#, r#""abcd""#).expect("query");
-        assert_eq!(out_sw, vec![serde_json::json!(true)]);
-        let out_ew = run_json_query(r#"endswith("cd")"#, r#""abcd""#).expect("query");
-        assert_eq!(out_ew, vec![serde_json::json!(true)]);
-    }
-
-    #[test]
-    fn run_query_supports_values() {
-        let out = run_json_query(".[] | values", r#"[1,null,2]"#).expect("query");
-        assert_eq!(out, vec![serde_json::json!(1), serde_json::json!(2)]);
-    }
-
-    #[test]
-    fn run_query_supports_tonumber() {
-        let out = run_json_query(r#""42" | tonumber"#, "null").expect("query");
-        assert_eq!(out, vec![serde_json::json!(42)]);
-    }
-
-    #[test]
-    fn run_query_supports_split_and_join() {
-        let out = run_json_query(r#"split(",")"#, r#""a,b,c""#).expect("query");
-        assert_eq!(out, vec![serde_json::json!(["a", "b", "c"])]);
-        let out_join = run_json_query(r#"join("-")"#, r#"["a","b","c"]"#).expect("query");
-        assert_eq!(out_join, vec![serde_json::json!("a-b-c")]);
-    }
-
-    #[test]
-    fn run_query_supports_reverse() {
-        let out = run_json_query("reverse", r#"[1,2,3]"#).expect("query");
-        assert_eq!(out, vec![serde_json::json!([3, 2, 1])]);
-    }
-
-    #[test]
-    fn run_query_supports_min_max() {
-        let out_min = run_json_query("min", r#"[3,1,2]"#).expect("query");
-        assert_eq!(out_min, vec![serde_json::json!(1)]);
-        let out_max = run_json_query("max", r#"[3,1,2]"#).expect("query");
-        assert_eq!(out_max, vec![serde_json::json!(3)]);
-    }
-
-    #[test]
-    fn run_query_supports_arithmetic_expressions() {
-        let out_add = run_json_query(".a + .b", r#"{"a":2,"b":3}"#).expect("query");
-        assert_eq!(out_add, vec![serde_json::json!(5)]);
-        let out_sub = run_json_query(".a - .b", r#"{"a":7,"b":2}"#).expect("query");
-        assert_eq!(out_sub, vec![serde_json::json!(5)]);
-        let out_mul = run_json_query(".a * .b", r#"{"a":4,"b":3}"#).expect("query");
-        assert_eq!(out_mul, vec![serde_json::json!(12)]);
-        let out_div = run_json_query(".a / .b", r#"{"a":9,"b":2}"#).expect("query");
-        assert_eq!(out_div, vec![serde_json::json!(4.5)]);
-    }
-
-    #[test]
-    fn run_query_supports_add_for_strings_arrays_and_objects() {
-        let out_s = run_json_query(r#".a + .b"#, r#"{"a":"ab","b":"cd"}"#).expect("query");
-        assert_eq!(out_s, vec![serde_json::json!("abcd")]);
-        let out_a = run_json_query(r#".a + .b"#, r#"{"a":[1,2],"b":[3]}"#).expect("query");
-        assert_eq!(out_a, vec![serde_json::json!([1, 2, 3])]);
-        let out_o = run_json_query(r#".a + .b"#, r#"{"a":{"x":1},"b":{"y":2}}"#).expect("query");
-        assert_eq!(out_o, vec![serde_json::json!({"x":1,"y":2})]);
-    }
-
-    #[test]
-    fn run_query_supports_index_and_rindex() {
-        let out = run_json_query(r#"index("bc")"#, r#""abcabc""#).expect("query");
+    fn run_query_stream_basic() {
+        let out = run_query_stream(".a", vec![serde_json::json!({"a": 1, "b": 2})])
+            .expect("query should run");
         assert_eq!(out, vec![serde_json::json!(1)]);
-        let out_r = run_json_query(r#"rindex("bc")"#, r#""abcabc""#).expect("query");
-        assert_eq!(out_r, vec![serde_json::json!(4)]);
-
-        let out_arr = run_json_query("index(2)", "[1,2,3,2]").expect("query");
-        assert_eq!(out_arr, vec![serde_json::json!(1)]);
-        let out_arr_r = run_json_query("rindex(2)", "[1,2,3,2]").expect("query");
-        assert_eq!(out_arr_r, vec![serde_json::json!(3)]);
     }
 
     #[test]
-    fn run_query_supports_outer_parentheses() {
-        let out = run_json_query("(.a // .b)", r#"{"a":null,"b":2}"#).expect("query");
-        assert_eq!(out, vec![serde_json::json!(2)]);
+    fn normalize_jsonish_keeps_decimal_style() {
+        let value = normalize_jsonish_line("2.0").expect("normalize");
+        assert_eq!(value, "2.0");
     }
 
     #[test]
-    fn run_query_supports_if_then_else_end() {
-        let out = run_json_query(
-            r#".[] | if .enabled then .name else "skip" end"#,
-            r#"[{"enabled":true,"name":"a"},{"enabled":false,"name":"b"}]"#,
+    fn parse_input_docs_supports_yaml_stream() {
+        let docs = parse_input_docs_prefer_json("a: 1\n---\na: 2\n").expect("yaml docs");
+        assert_eq!(
+            docs,
+            vec![serde_json::json!({"a": 1}), serde_json::json!({"a": 2})]
+        );
+    }
+
+    #[test]
+    fn parse_input_docs_supports_json_stream() {
+        let docs = parse_input_docs_prefer_json("{\"a\":1}\n{\"a\":2}\n").expect("json stream");
+        assert_eq!(
+            docs,
+            vec![serde_json::json!({"a": 1}), serde_json::json!({"a": 2})]
+        );
+    }
+
+    #[test]
+    fn parse_input_values_auto_reports_source_kind() {
+        let json = parse_input_values_auto("{\"a\":1}\n{\"a\":2}\n").expect("json stream");
+        assert_eq!(json.kind, InputKind::JsonStream);
+        assert_eq!(json.values.len(), 2);
+
+        let yaml = parse_input_values_auto("a: 1\n---\na: 2\n").expect("yaml docs");
+        assert_eq!(yaml.kind, InputKind::YamlDocs);
+        assert_eq!(yaml.values.len(), 2);
+    }
+
+    #[test]
+    fn prelude_index_and_in_are_available() {
+        let indexed = run_query_stream(
+            "INDEX(.id)",
+            vec![serde_json::json!([{"id": 1, "name": "a"}, {"id": 2, "name": "b"}])],
         )
-        .expect("query");
-        assert_eq!(out, vec![serde_json::json!("a"), serde_json::json!("skip")]);
+        .expect("index query");
+        assert_eq!(
+            indexed,
+            vec![serde_json::json!({
+                "1": {"id": 1, "name": "a"},
+                "2": {"id": 2, "name": "b"}
+            })]
+        );
     }
 
     #[test]
-    fn run_query_supports_nested_if_then_else_end() {
-        let out = run_json_query(
-            r#"if .a then (if .b then "x" else "y" end) else "z" end"#,
-            r#"{"a":true,"b":false}"#,
+    fn canonicalizes_non_json_numeric_literals() {
+        let line = r#"["nan",-nan,+nan,infinite,-infinite,"nan"]"#;
+        let normalized = normalize_jsonish_line(line).expect("normalize");
+        assert_eq!(normalized, r#"["nan",NaN,NaN,Infinity,-Infinity,"nan"]"#);
+    }
+
+    #[test]
+    fn canonicalizes_case_insensitive_non_json_literals() {
+        let line = r#"[NaN,-NaN,+NaN,INFINITE,-INFINITE,Infinity,-Infinity]"#;
+        let normalized = normalize_jsonish_line(line).expect("normalize");
+        assert_eq!(
+            normalized,
+            r#"[NaN,NaN,NaN,Infinity,-Infinity,Infinity,-Infinity]"#
+        );
+    }
+
+    #[test]
+    fn canonicalize_jsonish_preserves_string_content() {
+        let line = r#"{"expr":"?//","query":"map(try .a[] catch ., .a[]?)","x":nan}"#;
+        let normalized = normalize_jsonish_line(line).expect("normalize");
+        assert_eq!(
+            normalized,
+            r#"{"expr":"?//","query":"map(try .a[] catch ., .a[]?)","x":NaN}"#
+        );
+    }
+
+    #[test]
+    fn preprocesses_loc_and_decimal_literals() {
+        let query = r#"{ $__loc__, x: .0005, y: __loc__ }"#;
+        let pre = preprocess_query(query);
+        assert!(pre.contains("{\"file\":\"<top-level>\",\"line\":1}"));
+        assert!(pre.contains("\"__loc__\":({\"file\":\"<top-level>\",\"line\":1})"));
+        assert!(pre.contains("0.0005"));
+        assert!(!pre.contains("$__loc__"));
+        assert!(!pre.contains(" __loc__ "));
+    }
+
+    #[test]
+    fn preprocesses_loc_in_string_interpolation() {
+        let query = r#"try error("\($__loc__)") catch ."#;
+        let pre = preprocess_query(query);
+        assert!(pre.contains(r#"\(({"file":"<top-level>","line":1}))"#));
+        assert!(!pre.contains("$__loc__"));
+    }
+
+    #[test]
+    fn preprocesses_env_variable_to_builtin_env() {
+        let query = "$ENV.PAGER, $ENV";
+        let pre = preprocess_query(query);
+        assert_eq!(pre, "env.PAGER, env");
+    }
+
+    #[test]
+    fn prelude_is_injected_after_imports() {
+        let query = r#"import "a" as foo; foo::a"#;
+        let wrapped = inject_prelude_after_module_directives(query);
+        assert!(wrapped.starts_with(r#"import "a" as foo;"#));
+        assert!(wrapped.contains("jq-compat prelude"));
+        assert!(wrapped.ends_with("foo::a"));
+    }
+
+    #[test]
+    fn prelude_is_injected_for_plain_queries() {
+        let wrapped = inject_prelude_after_module_directives(".foo");
+        assert!(wrapped.starts_with("# jq-compat prelude"));
+        assert!(wrapped.ends_with(".foo"));
+    }
+
+    #[test]
+    fn imports_module_from_name_directory_fallback() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let modules = td.path().join("modules");
+        let bdir = modules.join("b");
+        fs::create_dir_all(&bdir).expect("create module dir");
+        fs::write(bdir.join("b.jq"), "def a: \"b\";\n").expect("write module");
+
+        let out = run_query_stream_with_paths(
+            r#"import "b" as b; b::a"#,
+            vec![serde_json::json!(null)],
+            &[modules.to_string_lossy().to_string()],
         )
-        .expect("query");
-        assert_eq!(out, vec![serde_json::json!("y")]);
+        .expect("run import query");
+
+        assert_eq!(out, vec![serde_json::json!("b")]);
     }
 
     #[test]
-    fn run_query_supports_parenthesized_predicate() {
-        let out = run_json_query(
-            r#".[] | select((.a > 1) and (.name == "x")) | .a"#,
-            r#"[{"a":1,"name":"x"},{"a":2,"name":"x"},{"a":3,"name":"y"}]"#,
+    fn supports_namespaced_data_import_variable_alias() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let modules = td.path().join("modules");
+        fs::create_dir_all(&modules).expect("create modules dir");
+        fs::write(
+            modules.join("data.json"),
+            r#"{"this":"is a test","that":"is too"}"#,
         )
-        .expect("query");
-        assert_eq!(out, vec![serde_json::json!(2)]);
-    }
+        .expect("write data import");
 
-    #[test]
-    fn scalar_path_detection() {
-        assert!(is_scalar_path(&compile_dot_path(".a.b[0]").expect("path")));
-        assert!(!is_scalar_path(&compile_dot_path(".a[]").expect("path")));
-        assert!(!is_scalar_path(&compile_dot_path(".a[1:3]").expect("path")));
-    }
+        let out = run_query_stream_with_paths(
+            r#"import "data" as $d; [$d[0].this, $d::d[0].that]"#,
+            vec![serde_json::json!(null)],
+            &[modules.to_string_lossy().to_string()],
+        )
+        .expect("run data import query");
 
-    #[test]
-    fn strip_outer_parens_detects_balanced_expression() {
-        assert_eq!(strip_outer_parens("(a)"), Some("a"));
-        assert_eq!(strip_outer_parens("(a) + (b)"), None);
-        assert_eq!(strip_outer_parens("((a))"), Some("(a)"));
-    }
-
-    #[test]
-    fn parse_if_then_else_detects_basic_form() {
-        let parsed = parse_if_then_else(r#"if .a then .b else .c end"#).expect("if");
-        assert_eq!(parsed.0, ".a");
-        assert_eq!(parsed.1, ".b");
-        assert_eq!(parsed.2, ".c");
-    }
-
-    #[test]
-    fn parse_if_then_else_handles_nested_blocks() {
-        let parsed = parse_if_then_else(r#"if .a then if .b then .x else .y end else .z end"#)
-            .expect("nested if");
-        assert_eq!(parsed.0, ".a");
-        assert_eq!(parsed.1, "if .b then .x else .y end");
-        assert_eq!(parsed.2, ".z");
-    }
-
-    #[test]
-    fn issue2593_fast_path_array_identity() {
-        let src = serde_json::json!(["a", "b", "c"]);
-        let out = issue2593_lookup(&src);
-        let got = serde_json::Value::Array(out);
-        assert_eq!(got, src);
-    }
-
-    #[test]
-    fn issue2593_fast_path_object_sorted_by_key() {
-        let src = serde_json::json!({"b": 2, "a": 1, "c": 3});
-        let out = issue2593_lookup(&src);
         assert_eq!(
             out,
-            vec![
-                serde_json::json!(1),
-                serde_json::json!(2),
-                serde_json::json!(3)
-            ]
+            vec![serde_json::json!(["is a test", "is too"])]
         );
-    }
-
-    #[test]
-    fn keys_list_is_sorted_for_objects() {
-        let src = serde_json::json!({"z": 1, "a": 2, "m": 3});
-        let keys = keys_list(&src);
-        assert_eq!(
-            keys,
-            vec![
-                serde_json::json!("a"),
-                serde_json::json!("m"),
-                serde_json::json!("z")
-            ]
-        );
-    }
-
-    #[test]
-    fn predicate_single_fast_works_for_scalar_dot_path() {
-        let q = compile_query(".a.b").expect("compile");
-        let src = serde_json::json!({"a":{"b": 7}});
-        let v = eval_compiled_query_single_fast(&q, &src).expect("fast");
-        assert_eq!(v, serde_json::json!(7));
-    }
-
-    #[test]
-    fn predicate_single_fast_works_for_literal_stage() {
-        let q = compile_query("42").expect("compile");
-        let src = serde_json::json!({"a": 1});
-        let v = eval_compiled_query_single_fast(&q, &src).expect("fast");
-        assert_eq!(v, serde_json::json!(42));
-    }
-
-    #[test]
-    fn predicate_single_fast_skips_collect_query() {
-        let q = compile_query("[.a]").expect("compile");
-        let src = serde_json::json!({"a": 1});
-        assert!(eval_compiled_query_single_fast(&q, &src).is_none());
-    }
-
-    fn compat_file(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("compat")
-            .join(name)
     }
 }

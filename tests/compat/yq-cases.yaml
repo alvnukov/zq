@@ -141,7 +141,8 @@ cases:
     query: ".[]?"
     input_yaml: |
       a: 1
-    output_json_lines: []
+    output_json_lines:
+      - "1"
 
   - id: yq_select_gt
     query: ".[] | select(.a > 1) | .a"

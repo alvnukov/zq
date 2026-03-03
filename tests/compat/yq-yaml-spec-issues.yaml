@@ -202,7 +202,9 @@ cases:
     input_yaml: |
       a: 1
       b: 2
-    output_json_lines: []
+    output_json_lines:
+      - "1"
+      - "2"
 
   - id: multi_document_stream_currently_rejected
     query: ".a"

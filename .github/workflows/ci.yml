@@ -52,3 +52,27 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --locked
+
+  upstream-jq-suite:
+    name: Upstream jq Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Ensure jq and git
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq git
+
+      - name: Run upstream jq compatibility suite
+        env:
+          ZQ_RUN_JQ_UPSTREAM: "1"
+          GIT_TERMINAL_PROMPT: "0"
+        run: cargo test --test jq_upstream -- --nocapture

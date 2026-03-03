@@ -64,6 +64,10 @@ fn parity_help_contract() {
         "--doc-mode",
         "-c, --compact-output",
         "-r, --raw-output",
+        "-R, --raw-input",
+        "-s, --slurp",
+        "-n, --null-input",
+        "-e, --exit-status",
         "json",
         "yaml",
     ] {
@@ -150,4 +154,42 @@ fn parity_supports_legacy_input_flag() {
     ]);
     assert_ok(&out, "legacy --input");
     assert_eq!(stdout_text(&out).trim(), "dev");
+}
+
+#[test]
+fn parity_accepts_binary_flag_as_noop() {
+    let out = run_zq(&["-b", ".global.env", &fixture("valid-values.yaml"), "-r"]);
+    assert_ok(&out, "-b compatibility flag");
+    assert_eq!(stdout_text(&out).trim(), "dev");
+}
+
+#[test]
+fn parity_supports_raw_input_and_slurp_modes() {
+    let out = run_zq(&[
+        "-Rse",
+        r#". == "a\nb\nc\n""#,
+        &fixture("raw-lines.txt"),
+    ]);
+    assert_ok(&out, "-Rse");
+    assert_eq!(stdout_text(&out).trim(), "true");
+
+    let out = run_zq(&[
+        "-Rne",
+        r#"[inputs] == ["a","b","c"]"#,
+        &fixture("raw-lines.txt"),
+    ]);
+    assert_ok(&out, "-Rne");
+    assert_eq!(stdout_text(&out).trim(), "true");
+}
+
+#[test]
+fn parity_exit_status_matches_jq_contract() {
+    let out = run_zq(&["-en", "false"]);
+    assert_eq!(out.status.code(), Some(1), "false should exit 1");
+
+    let out = run_zq(&["-en", "empty"]);
+    assert_eq!(out.status.code(), Some(4), "empty should exit 4");
+
+    let out = run_zq(&["-en", "true"]);
+    assert_eq!(out.status.code(), Some(0), "true should exit 0");
 }

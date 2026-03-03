@@ -1,1 +1,5 @@
+# Temporary and build artifacts
+**/target/
+.tmp/
 /target
+rust_out

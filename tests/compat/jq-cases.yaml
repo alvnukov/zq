@@ -149,7 +149,8 @@ cases:
   - id: jq_optional_iter_on_object
     query: ".[]?"
     input_json: '{"a":1}'
-    output_json_lines: []
+    output_json_lines:
+      - "1"
 
   - id: jq_select_gt
     query: ".[] | select(.a > 1) | .a"

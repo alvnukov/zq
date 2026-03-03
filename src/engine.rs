@@ -7,15 +7,22 @@ pub enum DocMode {
     Index(usize),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryOptions {
     pub doc_mode: DocMode,
+    pub library_path: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RunOptions {
+    pub null_input: bool,
 }
 
 impl Default for QueryOptions {
     fn default() -> Self {
         Self {
             doc_mode: DocMode::First,
+            library_path: Vec::new(),
         }
     }
 }
@@ -53,9 +60,84 @@ pub fn parse_doc_mode(doc_mode: &str, doc_index: Option<usize>) -> Result<DocMod
 }
 
 pub fn run_jq(query: &str, input: &str, options: QueryOptions) -> Result<Vec<JsonValue>, Error> {
-    let docs = crate::query::parse_input_docs_prefer_json(input)?;
-    let stream = select_docs(docs, options.doc_mode, "jq")?;
-    Ok(crate::query::run_query_stream(query, stream)?)
+    let stream = parse_jq_input_values(input, options.doc_mode, "jq")?;
+    Ok(crate::query::run_query_stream_with_paths(
+        query,
+        stream,
+        &options.library_path,
+    )?)
+}
+
+pub fn run_jq_stream_with_paths_options(
+    query: &str,
+    input_stream: Vec<JsonValue>,
+    library_path: &[String],
+    run_options: RunOptions,
+) -> Result<Vec<JsonValue>, Error> {
+    Ok(crate::query::run_query_stream_with_paths_and_options(
+        query,
+        input_stream,
+        library_path,
+        crate::query::RunOptions {
+            null_input: run_options.null_input,
+        },
+    )?)
+}
+
+pub fn parse_jq_input_values(
+    input: &str,
+    doc_mode: DocMode,
+    tool: &'static str,
+) -> Result<Vec<JsonValue>, Error> {
+    let parsed = crate::query::parse_input_values_auto(input)?;
+    match parsed.kind {
+        crate::query::InputKind::JsonStream => Ok(parsed.values),
+        crate::query::InputKind::YamlDocs => select_docs(parsed.values, doc_mode, tool),
+    }
+}
+
+pub fn validate_jq_query(query: &str) -> Result<(), Error> {
+    crate::query::validate_query(query).map_err(Error::Query)
+}
+
+pub fn validate_jq_query_with_paths(query: &str, library_path: &[String]) -> Result<(), Error> {
+    crate::query::validate_query_with_paths(query, library_path).map_err(Error::Query)
+}
+
+pub struct PreparedJq {
+    inner: crate::query::PreparedQuery,
+}
+
+impl PreparedJq {
+    pub fn run_jsonish_lines(&self, input: &str) -> Result<Vec<String>, Error> {
+        self.inner.run_jsonish(input).map_err(Error::Query)
+    }
+
+    pub fn run_jsonish_lines_lenient(&self, input: &str) -> Result<Vec<String>, Error> {
+        self.inner.run_jsonish_lenient(input).map_err(Error::Query)
+    }
+}
+
+pub fn prepare_jq_query_with_paths(query: &str, library_path: &[String]) -> Result<PreparedJq, Error> {
+    crate::query::prepare_query_with_paths(query, library_path)
+        .map(|inner| PreparedJq { inner })
+        .map_err(Error::Query)
+}
+
+pub fn run_jq_jsonish_lines(
+    query: &str,
+    input: &str,
+    library_path: &[String],
+) -> Result<Vec<String>, Error> {
+    crate::query::run_query_stream_jsonish(query, input, library_path).map_err(Error::Query)
+}
+
+pub fn normalize_jsonish_line(line: &str) -> Result<String, Error> {
+    crate::query::normalize_jsonish_line(line).map_err(Error::Query)
+}
+
+pub fn jsonish_equal(left: &str, right: &str) -> Result<bool, Error> {
+    crate::query::jsonish_equal(left, right).map_err(Error::Query)
 }
 
 pub fn format_output_json_lines(
@@ -207,6 +289,13 @@ mod tests {
         let input = "a: 1\n";
         let out = run_jq(".a", input, QueryOptions::default()).expect("run jq");
         assert_eq!(out, vec![serde_json::json!(1)]);
+    }
+
+    #[test]
+    fn run_jq_api_reads_json_stream_even_with_default_doc_mode() {
+        let input = "{\"a\":1}\n{\"a\":2}\n";
+        let out = run_jq(".a", input, QueryOptions::default()).expect("run jq");
+        assert_eq!(out, vec![serde_json::json!(1), serde_json::json!(2)]);
     }
 
     #[test]

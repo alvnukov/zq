@@ -1,10 +1,14 @@
+mod native_engine;
 mod query;
 mod yamlmerge;
 
 pub mod engine;
 
 pub use engine::{
-    format_output_json_lines, format_output_yaml_documents, format_query_error, parse_doc_mode,
-    run_jq, DocMode, Error as EngineError, QueryOptions,
+    format_output_json_lines, format_output_yaml_documents, format_query_error, jsonish_equal,
+    normalize_jsonish_line, parse_doc_mode, parse_jq_input_values, prepare_jq_query_with_paths,
+    run_jq, run_jq_jsonish_lines, run_jq_stream_with_paths_options, validate_jq_query,
+    validate_jq_query_with_paths, DocMode, Error as EngineError, PreparedJq, QueryOptions,
+    RunOptions as EngineRunOptions,
 };
 pub use query::Error as QueryError;

@@ -141,30 +141,7 @@ fn capture_name_by_group(re: &Regex) -> Vec<Option<String>> {
     names
 }
 
-fn build_zero_width_match<'a>(
-    s: &'a [u8],
-    region: &onig::Region,
-    name_by_group: &[Option<String>],
-    byte_offset: usize,
-) -> Vec<Match<&'a [u8]>> {
-    let idx = utf8_char_offset(s, byte_offset) as isize;
-    let mut out = Vec::with_capacity(region.len());
-    for i in 0..region.len() {
-        out.push(Match {
-            offset: idx,
-            length: 0,
-            string: &s[byte_offset..byte_offset],
-            name: if i == 0 {
-                None
-            } else {
-                name_by_group.get(i).cloned().flatten()
-            },
-        });
-    }
-    out
-}
-
-fn build_non_zero_width_match<'a>(
+fn build_match<'a>(
     s: &'a [u8],
     region: &onig::Region,
     name_by_group: &[Option<String>],
@@ -193,6 +170,43 @@ fn build_non_zero_width_match<'a>(
         });
     }
     out
+}
+
+fn build_zero_width_match_legacy<'a>(
+    s: &'a [u8],
+    region: &onig::Region,
+    name_by_group: &[Option<String>],
+    byte_offset: usize,
+) -> Vec<Match<&'a [u8]>> {
+    let idx = utf8_char_offset(s, byte_offset) as isize;
+    let mut out = Vec::with_capacity(region.len());
+    for i in 0..region.len() {
+        out.push(Match {
+            offset: idx,
+            length: 0,
+            string: &s[byte_offset..byte_offset],
+            name: if i == 0 {
+                None
+            } else {
+                name_by_group.get(i).cloned().flatten()
+            },
+        });
+    }
+    out
+}
+
+fn jq_compat_profile_is_171() -> bool {
+    #[cfg(feature = "std")]
+    {
+        matches!(
+            std::env::var("ZQ_JQ_COMPAT_PROFILE").ok().as_deref(),
+            Some("1.7") | Some("jq171") | Some("legacy")
+        )
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        false
+    }
 }
 
 /// Apply a regular expression to the given input value.
@@ -240,19 +254,15 @@ pub fn regex<'a>(s: &'a [u8], re: &'a Regex, flags: Flags, sm: (bool, bool)) -> 
         }
 
         if ma {
-            if end0 == beg0 {
-                out.push(Part::Matches(build_zero_width_match(
+            if end0 == beg0 && jq_compat_profile_is_171() {
+                out.push(Part::Matches(build_zero_width_match_legacy(
                     s,
                     &region,
                     &name_by_group,
                     beg0,
                 )));
             } else {
-                out.push(Part::Matches(build_non_zero_width_match(
-                    s,
-                    &region,
-                    &name_by_group,
-                )));
+                out.push(Part::Matches(build_match(s, &region, &name_by_group)));
             }
         }
 
@@ -294,11 +304,11 @@ mod tests {
     }
 
     #[test]
-    fn onig_zero_width_capture_offsets_match_jq_17() {
+    fn onig_zero_width_optional_capture_is_unmatched_like_jq() {
         let flags = Flags::new("g").expect("flags");
         let re = flags.regex("( )*").expect("regex");
         let parts = as_matches(regex(b"abc", &re, flags, (false, true)));
-        assert_eq!(parts[0][1].0, 0);
+        assert_eq!(parts[0][1].0, -1);
         assert_eq!(parts[0][1].1, 0);
         assert_eq!(parts[0][1].2, "");
     }

@@ -754,26 +754,61 @@ impl Val {
     fn jq_dump_string_trunc(&self, bufsize: usize) -> String {
         debug_assert!(bufsize > 0);
         let dumped = self.to_json();
-        let dumped_len = dumped.len();
-        let max = bufsize.saturating_sub(1);
-        let mut out = if dumped.len() > max {
-            dumped[..max].to_vec()
-        } else {
-            dumped
-        };
-        if dumped_len > max && bufsize >= 4 && out.len() >= 3 {
-            let n = out.len();
-            out[n - 1] = b'.';
-            out[n - 2] = b'.';
-            out[n - 3] = b'.';
+        if jq_compat_profile_is_171() {
+            let len = dumped.len();
+            let mut out = if len >= bufsize {
+                dumped[..bufsize].to_vec()
+            } else {
+                dumped.clone()
+            };
+            if out.len() == bufsize {
+                out.truncate(bufsize.saturating_sub(1));
+            }
+            if len > bufsize.saturating_sub(1) && bufsize >= 4 && out.len() >= 3 {
+                let n = out.len();
+                out[n - 1] = b'.';
+                out[n - 2] = b'.';
+                out[n - 3] = b'.';
+            }
+            return String::from_utf8_lossy(&out).into_owned();
         }
-        String::from_utf8_lossy(&out).into_owned()
+
+        let dumped_str = core::str::from_utf8(&dumped).expect("to_json() must be valid UTF-8");
+        let len = dumped.len();
+        if len > bufsize.saturating_sub(1) && bufsize >= 8 {
+            let delim = match dumped.first().copied() {
+                Some(b'"') => Some(b'"'),
+                Some(b'[') => Some(b']'),
+                Some(b'{') => Some(b'}'),
+                _ => None,
+            };
+            let mut l = bufsize - if delim.is_some() { 5 } else { 4 };
+            if l > len {
+                l = len;
+            }
+            while l > 0 && !dumped_str.is_char_boundary(l) {
+                l -= 1;
+            }
+
+            let mut out = Vec::with_capacity(bufsize.saturating_sub(1));
+            out.extend_from_slice(&dumped[..l]);
+            out.extend_from_slice(b"...");
+            if let Some(d) = delim {
+                out.push(d);
+            }
+            return String::from_utf8(out).expect("truncated dump must be valid UTF-8");
+        }
+
+        let max = bufsize.saturating_sub(1);
+        let mut l = core::cmp::min(len, max);
+        while l > 0 && !dumped_str.is_char_boundary(l) {
+            l -= 1;
+        }
+        dumped_str[..l].to_owned()
     }
 
     fn jq_value_repr(&self) -> String {
-        // jq's type_error paths use jv_dump_string_trunc() with a 15-byte buffer.
-        // Keep this width to preserve jq-compatible error messages.
-        self.jq_dump_string_trunc(15)
+        self.jq_dump_string_trunc(jq_type_error_bufsize())
     }
 
     fn jq_typed_value(&self) -> String {
@@ -1070,6 +1105,27 @@ impl Val {
         let mut buf = Vec::new();
         write_json_stack_safe(&mut buf, self).unwrap();
         buf
+    }
+}
+
+fn jq_type_error_bufsize() -> usize {
+    if jq_compat_profile_is_171() {
+        return 15;
+    }
+    30
+}
+
+fn jq_compat_profile_is_171() -> bool {
+    #[cfg(feature = "std")]
+    {
+        matches!(
+            std::env::var("ZQ_JQ_COMPAT_PROFILE").ok().as_deref(),
+            Some("1.7") | Some("jq171") | Some("legacy")
+        )
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        false
     }
 }
 

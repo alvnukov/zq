@@ -690,25 +690,83 @@ fn jq_truncate_dumped_string(s: &str, bufsize: usize) -> String {
         return String::new();
     }
     let bytes = s.as_bytes();
-    let max = bufsize.saturating_sub(1);
-    let mut out = if bytes.len() > max {
-        bytes[..max].to_vec()
-    } else {
-        bytes.to_vec()
-    };
-    if bytes.len() > max && bufsize >= 4 && out.len() >= 3 {
-        let n = out.len();
-        out[n - 1] = b'.';
-        out[n - 2] = b'.';
-        out[n - 3] = b'.';
+    let len = bytes.len();
+    if jq_compat_profile_is_171() {
+        let mut out = if len >= bufsize {
+            bytes[..bufsize].to_vec()
+        } else {
+            bytes.to_vec()
+        };
+        if out.len() == bufsize {
+            out.truncate(bufsize.saturating_sub(1));
+        }
+        if len > bufsize.saturating_sub(1) && bufsize >= 4 && out.len() >= 3 {
+            let n = out.len();
+            out[n - 1] = b'.';
+            out[n - 2] = b'.';
+            out[n - 3] = b'.';
+        }
+        return String::from_utf8_lossy(&out).into_owned();
     }
-    String::from_utf8_lossy(&out).into_owned()
+
+    if len > bufsize.saturating_sub(1) && bufsize >= 8 {
+        let delim = match bytes.first().copied() {
+            Some(b'"') => Some(b'"'),
+            Some(b'[') => Some(b']'),
+            Some(b'{') => Some(b'}'),
+            _ => None,
+        };
+        let mut l = bufsize - if delim.is_some() { 5 } else { 4 };
+        if l > len {
+            l = len;
+        }
+        while l > 0 && !s.is_char_boundary(l) {
+            l -= 1;
+        }
+
+        let mut out = Vec::with_capacity(bufsize.saturating_sub(1));
+        out.extend_from_slice(&bytes[..l]);
+        out.extend_from_slice(b"...");
+        if let Some(d) = delim {
+            out.push(d);
+        }
+        return String::from_utf8(out).expect("truncated dump must be valid UTF-8");
+    }
+
+    let max = bufsize.saturating_sub(1);
+    let mut l = core::cmp::min(len, max);
+    while l > 0 && !s.is_char_boundary(l) {
+        l -= 1;
+    }
+    s[..l].to_string()
 }
 
 #[cfg(feature = "format")]
 fn jq_type_error_dump(input: &str) -> String {
-    // jq uses jv_dump_string_trunc(..., bufsize=15) in type_error() paths.
-    jq_truncate_dumped_string(&json_quote(input), 15)
+    jq_truncate_dumped_string(&json_quote(input), jq_type_error_bufsize())
+}
+
+#[cfg(feature = "format")]
+fn jq_type_error_bufsize() -> usize {
+    if jq_compat_profile_is_171() {
+        return 15;
+    }
+    30
+}
+
+#[cfg(feature = "format")]
+fn jq_compat_profile_is_171() -> bool {
+    #[cfg(feature = "std")]
+    {
+        matches!(
+            std::env::var("ZQ_JQ_COMPAT_PROFILE").ok().as_deref(),
+            Some("1.7") | Some("jq171") | Some("legacy")
+        )
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        false
+    }
 }
 
 #[cfg(feature = "format")]

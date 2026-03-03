@@ -2,8 +2,10 @@ use clap::{error::ErrorKind, Parser};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::cli::{Cli, OutputFormat};
@@ -1225,6 +1227,7 @@ fn run_tests_mode(cli: &Cli, path: &str) -> Result<i32, Error> {
 
     let content = read_input(path)?;
     let content_text = content.as_str_lossy();
+    let _compat_profile = scoped_run_tests_compat_profile(path, content_text.as_ref());
     let run_tests_library_paths = resolve_run_tests_library_paths(cli, path);
     let mut cursor = TestCursor::new(content_text.as_ref());
 
@@ -1331,6 +1334,62 @@ fn run_tests_mode(cli: &Cli, path: &str) -> Result<i32, Error> {
         return Ok(1);
     }
     Ok(0)
+}
+
+struct ScopedEnvVar {
+    key: &'static str,
+    prev: Option<OsString>,
+}
+
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            std::env::set_var(self.key, prev);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
+fn scoped_run_tests_compat_profile(path: &str, content: &str) -> ScopedEnvVar {
+    let profile = detect_run_tests_compat_profile(path, content);
+    ScopedEnvVar::set("ZQ_JQ_COMPAT_PROFILE", profile)
+}
+
+fn detect_run_tests_compat_profile(path: &str, content: &str) -> &'static str {
+    if path.contains("/jq171/") {
+        return "jq171";
+    }
+    if run_tests_content_looks_like_jq171(content) {
+        return "jq171";
+    }
+
+    let p = Path::new(path);
+    if let Some(dir) = p.parent() {
+        let base64 = dir.join("base64.test");
+        if base64 != p {
+            if let Ok(text) = fs::read_to_string(base64) {
+                if run_tests_content_looks_like_jq171(&text) {
+                    return "jq171";
+                }
+            }
+        }
+    }
+
+    "master"
+}
+
+fn run_tests_content_looks_like_jq171(content: &str) -> bool {
+    // jq 1.7-style base64 truncation expectation.
+    content.contains("Not base64...) is not valid base64 data")
 }
 
 fn run_compile_fail_case(

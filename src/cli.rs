@@ -1,9 +1,20 @@
 use clap::{ArgAction, Parser, ValueEnum};
 
+const JQ_COMPAT_HELP: &str = "\
+jq compatibility options accepted by zq:
+      --arg name value      set $name to string value
+      --argjson name value  set $name to JSON value
+      --slurpfile name file set $name to array of JSON values from file
+      --rawfile name file   set $name to file contents as string
+      --args                consume remaining args as string values
+      --jsonargs            consume remaining args as JSON values
+";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "zq",
     about = "zq runs jq queries on JSON or YAML input",
+    after_help = JQ_COMPAT_HELP,
     version,
     args_override_self = true
 )]
@@ -103,7 +114,6 @@ pub struct Cli {
         long = "color-output",
         default_value_t = false,
         action = ArgAction::SetTrue,
-        hide = true,
         help = "Colorize JSON output"
     )]
     pub color_output: bool,
@@ -112,7 +122,6 @@ pub struct Cli {
         long = "monochrome-output",
         default_value_t = false,
         action = ArgAction::SetTrue,
-        hide = true,
         help = "Disable colorized JSON output"
     )]
     pub monochrome_output: bool,
@@ -178,7 +187,6 @@ pub struct Cli {
         long = "seq",
         default_value_t = false,
         action = ArgAction::SetTrue,
-        hide = true,
         help = "Use application/json-seq framing (jq compatibility, partial support)"
     )]
     pub seq: bool,

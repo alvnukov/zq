@@ -114,6 +114,12 @@ fn jq_upstream_suite() {
     assert!(has_git, "git is required for upstream jq suite");
     assert!(has_jq, "jq is required for upstream jq suite");
 
+    let run_tests_timeout = read_timeout("ZQ_JQ_RUN_TESTS_TIMEOUT_SECS", 900);
+    let shtest_timeout = read_timeout("ZQ_JQ_SHTEST_TIMEOUT_SECS", 3600);
+    if run_local_jq_clones(run_tests_timeout, shtest_timeout) {
+        return;
+    }
+
     let td = tempfile::TempDir::new().expect("tempdir");
     let jq_repo = td.path().join("jq");
     let jq_ref = resolve_jq_upstream_ref();
@@ -123,8 +129,6 @@ fn jq_upstream_suite() {
     let tests_dir = jq_repo.join("tests");
     let modules_dir = tests_dir.join("modules");
     let test_files = collect_test_files(&tests_dir);
-    let run_tests_timeout = read_timeout("ZQ_JQ_RUN_TESTS_TIMEOUT_SECS", 900);
-    let shtest_timeout = read_timeout("ZQ_JQ_SHTEST_TIMEOUT_SECS", 3600);
     assert!(
         !test_files.is_empty(),
         "no *.test files found in jq upstream"
@@ -222,6 +226,53 @@ fn clone_jq_repo(dst: &Path, jq_ref: Option<&str>) {
         "clone jq upstream",
         Duration::from_secs(120),
     );
+}
+
+fn run_local_jq_clones(run_tests_timeout: Duration, shtest_timeout: Duration) -> bool {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let clones = [root.join(".tmp/jq"), root.join(".tmp/jq171")];
+    let skip_shtest = std::env::var("ZQ_JQ_SKIP_SHTEST").ok().as_deref() == Some("1");
+    let mut ran_any = false;
+
+    for clone_root in clones {
+        let tests_dir = clone_root.join("tests");
+        if !tests_dir.is_dir() {
+            continue;
+        }
+        let test_files = collect_test_files(&tests_dir);
+        if test_files.is_empty() {
+            continue;
+        }
+
+        ran_any = true;
+        let modules_dir = tests_dir.join("modules");
+        eprintln!("running local jq suite from {}", clone_root.display());
+        run_test_files_sequential(test_files, &modules_dir, &tests_dir, run_tests_timeout);
+
+        let shtest = tests_dir.join("shtest");
+        if skip_shtest {
+            eprintln!(
+                "skip local jq shtest for {}: set ZQ_JQ_SKIP_SHTEST=0 (or unset) to run",
+                clone_root.display()
+            );
+            continue;
+        }
+        if !shtest.is_file() {
+            continue;
+        }
+        let ctx = format!("run local jq shtest via zq for {}", clone_root.display());
+        run_cmd(
+            Command::new("sh")
+                .arg(&shtest)
+                .env("JQ", zq_bin())
+                .env("PAGER", "less")
+                .current_dir(&tests_dir),
+            &ctx,
+            shtest_timeout,
+        );
+    }
+
+    ran_any
 }
 
 fn run_test_files_sequential(

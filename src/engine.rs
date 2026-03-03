@@ -94,7 +94,7 @@ pub fn try_run_jq_native_stream_with_paths_options<F>(
     query: &str,
     input_stream: &[JsonValue],
     run_options: RunOptions,
-    mut emit: F,
+    emit: F,
 ) -> Result<NativeStreamStatus, Error>
 where
     F: FnMut(JsonValue) -> Result<(), String>,
@@ -105,10 +105,12 @@ where
         crate::native_engine::RunOptions {
             null_input: run_options.null_input,
         },
-        |value| emit(value),
+        emit,
     ) {
         crate::native_engine::TryExecuteStream::Unsupported => Ok(NativeStreamStatus::Unsupported),
-        crate::native_engine::TryExecuteStream::Executed(Ok(())) => Ok(NativeStreamStatus::Executed),
+        crate::native_engine::TryExecuteStream::Executed(Ok(())) => {
+            Ok(NativeStreamStatus::Executed)
+        }
         crate::native_engine::TryExecuteStream::Executed(Err(err)) => {
             Err(Error::Query(crate::QueryError::Runtime(err)))
         }
@@ -125,6 +127,11 @@ pub fn parse_jq_input_values(
         crate::query::InputKind::JsonStream => Ok(parsed.values),
         crate::query::InputKind::YamlDocs => select_docs(parsed.values, doc_mode, tool),
     }
+}
+
+pub fn parse_jq_json_values_only(input: &str) -> Result<Vec<JsonValue>, Error> {
+    crate::query::parse_json_values_only(input)
+        .map_err(|e| Error::Query(crate::QueryError::Json(e)))
 }
 
 pub fn validate_jq_query(query: &str) -> Result<(), Error> {
@@ -149,7 +156,10 @@ impl PreparedJq {
     }
 }
 
-pub fn prepare_jq_query_with_paths(query: &str, library_path: &[String]) -> Result<PreparedJq, Error> {
+pub fn prepare_jq_query_with_paths(
+    query: &str,
+    library_path: &[String],
+) -> Result<PreparedJq, Error> {
     crate::query::prepare_query_with_paths(query, library_path)
         .map(|inner| PreparedJq { inner })
         .map_err(Error::Query)
@@ -276,7 +286,8 @@ pub fn format_query_error(tool: &str, input: &str, err: &crate::QueryError) -> S
                 "{tool}: error: Top-level program not given (try \".\")\n{tool}: 1 compile error"
             );
         }
-        if msg.starts_with("too many function parameters or local function definitions (max 4095)") {
+        if msg.starts_with("too many function parameters or local function definitions (max 4095)")
+        {
             return format!(
                 "{tool}: error: too many function parameters or local function definitions (max 4095)\n{tool}: 1 compile error"
             );
@@ -298,12 +309,15 @@ pub fn format_query_error(tool: &str, input: &str, err: &crate::QueryError) -> S
 fn format_json_parse_error(tool: &str, input: &str, err: &serde_json::Error) -> String {
     let raw = err.to_string();
     let mut col = err.column();
-    let message = if raw.starts_with("control character (\\u0000-\\u001F) found while parsing a string") {
+    let message = if raw
+        .starts_with("control character (\\u0000-\\u001F) found while parsing a string")
+    {
         // jq reports this one column later than serde_json.
         col = col.saturating_add(1);
         "Invalid string: control characters from U+0000 through U+001F must be escaped".to_string()
     } else if raw.starts_with("key must be a string") {
-        format_object_key_parse_error(input, err).unwrap_or_else(|| "key must be a string".to_string())
+        format_object_key_parse_error(input, err)
+            .unwrap_or_else(|| "key must be a string".to_string())
     } else if raw.starts_with("expected `:`") {
         "Objects must consist of key:value pairs".to_string()
     } else if raw.starts_with("EOF while parsing a string") {
@@ -577,12 +591,170 @@ mod tests {
     }
 
     #[test]
+    fn json_output_pretty_mode_matches_contract() {
+        let out = format_output_json_lines(&[serde_json::json!({"a": 1})], false, false)
+            .expect("pretty json output");
+        assert_eq!(out, "{\n  \"a\": 1\n}");
+
+        let out = format_output_json_lines(&[serde_json::json!(" ~\u{007f}")], false, false)
+            .expect("pretty json string output");
+        assert_eq!(out, "\" ~\\u007f\"");
+    }
+
+    #[test]
     fn format_runtime_error_matches_jq_prefix() {
         let msg = format_query_error(
             "jq",
             "",
             &crate::QueryError::Runtime("Cannot index object with number".to_string()),
         );
-        assert_eq!(msg, "jq: error (at <stdin>:1): Cannot index object with number");
+        assert_eq!(
+            msg,
+            "jq: error (at <stdin>:1): Cannot index object with number"
+        );
+    }
+
+    #[test]
+    fn engine_wrapper_helpers_cover_contract() {
+        assert!(validate_jq_query(".").is_ok());
+        assert!(validate_jq_query_with_paths(".", &[]).is_ok());
+        assert!(validate_jq_query("if").is_err());
+
+        let prepared = prepare_jq_query_with_paths(".", &[]).expect("prepare query");
+        assert_eq!(
+            prepared.run_jsonish_lines("1").expect("prepared run"),
+            vec!["1".to_string()]
+        );
+        assert_eq!(
+            prepared
+                .run_jsonish_lines_lenient("1")
+                .expect("prepared run lenient"),
+            vec!["1".to_string()]
+        );
+        assert_eq!(
+            run_jq_jsonish_lines(".", "1", &[]).expect("run jsonish lines"),
+            vec!["1".to_string()]
+        );
+        assert_eq!(
+            normalize_jsonish_line("{\"a\":1}").expect("normalize jsonish"),
+            "{\"a\":1}".to_string()
+        );
+        assert!(jsonish_equal("1", "1").expect("jsonish compare"));
+    }
+
+    #[test]
+    fn parse_json_only_and_doc_selection_contract() {
+        let values = parse_jq_json_values_only("1\n2\n").expect("parse json stream");
+        assert_eq!(values, vec![serde_json::json!(1), serde_json::json!(2)]);
+        assert!(parse_jq_json_values_only("a: 1\n").is_err());
+
+        let yaml_docs = "a: 1\n---\na: 2\n";
+        let selected = parse_jq_input_values(yaml_docs, DocMode::Index(1), "jq")
+            .expect("select yaml doc by index");
+        assert_eq!(selected, vec![serde_json::json!({"a": 2})]);
+
+        let out_of_range = parse_jq_input_values(yaml_docs, DocMode::Index(3), "jq")
+            .expect_err("doc index out of range");
+        assert!(matches!(
+            out_of_range,
+            Error::DocIndexOutOfRange {
+                tool: "jq",
+                index: 3,
+                total: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn stream_wrappers_and_output_formatters_contract() {
+        let out = run_jq_stream_with_paths_options(
+            ".",
+            vec![serde_json::json!(1)],
+            &[],
+            RunOptions { null_input: true },
+        )
+        .expect("run jq stream with null-input");
+        assert_eq!(out, vec![JsonValue::Null]);
+
+        let mut emitted = Vec::new();
+        let status = try_run_jq_native_stream_with_paths_options(
+            ".a",
+            &[serde_json::json!({"a": 1})],
+            RunOptions::default(),
+            |v| {
+                emitted.push(v);
+                Ok(())
+            },
+        )
+        .expect("native stream executes");
+        assert_eq!(status, NativeStreamStatus::Executed);
+        assert_eq!(emitted, vec![serde_json::json!(1)]);
+
+        let unsupported = try_run_jq_native_stream_with_paths_options(
+            "if . then . else . end",
+            &[serde_json::json!(1)],
+            RunOptions::default(),
+            |_| Ok(()),
+        )
+        .expect("unsupported native stream status");
+        assert_eq!(unsupported, NativeStreamStatus::Unsupported);
+
+        let sink_error = try_run_jq_native_stream_with_paths_options(
+            ".",
+            &[serde_json::json!(1)],
+            RunOptions::default(),
+            |_| Err("sink failed".to_string()),
+        )
+        .expect_err("sink error must surface");
+        assert_eq!(
+            format!("{sink_error}"),
+            "sink failed",
+            "native sink error must map to runtime error"
+        );
+
+        let json_out = format_output_json_lines(
+            &[
+                serde_json::json!("x"),
+                serde_json::json!(1),
+                serde_json::json!(" ~\u{007f}"),
+            ],
+            true,
+            true,
+        )
+        .expect("format json");
+        assert_eq!(json_out, "x\n1\n ~\u{7f}");
+
+        assert_eq!(
+            format_output_yaml_documents(&[]).expect("yaml empty"),
+            String::new()
+        );
+    }
+
+    #[test]
+    fn format_query_error_adds_context_and_compile_forms() {
+        let msg = format_query_error(
+            "jq",
+            "",
+            &crate::QueryError::Unsupported("Top-level program not given (try \".\")".to_string()),
+        );
+        assert!(msg.contains("jq: 1 compile error"));
+
+        let msg = format_query_error(
+            "jq",
+            "",
+            &crate::QueryError::Unsupported(
+                "too many function parameters or local function definitions (max 4095)".to_string(),
+            ),
+        );
+        assert!(msg.contains("jq: 1 compile error"));
+
+        let input = "line1\nline2\nline3\n";
+        let msg = format_query_error(
+            "jq",
+            input,
+            &crate::QueryError::Unsupported("boom at line 2, column 3".to_string()),
+        );
+        assert!(msg.contains("input context:"));
+        assert!(msg.contains(">     2 | line2"));
     }
 }

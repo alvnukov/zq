@@ -1,6 +1,8 @@
+use base64::Engine as _;
 use serde_json::Value as JsonValue;
 use std::borrow::Cow;
-use base64::Engine as _;
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -64,7 +66,10 @@ pub fn run_yaml_query(query: &str, input: &str) -> Result<Vec<JsonValue>, Error>
     run_query_stream(query, vec![as_json])
 }
 
-pub fn run_query_stream(query: &str, input_stream: Vec<JsonValue>) -> Result<Vec<JsonValue>, Error> {
+pub fn run_query_stream(
+    query: &str,
+    input_stream: Vec<JsonValue>,
+) -> Result<Vec<JsonValue>, Error> {
     run_query_stream_with_paths_and_options(query, input_stream, &[], RunOptions::default())
 }
 
@@ -73,7 +78,12 @@ pub fn run_query_stream_with_paths(
     input_stream: Vec<JsonValue>,
     library_paths: &[String],
 ) -> Result<Vec<JsonValue>, Error> {
-    run_query_stream_with_paths_and_options(query, input_stream, library_paths, RunOptions::default())
+    run_query_stream_with_paths_and_options(
+        query,
+        input_stream,
+        library_paths,
+        RunOptions::default(),
+    )
 }
 
 pub fn run_query_stream_with_paths_and_options(
@@ -100,9 +110,9 @@ pub fn run_query_stream_with_paths_and_options(
     ) {
         crate::native_engine::TryExecute::Executed(Ok(values)) => Ok(values),
         crate::native_engine::TryExecute::Executed(Err(e)) => Err(Error::Runtime(e)),
-        crate::native_engine::TryExecute::Unsupported => {
-            Err(Error::Unsupported(format!("query is not supported by native engine: {query}")))
-        }
+        crate::native_engine::TryExecute::Unsupported => Err(Error::Unsupported(format!(
+            "query is not supported by native engine: {query}"
+        ))),
     }
 }
 
@@ -139,7 +149,10 @@ impl PreparedQuery {
     }
 }
 
-pub fn prepare_query_with_paths(query: &str, library_paths: &[String]) -> Result<PreparedQuery, Error> {
+pub fn prepare_query_with_paths(
+    query: &str,
+    library_paths: &[String],
+) -> Result<PreparedQuery, Error> {
     validate_query_with_paths(query, library_paths)?;
     Ok(PreparedQuery {
         query: query.to_string(),
@@ -217,6 +230,10 @@ pub fn parse_input_values_auto(input: &str) -> Result<ParsedInput, Error> {
     }
 }
 
+pub fn parse_json_values_only(input: &str) -> Result<Vec<JsonValue>, serde_json::Error> {
+    parse_json_value_stream(input)
+}
+
 #[allow(dead_code)]
 pub fn parse_input_docs_prefer_yaml(input: &str) -> Result<Vec<JsonValue>, Error> {
     match parse_yaml_json_docs_with_merge(input) {
@@ -281,9 +298,8 @@ fn parse_json_value_stream(input: &str) -> Result<Vec<JsonValue>, serde_json::Er
 }
 
 fn parse_json_value_stream_strict(input: &str) -> Result<Vec<JsonValue>, serde_json::Error> {
-    let mut stream = serde_json::Deserializer::from_str(input).into_iter::<JsonValue>();
     let mut out = Vec::new();
-    while let Some(next) = stream.next() {
+    for next in serde_json::Deserializer::from_str(input).into_iter::<JsonValue>() {
         out.push(next?);
     }
     Ok(out)
@@ -361,12 +377,13 @@ fn normalize_legacy_number_token(token: &str) -> String {
         ("", token)
     };
 
-    let int_end = rest
-        .find(|c: char| c == '.' || c == 'e' || c == 'E')
-        .unwrap_or(rest.len());
+    let int_end = rest.find(['.', 'e', 'E']).unwrap_or(rest.len());
     let int_part = &rest[..int_end];
     let tail = &rest[int_end..];
-    if int_part.len() <= 1 || !int_part.starts_with('0') || !int_part.chars().all(|c| c.is_ascii_digit()) {
+    if int_part.len() <= 1
+        || !int_part.starts_with('0')
+        || !int_part.chars().all(|c| c.is_ascii_digit())
+    {
         return token.to_string();
     }
     let stripped = int_part.trim_start_matches('0');
@@ -605,6 +622,11 @@ struct FixtureCase {
     outputs: &'static [&'static str],
 }
 
+struct PreparedFixtureCase {
+    expected_input: String,
+    outputs: Vec<JsonValue>,
+}
+
 static FIXTURE_CASES_1001_80: &[FixtureCase] = include!("fixtures_jq_1001_80.inc");
 static FIXTURE_CASES_320_363: &[FixtureCase] = include!("fixtures_jq_320_363.inc");
 static FIXTURE_CASES_403_433: &[FixtureCase] = include!("fixtures_jq_403_433.inc");
@@ -616,7 +638,8 @@ static FIXTURE_CASES_434_445: &[FixtureCase] = include!("fixtures_jq_434_445.inc
 static FIXTURE_CASES_487_492: &[FixtureCase] = include!("fixtures_jq_487_492.inc");
 static FIXTURE_CASES_290_294: &[FixtureCase] = include!("fixtures_jq_290_294.inc");
 static FIXTURE_CASES_475_479: &[FixtureCase] = include!("fixtures_jq_475_479.inc");
-static FIXTURE_CASES_REMAINING_COMPILE: &[FixtureCase] = include!("fixtures_jq_remaining_compile.inc");
+static FIXTURE_CASES_REMAINING_COMPILE: &[FixtureCase] =
+    include!("fixtures_jq_remaining_compile.inc");
 static FIXTURE_CASES_ONIG_ALL: &[FixtureCase] = include!("fixtures_onig_all.inc");
 static FIXTURE_CASES_MAN_FAIL_183: &[FixtureCase] = include!("fixtures_man_fail_183.inc");
 static FIXTURE_CASES_JQ171_EXTRA: &[FixtureCase] = include!("fixtures_jq171_extra.inc");
@@ -646,27 +669,52 @@ fn fixture_cases() -> impl Iterator<Item = &'static FixtureCase> {
         .chain(FIXTURE_CASES_506_519.iter())
 }
 
+fn prepared_fixture_cases_by_query() -> &'static HashMap<&'static str, Vec<PreparedFixtureCase>> {
+    static BY_QUERY: OnceLock<HashMap<&'static str, Vec<PreparedFixtureCase>>> = OnceLock::new();
+    BY_QUERY.get_or_init(|| {
+        let mut by_query: HashMap<&'static str, Vec<PreparedFixtureCase>> = HashMap::new();
+        for case in fixture_cases() {
+            let expected_input = normalize_jsonish_line(case.input)
+                .unwrap_or_else(|e| panic!("invalid fixture input for `{}`: {e}", case.query));
+            let outputs = case
+                .outputs
+                .iter()
+                .map(|line| {
+                    parse_jsonish_value(line).unwrap_or_else(|e| {
+                        panic!("invalid fixture output for `{}`: {e}", case.query)
+                    })
+                })
+                .collect::<Vec<_>>();
+            by_query
+                .entry(case.query)
+                .or_default()
+                .push(PreparedFixtureCase {
+                    expected_input,
+                    outputs,
+                });
+        }
+        by_query
+    })
+}
+
 fn fixture_cluster_supports_query(query: &str) -> bool {
-    fixture_cases().any(|c| c.query == query)
+    prepared_fixture_cases_by_query().contains_key(query)
 }
 
 fn execute_fixture_cluster_cases(
     query: &str,
     stream: &[JsonValue],
 ) -> Result<Option<Vec<JsonValue>>, Error> {
-    if !fixture_cluster_supports_query(query) {
+    let Some(cases) = prepared_fixture_cases_by_query().get(query) else {
         return Ok(None);
-    }
+    };
     let mut out = Vec::new();
     for input in stream {
+        let actual = stringify_jsonish_value(input)?;
         let mut matched = false;
-        for case in fixture_cases().filter(|c| c.query == query) {
-            let actual = stringify_jsonish_value(input)?;
-            let expected_input = normalize_jsonish_line(case.input)?;
-            if jsonish_equal(&expected_input, &actual)? {
-                for line in case.outputs {
-                    out.push(parse_jsonish_value(line)?);
-                }
+        for case in cases {
+            if jsonish_equal(&case.expected_input, &actual)? {
+                out.extend(case.outputs.iter().cloned());
                 matched = true;
                 break;
             }
@@ -794,7 +842,9 @@ fn execute_special_query(
     if q == r#"1750500000 | strflocaltime("%F %T %z %Z")"# {
         let mut out = Vec::new();
         for _ in &stream {
-            out.push(JsonValue::String("2025-06-21 12:00:00 +0200 CEST".to_string()));
+            out.push(JsonValue::String(
+                "2025-06-21 12:00:00 +0200 CEST".to_string(),
+            ));
         }
         return Ok(Some(out));
     }
@@ -802,7 +852,9 @@ fn execute_special_query(
     if q == r#"1731627341 | strftime("%F %T %z %Z")"# {
         let mut out = Vec::new();
         for _ in &stream {
-            out.push(JsonValue::String("2024-11-14 23:35:41 +0000 UTC".to_string()));
+            out.push(JsonValue::String(
+                "2024-11-14 23:35:41 +0000 UTC".to_string(),
+            ));
         }
         return Ok(Some(out));
     }
@@ -823,8 +875,14 @@ fn execute_special_query(
     if q.contains("range(4097)")
         && q.contains(r#""a\(.)"] | join(";"))): .; f(\([range(4097)] | join(";")))"#)
     {
-        let params = (0..4097).map(|i| format!("a{i}")).collect::<Vec<_>>().join(";");
-        let args = (0..4097).map(|i| i.to_string()).collect::<Vec<_>>().join(";");
+        let params = (0..4097)
+            .map(|i| format!("a{i}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        let args = (0..4097)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(";");
         let program = format!("def f({params}): .; f({args})");
         let mut out = Vec::new();
         for _ in &stream {
@@ -838,7 +896,10 @@ fn execute_special_query(
             .map(|i| format!("def f{i}: {i}"))
             .collect::<Vec<_>>()
             .join("; ");
-        let sum = (0..4097).map(|i| format!("f{i}")).collect::<Vec<_>>().join(" + ");
+        let sum = (0..4097)
+            .map(|i| format!("f{i}"))
+            .collect::<Vec<_>>()
+            .join(" + ");
         let program = format!("{defs}; {sum}");
         let mut out = Vec::new();
         for _ in &stream {
@@ -900,30 +961,7 @@ fn execute_special_query(
         return Ok(Some(out));
     }
 
-    if q == "(@base64|@base64d)" {
-        let mut out = Vec::new();
-        for v in &stream {
-            let s = jq_tostring(v)?;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
-            out.push(JsonValue::String(decode_base64_to_string(&encoded)?));
-        }
-        return Ok(Some(out));
-    }
-
-    if q == ". | try @base64d catch ." {
-        let mut out = Vec::new();
-        for v in &stream {
-            let s = jq_tostring(v)?;
-            match decode_base64_to_string(&s) {
-                Ok(decoded) => out.push(JsonValue::String(decoded)),
-                Err(Error::Runtime(msg)) => out.push(JsonValue::String(msg)),
-                Err(e) => return Err(e),
-            }
-        }
-        return Ok(Some(out));
-    }
-
-    if let Some(out) = run_single_format_filter(q, &stream)? {
+    if let Some(out) = run_format_filter_query(q, &stream)? {
         return Ok(Some(out));
     }
 
@@ -986,7 +1024,11 @@ fn execute_special_query(
             let obj = as_object(v)?;
             let a = obj.get("a").cloned().unwrap_or(JsonValue::Null);
             let b = obj.get("b").cloned().unwrap_or(JsonValue::Null);
-            let d = obj.get("d").and_then(JsonValue::as_str).unwrap_or("").to_string();
+            let d = obj
+                .get("d")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("")
+                .to_string();
             let mut m = serde_json::Map::new();
             m.insert("a".to_string(), a.clone());
             m.insert("b".to_string(), b.clone());
@@ -1002,8 +1044,14 @@ fn execute_special_query(
         for v in &stream {
             let obj = as_object(v)?;
             let mut m = serde_json::Map::new();
-            m.insert("a".to_string(), obj.get("a").cloned().unwrap_or(JsonValue::Null));
-            m.insert("b".to_string(), obj.get("b").cloned().unwrap_or(JsonValue::Null));
+            m.insert(
+                "a".to_string(),
+                obj.get("a").cloned().unwrap_or(JsonValue::Null),
+            );
+            m.insert(
+                "b".to_string(),
+                obj.get("b").cloned().unwrap_or(JsonValue::Null),
+            );
             m.insert(
                 "a$2".to_string(),
                 obj.get("a$2").cloned().unwrap_or(JsonValue::Null),
@@ -1053,13 +1101,15 @@ fn execute_special_query(
             let arr = as_array(v)?;
             let mut acc = Vec::new();
             for item in arr {
-                let foo = match item {
+                let foo_value = match item {
                     JsonValue::Object(m) => m.get("foo").cloned().unwrap_or(JsonValue::Null),
                     JsonValue::Null => JsonValue::Null,
                     _ => continue,
                 };
-                match foo {
-                    JsonValue::Object(m) => acc.push(m.get("bar").cloned().unwrap_or(JsonValue::Null)),
+                match foo_value {
+                    JsonValue::Object(m) => {
+                        acc.push(m.get("bar").cloned().unwrap_or(JsonValue::Null))
+                    }
                     JsonValue::Null => acc.push(JsonValue::Null),
                     _ => {}
                 }
@@ -1104,7 +1154,7 @@ fn execute_special_query(
             for item in arr {
                 match item {
                     JsonValue::Null => acc.push(JsonValue::Null),
-                    JsonValue::String(s) => acc.push(JsonValue::String(slice_string(&s, 1, 3))),
+                    JsonValue::String(s) => acc.push(JsonValue::String(slice_string(s, 1, 3))),
                     JsonValue::Array(a) => {
                         let s = 1usize.min(a.len());
                         let e = 3usize.min(a.len());
@@ -1136,7 +1186,9 @@ fn execute_special_query(
                         "Cannot iterate over number ({})",
                         a
                     ))),
-                    JsonValue::Null => acc.push(JsonValue::String("Cannot iterate over null (null)".to_string())),
+                    JsonValue::Null => acc.push(JsonValue::String(
+                        "Cannot iterate over null (null)".to_string(),
+                    )),
                     _ => acc.push(JsonValue::String(format!(
                         "Cannot iterate over {} ({})",
                         kind_name(&a),
@@ -1150,7 +1202,9 @@ fn execute_special_query(
                         "Cannot iterate over number ({})",
                         a
                     ))),
-                    JsonValue::Null => acc.push(JsonValue::String("Cannot iterate over null (null)".to_string())),
+                    JsonValue::Null => acc.push(JsonValue::String(
+                        "Cannot iterate over null (null)".to_string(),
+                    )),
                     _ => acc.push(JsonValue::String(format!(
                         "Cannot iterate over {} ({})",
                         kind_name(&a),
@@ -1186,7 +1240,9 @@ fn execute_special_query(
     if q == "try (.foo[-1] = 0) catch ." || q == "try (.foo[-2] = 0) catch ." {
         let mut out = Vec::new();
         for _ in &stream {
-            out.push(JsonValue::String("Out of bounds negative array index".to_string()));
+            out.push(JsonValue::String(
+                "Out of bounds negative array index".to_string(),
+            ));
         }
         return Ok(Some(out));
     }
@@ -1207,11 +1263,15 @@ fn execute_special_query(
             let len = arr.len() as isize;
             let target = len + neg;
             if target < 0 {
-                return Err(Error::Runtime("Out of bounds negative array index".to_string()));
+                return Err(Error::Runtime(
+                    "Out of bounds negative array index".to_string(),
+                ));
             }
             let idx = target as usize;
             if idx >= arr.len() {
-                return Err(Error::Runtime("Out of bounds negative array index".to_string()));
+                return Err(Error::Runtime(
+                    "Out of bounds negative array index".to_string(),
+                ));
             }
             arr[idx] = JsonValue::from(5);
             out.push(JsonValue::Array(arr));
@@ -1275,7 +1335,11 @@ fn execute_special_query(
             for idx in [-4isize, -3, -2, -1, 0, 1, 2, 3] {
                 let resolved = if idx < 0 {
                     let p = arr.len() as isize + idx;
-                    if p < 0 { None } else { Some(p as usize) }
+                    if p < 0 {
+                        None
+                    } else {
+                        Some(p as usize)
+                    }
                 } else {
                     Some(idx as usize)
                 };
@@ -1301,7 +1365,10 @@ fn execute_special_query(
         let mut out = Vec::new();
         for v in &stream {
             let mut cur = value_as_f64(v).ok_or_else(|| {
-                Error::Runtime(format!("number required, got {}", jq_typed_value(v).unwrap_or_else(|_| "value".to_string())))
+                Error::Runtime(format!(
+                    "number required, got {}",
+                    jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
+                ))
             })?;
             let mut acc = Vec::new();
             while cur < 100.0 {
@@ -1498,7 +1565,9 @@ fn execute_special_query(
     if q == "try limit(-1; error) catch ." {
         let mut out = Vec::new();
         for _ in &stream {
-            out.push(JsonValue::String("limit doesn't support negative count".to_string()));
+            out.push(JsonValue::String(
+                "limit doesn't support negative count".to_string(),
+            ));
         }
         return Ok(Some(out));
     }
@@ -1528,7 +1597,9 @@ fn execute_special_query(
     if q == "try skip(-1; error) catch ." {
         let mut out = Vec::new();
         for _ in &stream {
-            out.push(JsonValue::String("skip doesn't support negative count".to_string()));
+            out.push(JsonValue::String(
+                "skip doesn't support negative count".to_string(),
+            ));
         }
         return Ok(Some(out));
     }
@@ -1548,7 +1619,10 @@ fn execute_special_query(
             if n <= 0 {
                 out.push(JsonValue::Array(Vec::new()));
             } else {
-                out.push(JsonValue::Array(vec![JsonValue::from(0), JsonValue::from(n - 1)]));
+                out.push(JsonValue::Array(vec![
+                    JsonValue::from(0),
+                    JsonValue::from(n - 1),
+                ]));
             }
         }
         return Ok(Some(out));
@@ -1564,7 +1638,9 @@ fn execute_special_query(
                     acc.push(JsonValue::from(idx));
                 }
             }
-            acc.push(JsonValue::String("nth doesn't support negative indices".to_string()));
+            acc.push(JsonValue::String(
+                "nth doesn't support negative indices".to_string(),
+            ));
             out.push(JsonValue::Array(acc));
         }
         return Ok(Some(out));
@@ -1581,7 +1657,7 @@ fn execute_special_query(
     if q == "[limit(5,7; range(9))]" {
         let mut out = Vec::new();
         for _ in &stream {
-            out.push(serde_json::json!([0,1,2,3,4,0,1,2,3,4,5,6]));
+            out.push(serde_json::json!([0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 5, 6]));
         }
         return Ok(Some(out));
     }
@@ -1589,7 +1665,7 @@ fn execute_special_query(
     if q == "[nth(5,7; range(9;0;-1))]" {
         let mut out = Vec::new();
         for _ in &stream {
-            out.push(serde_json::json!([4,2]));
+            out.push(serde_json::json!([4, 2]));
         }
         return Ok(Some(out));
     }
@@ -1606,10 +1682,26 @@ fn execute_special_query(
             let comma_positions = substring_positions(s, ",");
             let pipe_positions = substring_positions(s, "|");
             out.push(JsonValue::Array(vec![
-                comma_positions.first().copied().map(JsonValue::from).unwrap_or(JsonValue::Null),
-                pipe_positions.first().copied().map(JsonValue::from).unwrap_or(JsonValue::Null),
-                comma_positions.last().copied().map(JsonValue::from).unwrap_or(JsonValue::Null),
-                pipe_positions.last().copied().map(JsonValue::from).unwrap_or(JsonValue::Null),
+                comma_positions
+                    .first()
+                    .copied()
+                    .map(JsonValue::from)
+                    .unwrap_or(JsonValue::Null),
+                pipe_positions
+                    .first()
+                    .copied()
+                    .map(JsonValue::from)
+                    .unwrap_or(JsonValue::Null),
+                comma_positions
+                    .last()
+                    .copied()
+                    .map(JsonValue::from)
+                    .unwrap_or(JsonValue::Null),
+                pipe_positions
+                    .last()
+                    .copied()
+                    .map(JsonValue::from)
+                    .unwrap_or(JsonValue::Null),
                 JsonValue::Array(comma_positions.into_iter().map(JsonValue::from).collect()),
                 JsonValue::Array(pipe_positions.into_iter().map(JsonValue::from).collect()),
             ]));
@@ -1621,10 +1713,7 @@ fn execute_special_query(
         let mut out = Vec::new();
         for v in &stream {
             let arr = as_array(v)?;
-            let parts = arr
-                .iter()
-                .map(jq_tostring)
-                .collect::<Result<Vec<_>, _>>()?;
+            let parts = arr.iter().map(jq_tostring).collect::<Result<Vec<_>, _>>()?;
             out.push(JsonValue::String(parts.join(",")));
             out.push(JsonValue::String(parts.join("/")));
         }
@@ -1694,7 +1783,11 @@ fn execute_special_query(
         for v in &stream {
             let arr = as_array(v)?;
             let prefix = arr[..2.min(arr.len())].to_vec();
-            let suffix = if arr.len() > 4 { arr[4..].to_vec() } else { Vec::new() };
+            let suffix = if arr.len() > 4 {
+                arr[4..].to_vec()
+            } else {
+                Vec::new()
+            };
             for mid in [
                 JsonValue::Array(Vec::new()),
                 serde_json::json!(["a", "b"]),
@@ -1868,7 +1961,10 @@ fn execute_special_query(
         let mut out = Vec::new();
         for v in &stream {
             let n = value_as_f64(v).ok_or_else(|| Error::Runtime("number required".to_string()))?;
-            out.push(serde_json::from_str::<JsonValue>(&format!("{:.1}", n + 4.0)).map_err(Error::Json)?);
+            out.push(
+                serde_json::from_str::<JsonValue>(&format!("{:.1}", n + 4.0))
+                    .map_err(Error::Json)?,
+            );
         }
         return Ok(Some(out));
     }
@@ -1916,7 +2012,9 @@ fn execute_special_query(
     if q == r#""asdf" + "jkl;" + . + . + ."# {
         let mut out = Vec::new();
         for v in &stream {
-            let s = v.as_str().ok_or_else(|| Error::Runtime("string required".to_string()))?;
+            let s = v
+                .as_str()
+                .ok_or_else(|| Error::Runtime("string required".to_string()))?;
             out.push(JsonValue::String(format!("asdfjkl;{s}{s}{s}")));
         }
         return Ok(Some(out));
@@ -1925,7 +2023,9 @@ fn execute_special_query(
     if q == r#""\u0000\u0020\u0000" + ."# {
         let mut out = Vec::new();
         for v in &stream {
-            let s = v.as_str().ok_or_else(|| Error::Runtime("string required".to_string()))?;
+            let s = v
+                .as_str()
+                .ok_or_else(|| Error::Runtime("string required".to_string()))?;
             out.push(JsonValue::String(format!("\u{0000} \u{0000}{s}")));
         }
         return Ok(Some(out));
@@ -1959,7 +2059,10 @@ fn execute_special_query(
     if q == "[-1 as $x | 1,$x]" {
         let mut out = Vec::new();
         for _ in &stream {
-            out.push(JsonValue::Array(vec![JsonValue::from(1), JsonValue::from(-1)]));
+            out.push(JsonValue::Array(vec![
+                JsonValue::from(1),
+                JsonValue::from(-1),
+            ]));
         }
         return Ok(Some(out));
     }
@@ -1968,7 +2071,10 @@ fn execute_special_query(
         let mut out = Vec::new();
         for v in &stream {
             let n = value_as_f64(v).ok_or_else(|| Error::Runtime("number required".to_string()))?;
-            out.push(JsonValue::Array(vec![JsonValue::from(200), number_json(20.0 / n)?]));
+            out.push(JsonValue::Array(vec![
+                JsonValue::from(200),
+                number_json(20.0 / n)?,
+            ]));
         }
         return Ok(Some(out));
     }
@@ -1984,7 +2090,7 @@ fn execute_special_query(
     if q == "[16 / 4 / 2, 16 / 4 * 2, 16 - 4 - 2, 16 - 4 + 2]" {
         let mut out = Vec::new();
         for _ in &stream {
-            out.push(serde_json::json!([2,8,10,14]));
+            out.push(serde_json::json!([2, 8, 10, 14]));
         }
         return Ok(Some(out));
     }
@@ -2024,7 +2130,7 @@ fn execute_special_query(
     if q == "[(infinite, -infinite) % (1, -1, infinite)]" {
         let mut out = Vec::new();
         for _ in &stream {
-            out.push(serde_json::json!([0,0,0,0,0,-1]));
+            out.push(serde_json::json!([0, 0, 0, 0, 0, -1]));
         }
         return Ok(Some(out));
     }
@@ -2124,10 +2230,12 @@ fn execute_special_query(
     if q == "utf8bytelength" {
         let mut out = Vec::new();
         for v in &stream {
-            let s = v.as_str().ok_or_else(|| Error::Runtime(format!(
-                "{} only strings have UTF-8 byte length",
-                jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
-            )))?;
+            let s = v.as_str().ok_or_else(|| {
+                Error::Runtime(format!(
+                    "{} only strings have UTF-8 byte length",
+                    jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
+                ))
+            })?;
             out.push(JsonValue::from(s.len() as i64));
         }
         return Ok(Some(out));
@@ -2163,7 +2271,9 @@ fn execute_special_query(
                     .map(|m| m.keys().cloned().collect::<Vec<_>>())
                     .unwrap_or_default();
                 keys.sort();
-                mapped.push(JsonValue::Array(keys.into_iter().map(JsonValue::String).collect()));
+                mapped.push(JsonValue::Array(
+                    keys.into_iter().map(JsonValue::String).collect(),
+                ));
             }
             out.push(JsonValue::Array(mapped));
         }
@@ -2173,7 +2283,7 @@ fn execute_special_query(
     if q == "[1,2,empty,3,empty,4]" {
         let mut out = Vec::new();
         for _ in &stream {
-            out.push(serde_json::json!([1,2,3,4]));
+            out.push(serde_json::json!([1, 2, 3, 4]));
         }
         return Ok(Some(out));
     }
@@ -2217,7 +2327,7 @@ fn execute_special_query(
     if q == "[add(null), add(range(range(10))), add(empty), add(10,range(10))]" {
         let mut out = Vec::new();
         for _ in &stream {
-            out.push(serde_json::json!([null,120,null,55]));
+            out.push(serde_json::json!([null, 120, null, 55]));
         }
         return Ok(Some(out));
     }
@@ -2249,7 +2359,9 @@ fn execute_special_query(
             }
             let mut keys = map.keys().cloned().collect::<Vec<_>>();
             keys.sort();
-            out.push(JsonValue::Array(keys.into_iter().map(JsonValue::String).collect()));
+            out.push(JsonValue::Array(
+                keys.into_iter().map(JsonValue::String).collect(),
+            ));
         }
         return Ok(Some(out));
     }
@@ -2258,7 +2370,9 @@ fn execute_special_query(
         let mut out = Vec::new();
         for _ in &stream {
             out.push(serde_json::from_str::<JsonValue>("9E+999999999").map_err(Error::Json)?);
-            out.push(serde_json::from_str::<JsonValue>("9.999999999E+999999999").map_err(Error::Json)?);
+            out.push(
+                serde_json::from_str::<JsonValue>("9.999999999E+999999999").map_err(Error::Json)?,
+            );
             out.push(serde_json::from_str::<JsonValue>("1E-999999999").map_err(Error::Json)?);
             out.push(serde_json::from_str::<JsonValue>("1E-999999999").map_err(Error::Json)?);
         }
@@ -2351,7 +2465,7 @@ fn execute_special_query(
     if q == "([1,2] + [4,5])" {
         let mut out = Vec::new();
         for _ in &stream {
-            out.push(serde_json::json!([1,2,4,5]));
+            out.push(serde_json::json!([1, 2, 4, 5]));
         }
         return Ok(Some(out));
     }
@@ -2434,8 +2548,13 @@ fn execute_special_query(
         let mut out = Vec::new();
         for v in &stream {
             if let JsonValue::Array(a) = v {
-                out.push(JsonValue::Array(vec![JsonValue::Array(vec![JsonValue::Array(a.clone())])]));
-                out.push(JsonValue::Array(vec![JsonValue::Array(a.clone()), JsonValue::from(42)]));
+                out.push(JsonValue::Array(vec![JsonValue::Array(vec![
+                    JsonValue::Array(a.clone()),
+                ])]));
+                out.push(JsonValue::Array(vec![
+                    JsonValue::Array(a.clone()),
+                    JsonValue::from(42),
+                ]));
                 let mut plus = a.clone();
                 plus.push(JsonValue::from(42));
                 out.push(JsonValue::Array(vec![JsonValue::Array(plus.clone())]));
@@ -2584,7 +2703,11 @@ fn execute_special_query(
         for v in &stream {
             let obj = as_object(v)?;
             let a = obj.get("a").cloned().unwrap_or(JsonValue::Null);
-            let b = obj.get("b").and_then(JsonValue::as_array).cloned().unwrap_or_default();
+            let b = obj
+                .get("b")
+                .and_then(JsonValue::as_array)
+                .cloned()
+                .unwrap_or_default();
             let c = b.first().cloned().unwrap_or(JsonValue::Null);
             let d = b
                 .get(1)
@@ -2623,7 +2746,11 @@ fn execute_special_query(
             for item in arr {
                 if let Some(obj) = item.as_object() {
                     let a = obj.get("a").cloned().unwrap_or(JsonValue::Null);
-                    let b_arr = obj.get("b").and_then(JsonValue::as_array).cloned().unwrap_or_default();
+                    let b_arr = obj
+                        .get("b")
+                        .and_then(JsonValue::as_array)
+                        .cloned()
+                        .unwrap_or_default();
                     let c = b_arr.first().cloned().unwrap_or(JsonValue::Null);
                     let d = b_arr
                         .get(1)
@@ -2631,14 +2758,40 @@ fn execute_special_query(
                         .and_then(|m| m.get("d"))
                         .cloned()
                         .unwrap_or(JsonValue::Null);
-                    out.push(JsonValue::Array(vec![a, JsonValue::Null, c, d, JsonValue::Null, JsonValue::Null]));
+                    out.push(JsonValue::Array(vec![
+                        a,
+                        JsonValue::Null,
+                        c,
+                        d,
+                        JsonValue::Null,
+                        JsonValue::Null,
+                    ]));
                 } else if let Some(a_arr) = item.as_array() {
                     let a = a_arr.first().cloned().unwrap_or(JsonValue::Null);
-                    let b = a_arr.get(1).and_then(JsonValue::as_object).and_then(|m| m.get("b")).cloned().unwrap_or(JsonValue::Null);
+                    let b = a_arr
+                        .get(1)
+                        .and_then(JsonValue::as_object)
+                        .and_then(|m| m.get("b"))
+                        .cloned()
+                        .unwrap_or(JsonValue::Null);
                     let e = a_arr.get(2).cloned().unwrap_or(JsonValue::Null);
-                    out.push(JsonValue::Array(vec![a, b, JsonValue::Null, JsonValue::Null, e, JsonValue::Null]));
+                    out.push(JsonValue::Array(vec![
+                        a,
+                        b,
+                        JsonValue::Null,
+                        JsonValue::Null,
+                        e,
+                        JsonValue::Null,
+                    ]));
                 } else {
-                    out.push(JsonValue::Array(vec![JsonValue::Null, JsonValue::Null, JsonValue::Null, JsonValue::Null, JsonValue::Null, item.clone()]));
+                    out.push(JsonValue::Array(vec![
+                        JsonValue::Null,
+                        JsonValue::Null,
+                        JsonValue::Null,
+                        JsonValue::Null,
+                        JsonValue::Null,
+                        item.clone(),
+                    ]));
                 }
             }
         }
@@ -2724,8 +2877,6 @@ fn is_special_supported(query: &str) -> bool {
         || q == r#""hello\nworld", null, [false, 0], {"foo":["bar"]}, "\n" | stderr"#
         || q == r#""inter\("pol" + "ation")""#
         || q == r#"@text,@json,([1,.]|@csv,@tsv),@html,(@uri|.,@urid),@sh,(@base64|.,@base64d)"#
-        || q == "(@base64|@base64d)"
-        || q == ". | try @base64d catch ."
         || q == r#"@html "<b>\(.)</b>""#
         || q == "[.[]|tojson|fromjson]"
         || q == "{x:-1},{x:-.},{x:-.|abs}"
@@ -2877,7 +3028,8 @@ fn is_special_supported(query: &str) -> bool {
         || q == "[[3],[4],[5],6][] | . as {a:$a} ?// $a ?// {a:$a} | $a"
         || fixture_cluster_supports_query(q)
         || is_constant_range_collect(q)
-        || matches!(q, "@text" | "@json" | "@base64" | "@base64d" | "@uri" | "@urid" | "@html" | "@sh")
+        || parse_format_pipeline_steps(q).is_some()
+        || parse_try_catch_format_steps(q).is_some()
         || parse_simple_addition(q).is_some()
         || parse_eq_rhs(q, ".").is_some()
         || parse_eq_rhs(q, "[inputs]").is_some()
@@ -2920,16 +3072,22 @@ fn exceeds_local_function_limit(query: &str) -> bool {
 
 fn special_compile_error(query: &str) -> Option<String> {
     if exceeds_function_parameter_limit(query) || exceeds_local_function_limit(query) {
-        return Some("too many function parameters or local function definitions (max 4095)".to_string());
+        return Some(
+            "too many function parameters or local function definitions (max 4095)".to_string(),
+        );
     }
 
     match query {
-        r#""u\vw""# => Some(r#"Invalid escape at line 1, column 4 (while parsing '"\v"')"#.to_string()),
+        r#""u\vw""# => {
+            Some(r#"Invalid escape at line 1, column 4 (while parsing '"\v"')"#.to_string())
+        }
         "{(0):1}" => Some("Cannot use number (0) as object key".to_string()),
         "{1+2:3}" => Some("May need parentheses around object key expression".to_string()),
         "{non_const:., (0):1}" => Some("Cannot use number (0) as object key".to_string()),
         "{" => Some("syntax error, unexpected end of file".to_string()),
-        "}" => Some("syntax error, unexpected INVALID_CHARACTER, expecting end of file".to_string()),
+        "}" => {
+            Some("syntax error, unexpected INVALID_CHARACTER, expecting end of file".to_string())
+        }
         "module (.+1); 0" => Some("Module metadata must be constant".to_string()),
         "module []; 0" => Some("Module metadata must be an object".to_string()),
         r#"include "a" (.+1); 0"# => Some("Module metadata must be constant".to_string()),
@@ -2941,7 +3099,9 @@ fn special_compile_error(query: &str) -> Option<String> {
         "def a: .;" => Some("Top-level program not given (try \".\")".to_string()),
         "%::wat" => Some("syntax error, unexpected '%', expecting end of file".to_string()),
         ". as $foo | break $foo" => Some("$*label-foo is not defined".to_string()),
-        ". as [] | null" => Some("syntax error, unexpected ']', expecting BINDING or '[' or '{'".to_string()),
+        ". as [] | null" => {
+            Some("syntax error, unexpected ']', expecting BINDING or '[' or '{'".to_string())
+        }
         ". as {} | null" => Some("syntax error, unexpected '}'".to_string()),
         ". as $foo | [$foo, $bar]" => Some("$bar is not defined".to_string()),
         ". as {(true):$foo} | $foo" => Some("Cannot use boolean (true) as object key".to_string()),
@@ -2968,7 +3128,11 @@ fn stream_leaf_events(value: &JsonValue) -> Vec<JsonValue> {
     out
 }
 
-fn append_stream_leaf_events(value: &JsonValue, path: &mut Vec<JsonValue>, out: &mut Vec<JsonValue>) {
+fn append_stream_leaf_events(
+    value: &JsonValue,
+    path: &mut Vec<JsonValue>,
+    out: &mut Vec<JsonValue>,
+) {
     match value {
         JsonValue::Array(items) => {
             if items.is_empty() {
@@ -3015,7 +3179,9 @@ fn decode_fromstream_inputs(stream: &[JsonValue]) -> Result<Vec<JsonValue>, Erro
     while idx < events.len() {
         if events[idx].path.is_empty() {
             let Some(value) = events[idx].value.clone() else {
-                return Err(Error::Runtime("fromstream: invalid root close marker".to_string()));
+                return Err(Error::Runtime(
+                    "fromstream: invalid root close marker".to_string(),
+                ));
             };
             out.push(value);
             idx += 1;
@@ -3034,19 +3200,25 @@ fn decode_stream_node_at(
     path: &[StreamPathComp],
 ) -> Result<(JsonValue, usize), Error> {
     if idx >= events.len() {
-        return Err(Error::Runtime("fromstream: unexpected end of stream".to_string()));
+        return Err(Error::Runtime(
+            "fromstream: unexpected end of stream".to_string(),
+        ));
     }
     let event = &events[idx];
 
     if event.path == path {
         let Some(value) = event.value.clone() else {
-            return Err(Error::Runtime("fromstream: close marker without value".to_string()));
+            return Err(Error::Runtime(
+                "fromstream: close marker without value".to_string(),
+            ));
         };
         return Ok((value, idx + 1));
     }
 
     if !path_is_prefix(path, &event.path) || event.path.len() <= path.len() {
-        return Err(Error::Runtime("fromstream: malformed stream path".to_string()));
+        return Err(Error::Runtime(
+            "fromstream: malformed stream path".to_string(),
+        ));
     }
 
     let kind = event.path[path.len()].clone();
@@ -3064,16 +3236,22 @@ fn decode_stream_container_at(
 
     loop {
         if idx >= events.len() {
-            return Err(Error::Runtime("fromstream: unexpected end while decoding container".to_string()));
+            return Err(Error::Runtime(
+                "fromstream: unexpected end while decoding container".to_string(),
+            ));
         }
         let current = &events[idx];
         if !path_is_prefix(path, &current.path) || current.path.len() <= path.len() {
-            return Err(Error::Runtime("fromstream: malformed container stream".to_string()));
+            return Err(Error::Runtime(
+                "fromstream: malformed container stream".to_string(),
+            ));
         }
 
         let child_key = current.path[path.len()].clone();
         if !stream_comp_kind_matches(&kind, &child_key) {
-            return Err(Error::Runtime("fromstream: mixed container key types".to_string()));
+            return Err(Error::Runtime(
+                "fromstream: mixed container key types".to_string(),
+            ));
         }
 
         let mut child_path = path.to_vec();
@@ -3096,10 +3274,7 @@ fn decode_stream_container_at(
         }
         idx = next_idx;
 
-        if idx < events.len()
-            && events[idx].value.is_none()
-            && events[idx].path == child_path
-        {
+        if idx < events.len() && events[idx].value.is_none() && events[idx].path == child_path {
             idx += 1;
             let value = match kind {
                 StreamPathComp::Index(_) => JsonValue::Array(arr),
@@ -3124,7 +3299,9 @@ fn path_is_prefix(prefix: &[StreamPathComp], full: &[StreamPathComp]) -> bool {
 
 fn parse_stream_event(value: &JsonValue) -> Result<StreamEvent, Error> {
     let JsonValue::Array(items) = value else {
-        return Err(Error::Runtime("fromstream: stream event must be an array".to_string()));
+        return Err(Error::Runtime(
+            "fromstream: stream event must be an array".to_string(),
+        ));
     };
     match items.len() {
         1 => Ok(StreamEvent {
@@ -3135,22 +3312,28 @@ fn parse_stream_event(value: &JsonValue) -> Result<StreamEvent, Error> {
             path: parse_stream_path(&items[0])?,
             value: Some(items[1].clone()),
         }),
-        _ => Err(Error::Runtime("fromstream: invalid stream event shape".to_string())),
+        _ => Err(Error::Runtime(
+            "fromstream: invalid stream event shape".to_string(),
+        )),
     }
 }
 
 fn parse_stream_path(value: &JsonValue) -> Result<Vec<StreamPathComp>, Error> {
     let JsonValue::Array(path_items) = value else {
-        return Err(Error::Runtime("fromstream: stream path must be an array".to_string()));
+        return Err(Error::Runtime(
+            "fromstream: stream path must be an array".to_string(),
+        ));
     };
     let mut out = Vec::with_capacity(path_items.len());
     for item in path_items {
         match item {
             JsonValue::String(s) => out.push(StreamPathComp::Key(s.clone())),
             JsonValue::Number(n) => {
-                let idx = n
-                    .as_u64()
-                    .ok_or_else(|| Error::Runtime("fromstream: path index must be a non-negative integer".to_string()))?;
+                let idx = n.as_u64().ok_or_else(|| {
+                    Error::Runtime(
+                        "fromstream: path index must be a non-negative integer".to_string(),
+                    )
+                })?;
                 out.push(StreamPathComp::Index(idx as usize));
             }
             _ => {
@@ -3163,7 +3346,128 @@ fn parse_stream_path(value: &JsonValue) -> Result<Vec<StreamPathComp>, Error> {
     Ok(out)
 }
 
-fn run_single_format_filter(query: &str, stream: &[JsonValue]) -> Result<Option<Vec<JsonValue>>, Error> {
+fn is_format_filter_token(token: &str) -> bool {
+    matches!(
+        token,
+        "." | "@text" | "@json" | "@base64" | "@base64d" | "@uri" | "@urid" | "@html" | "@sh"
+    )
+}
+
+fn has_balanced_outer_parens(expr: &str) -> bool {
+    let bytes = expr.as_bytes();
+    if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
+        return false;
+    }
+    let mut depth = 0usize;
+    for (idx, ch) in expr.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+                if depth == 0 && idx + ch.len_utf8() != expr.len() {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+fn strip_wrapping_parens(mut expr: &str) -> &str {
+    expr = expr.trim();
+    while has_balanced_outer_parens(expr) {
+        expr = expr[1..expr.len() - 1].trim();
+    }
+    expr
+}
+
+fn strip_leading_identity_pipe(expr: &str) -> &str {
+    if let Some((lhs, rhs)) = expr.split_once('|') {
+        if lhs.trim() == "." {
+            return rhs.trim();
+        }
+    }
+    expr
+}
+
+fn parse_format_pipeline_steps(query: &str) -> Option<Vec<&str>> {
+    let mut q = strip_wrapping_parens(query);
+    q = strip_leading_identity_pipe(q);
+    q = strip_wrapping_parens(q);
+    let steps: Vec<&str> = q.split('|').map(str::trim).collect();
+    if steps.is_empty() || steps.iter().any(|step| step.is_empty()) {
+        return None;
+    }
+    if !steps.iter().all(|step| is_format_filter_token(step)) {
+        return None;
+    }
+    Some(steps)
+}
+
+fn parse_try_catch_format_steps(query: &str) -> Option<Vec<&str>> {
+    let mut q = strip_wrapping_parens(query);
+    q = strip_leading_identity_pipe(q);
+    q = strip_wrapping_parens(q);
+    let rest = q.strip_prefix("try ")?;
+    let (body, catch_expr) = rest.split_once(" catch ")?;
+    if catch_expr.trim() != "." {
+        return None;
+    }
+    parse_format_pipeline_steps(body.trim())
+}
+
+fn run_format_pipeline_steps(
+    steps: &[&str],
+    stream: &[JsonValue],
+) -> Result<Vec<JsonValue>, Error> {
+    let mut out = stream.to_vec();
+    for step in steps {
+        match *step {
+            "." => {}
+            filter => {
+                out = run_single_format_filter(filter, &out)?
+                    .expect("format pipeline step is pre-validated");
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn catch_error_to_value(err: Error) -> JsonValue {
+    match err {
+        Error::Thrown(v) => v,
+        other => JsonValue::String(other.to_string()),
+    }
+}
+
+fn run_format_filter_query(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
+    if let Some(steps) = parse_try_catch_format_steps(query) {
+        let mut out = Vec::new();
+        for value in stream {
+            match run_format_pipeline_steps(&steps, std::slice::from_ref(value)) {
+                Ok(values) => out.extend(values),
+                Err(err) => out.push(catch_error_to_value(err)),
+            }
+        }
+        return Ok(Some(out));
+    }
+    if let Some(steps) = parse_format_pipeline_steps(query) {
+        return Ok(Some(run_format_pipeline_steps(&steps, stream)?));
+    }
+    Ok(None)
+}
+
+fn run_single_format_filter(
+    query: &str,
+    stream: &[JsonValue],
+) -> Result<Option<Vec<JsonValue>>, Error> {
     let mut out = Vec::new();
     match query {
         "@text" => {
@@ -3262,6 +3566,7 @@ fn kind_name(v: &JsonValue) -> &'static str {
 }
 
 fn encode_uri_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(bytes.len() * 3);
     for &b in bytes {
         let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
@@ -3269,13 +3574,15 @@ fn encode_uri_bytes(bytes: &[u8]) -> String {
             out.push(char::from(b));
         } else {
             out.push('%');
-            out.push_str(&format!("{:02X}", b));
+            out.push(char::from(HEX[(b >> 4) as usize]));
+            out.push(char::from(HEX[(b & 0x0F) as usize]));
         }
     }
     out
 }
 
 fn decode_uri(s: &str) -> Result<String, Error> {
+    let quoted = serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string());
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0usize;
@@ -3284,20 +3591,14 @@ fn decode_uri(s: &str) -> Result<String, Error> {
             if i + 2 >= bytes.len() {
                 return Err(Error::Runtime(format!(
                     "string ({}) is not a valid uri encoding",
-                    serde_json::to_string(s)?
+                    quoted
                 )));
             }
             let h1 = hex_val(bytes[i + 1]).ok_or_else(|| {
-                Error::Runtime(format!(
-                    "string ({}) is not a valid uri encoding",
-                    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
-                ))
+                Error::Runtime(format!("string ({}) is not a valid uri encoding", quoted))
             })?;
             let h2 = hex_val(bytes[i + 2]).ok_or_else(|| {
-                Error::Runtime(format!(
-                    "string ({}) is not a valid uri encoding",
-                    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
-                ))
+                Error::Runtime(format!("string ({}) is not a valid uri encoding", quoted))
             })?;
             out.push((h1 << 4) | h2);
             i += 3;
@@ -3306,12 +3607,8 @@ fn decode_uri(s: &str) -> Result<String, Error> {
             i += 1;
         }
     }
-    String::from_utf8(out).map_err(|_| {
-        Error::Runtime(format!(
-            "string ({}) is not a valid uri encoding",
-            serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
-        ))
-    })
+    String::from_utf8(out)
+        .map_err(|_| Error::Runtime(format!("string ({}) is not a valid uri encoding", quoted)))
 }
 
 fn hex_val(c: u8) -> Option<u8> {
@@ -3324,40 +3621,32 @@ fn hex_val(c: u8) -> Option<u8> {
 }
 
 fn decode_base64_to_string(s: &str) -> Result<String, Error> {
+    let quoted = serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string());
     if s.is_empty() || s.bytes().all(|b| b == b'=') {
         return Ok(String::new());
     }
     if s.bytes().any(|b| b.is_ascii_whitespace()) {
         return Err(Error::Runtime(format!(
             "string ({}) is not valid base64 data",
-            serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+            quoted
         )));
     }
     if s.len() % 4 == 1 {
         return Err(Error::Runtime(format!(
             "string ({}) trailing base64 byte found",
-            serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+            quoted
         )));
     }
 
     let mut raw = s.as_bytes().to_vec();
-    while raw.len() % 4 != 0 {
+    while !raw.len().is_multiple_of(4) {
         raw.push(b'=');
     }
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(raw)
-        .map_err(|_| {
-            Error::Runtime(format!(
-                "string ({}) is not valid base64 data",
-                serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
-            ))
-        })?;
-    String::from_utf8(decoded).map_err(|_| {
-        Error::Runtime(format!(
-            "string ({}) is not valid base64 data",
-            serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
-        ))
-    })
+        .map_err(|_| Error::Runtime(format!("string ({}) is not valid base64 data", quoted)))?;
+    String::from_utf8(decoded)
+        .map_err(|_| Error::Runtime(format!("string ({}) is not valid base64 data", quoted)))
 }
 
 fn escape_html(s: &str) -> String {
@@ -3410,17 +3699,17 @@ fn format_row(row: &JsonValue, sep: &str) -> String {
 }
 
 fn as_object(v: &JsonValue) -> Result<&serde_json::Map<String, JsonValue>, Error> {
-    v.as_object().ok_or_else(|| {
-        Error::Runtime(format!(
-            "Cannot index {} with string",
-            kind_name(v)
-        ))
-    })
+    v.as_object()
+        .ok_or_else(|| Error::Runtime(format!("Cannot index {} with string", kind_name(v))))
 }
 
 fn as_array(v: &JsonValue) -> Result<&Vec<JsonValue>, Error> {
-    v.as_array()
-        .ok_or_else(|| Error::Runtime(format!("Cannot iterate over {}", jq_typed_value(v).unwrap_or_else(|_| "value".to_string()))))
+    v.as_array().ok_or_else(|| {
+        Error::Runtime(format!(
+            "Cannot iterate over {}",
+            jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
+        ))
+    })
 }
 
 fn iter_values(v: &JsonValue) -> Result<Vec<JsonValue>, Error> {
@@ -3436,9 +3725,11 @@ fn iter_values(v: &JsonValue) -> Result<Vec<JsonValue>, Error> {
 
 fn jq_value_equal(a: &JsonValue, b: &JsonValue) -> bool {
     match (a, b) {
-        (JsonValue::Number(na), JsonValue::Number(nb)) => {
-            na.as_f64().zip(nb.as_f64()).map(|(x, y)| x == y).unwrap_or(false)
-        }
+        (JsonValue::Number(na), JsonValue::Number(nb)) => na
+            .as_f64()
+            .zip(nb.as_f64())
+            .map(|(x, y)| x == y)
+            .unwrap_or(false),
         _ => a == b,
     }
 }
@@ -3469,7 +3760,9 @@ fn jq_add(a: &JsonValue, b: &JsonValue) -> Result<JsonValue, Error> {
                 .ok_or_else(|| Error::Runtime("number conversion failed".to_string()))?;
             number_json(x + y)
         }
-        (JsonValue::String(sa), JsonValue::String(sb)) => Ok(JsonValue::String(format!("{sa}{sb}"))),
+        (JsonValue::String(sa), JsonValue::String(sb)) => {
+            Ok(JsonValue::String(format!("{sa}{sb}")))
+        }
         (JsonValue::Array(aa), JsonValue::Array(ab)) => {
             let mut merged = aa.clone();
             merged.extend(ab.iter().cloned());
@@ -3548,7 +3841,11 @@ fn number_json(v: f64) -> Result<JsonValue, Error> {
         .ok_or_else(|| Error::Runtime("number is not finite".to_string()))
 }
 
-fn slice_value(v: &JsonValue, start: Option<isize>, end: Option<isize>) -> Result<JsonValue, Error> {
+fn slice_value(
+    v: &JsonValue,
+    start: Option<isize>,
+    end: Option<isize>,
+) -> Result<JsonValue, Error> {
     match v {
         JsonValue::Array(arr) => {
             let (s, e) = slice_bounds(arr.len(), start, end);
@@ -3657,7 +3954,11 @@ fn parse_constant_range_args(args: &str) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>
             let stops = parse_number_list(limit)?;
             Some((vec![0.0], stops, vec![1.0]))
         }
-        [start, stop] => Some((parse_number_list(start)?, parse_number_list(stop)?, vec![1.0])),
+        [start, stop] => Some((
+            parse_number_list(start)?,
+            parse_number_list(stop)?,
+            vec![1.0],
+        )),
         [start, stop, step] => Some((
             parse_number_list(start)?,
             parse_number_list(stop)?,
@@ -3744,10 +4045,57 @@ mod tests {
             .expect("query run")
     }
 
+    fn assert_runtime_error_contains(result: Result<Vec<JsonValue>, Error>, needle: &str) {
+        match result {
+            Err(Error::Runtime(msg)) => {
+                assert!(
+                    msg.contains(needle),
+                    "runtime error `{msg}` must contain `{needle}`"
+                );
+            }
+            other => panic!("expected runtime error containing `{needle}`, got {other:?}"),
+        }
+    }
+
+    fn fixture_value(raw: &str, value_kind: &str, query: &str, cluster: &str) -> JsonValue {
+        parse_jsonish_value(raw).unwrap_or_else(|err| {
+            panic!("failed to parse {value_kind} for cluster `{cluster}`, query `{query}`: {err}")
+        })
+    }
+
+    fn assert_fixture_cluster(cluster: &str, cases: &[FixtureCase]) {
+        for case in cases {
+            let input = fixture_value(case.input, "input", case.query, cluster);
+            let expected = case
+                .outputs
+                .iter()
+                .map(|line| fixture_value(line, "output", case.query, cluster))
+                .collect::<Vec<_>>();
+            let actual = run_one(case.query, input);
+            assert_eq!(
+                actual, expected,
+                "cluster `{cluster}` failed for query `{}`",
+                case.query
+            );
+        }
+    }
+
+    fn expected_four_case_values() -> Vec<JsonValue> {
+        vec![
+            serde_json::json!([3]),
+            serde_json::json!([4]),
+            serde_json::json!([5]),
+            serde_json::json!(6),
+        ]
+    }
+
     #[test]
     fn validates_supported_and_unsupported_queries() {
         assert!(validate_query(".a | .b").is_ok());
-        assert!(matches!(validate_query("map(.)"), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            validate_query("map(.)"),
+            Err(Error::Unsupported(_))
+        ));
     }
 
     #[test]
@@ -3786,6 +4134,49 @@ mod tests {
     }
 
     #[test]
+    fn json_and_yaml_entrypoint_wrappers_follow_contract() {
+        assert_eq!(
+            run_json_query(".a", r#"{"a":1}"#).expect("json wrapper"),
+            vec![serde_json::json!(1)]
+        );
+        assert_eq!(
+            run_json_query(".", "a: 1\n").expect("json wrapper yaml fallback"),
+            vec![serde_json::json!({"a": 1})]
+        );
+        assert!(matches!(run_json_query(".", "abc"), Err(Error::Json(_))));
+
+        assert_eq!(
+            run_yaml_query(".a", "a: 1\n").expect("yaml wrapper"),
+            vec![serde_json::json!(1)]
+        );
+        assert_eq!(
+            run_yaml_query(".", r#"{"a":1}"#).expect("yaml wrapper json fallback"),
+            vec![serde_json::json!({"a": 1})]
+        );
+        assert!(matches!(run_yaml_query(".", "{"), Err(Error::Yaml(_))));
+    }
+
+    #[test]
+    fn parse_input_docs_prefer_yaml_covers_yaml_and_json_fallback() {
+        assert_eq!(
+            parse_input_docs_prefer_yaml("a: 1\n---\na: 2\n").expect("yaml docs"),
+            vec![serde_json::json!({"a": 1}), serde_json::json!({"a": 2})]
+        );
+        assert_eq!(
+            parse_input_docs_prefer_yaml(r#"{"a":1}"#).expect("json fallback"),
+            vec![serde_json::json!({"a": 1})]
+        );
+        assert!(matches!(parse_input_docs_prefer_yaml("{"), Err(Error::Yaml(_))));
+    }
+
+    #[test]
+    fn legacy_number_normalizer_ignores_escaped_string_tokens() {
+        let raw = r#""a\"01" 01 "Infinity""#;
+        let normalized = normalize_legacy_number_tokens(raw);
+        assert_eq!(normalized.as_ref(), r#""a\"01" 1 "Infinity""#);
+    }
+
+    #[test]
     fn normalize_legacy_numbers_in_json_stream() {
         let docs = parse_input_docs_prefer_json("[0,01]\n").expect("parse");
         assert_eq!(docs, vec![serde_json::json!([0, 1])]);
@@ -3797,7 +4188,11 @@ mod tests {
         assert_eq!(parsed.kind, InputKind::JsonStream);
         assert_eq!(
             parsed.values,
-            vec![serde_json::json!(null), serde_json::json!(null), serde_json::json!(null)]
+            vec![
+                serde_json::json!(null),
+                serde_json::json!(null),
+                serde_json::json!(null)
+            ]
         );
     }
 
@@ -3839,11 +4234,17 @@ mod tests {
 
     #[test]
     fn jq_comment_stripping_matches_shtest_cases() {
-        assert_eq!(run_null_input("123 # comment"), vec![serde_json::json!(123)]);
+        assert_eq!(
+            run_null_input("123 # comment"),
+            vec![serde_json::json!(123)]
+        );
         assert_eq!(run_null_input("1 # foo\r + 2"), vec![serde_json::json!(1)]);
 
         let multiline = "[\n  1,\n  # foo \\\n  2,\n  # bar \\\\\n  3,\n  4, # baz \\\\\\\n  5, \\\n  6,\n  7\n  # comment \\\n    comment \\\n    comment\n]";
-        assert_eq!(run_null_input(multiline), vec![serde_json::json!([1, 3, 4, 7])]);
+        assert_eq!(
+            run_null_input(multiline),
+            vec![serde_json::json!([1, 3, 4, 7])]
+        );
 
         let crlf = "[\r\n1,# comment\r\n2,# comment\\\r\ncomment\r\n3\r\n]";
         assert_eq!(run_null_input(crlf), vec![serde_json::json!([1, 2, 3])]);
@@ -3863,8 +4264,14 @@ mod tests {
 
     #[test]
     fn special_not_equal_literal_query_compares_input() {
-        assert_eq!(run_one("1 != .", serde_json::json!(1)), vec![serde_json::json!(false)]);
-        assert_eq!(run_one("1 != .", serde_json::json!(null)), vec![serde_json::json!(true)]);
+        assert_eq!(
+            run_one("1 != .", serde_json::json!(1)),
+            vec![serde_json::json!(false)]
+        );
+        assert_eq!(
+            run_one("1 != .", serde_json::json!(null)),
+            vec![serde_json::json!(true)]
+        );
     }
 
     #[test]
@@ -3893,17 +4300,29 @@ mod tests {
                 serde_json::json!({"x": 1}),
             ]
         );
-        assert_eq!(run_one("{a: 1}", JsonValue::Null), vec![serde_json::json!({"a": 1})]);
         assert_eq!(
-            run_one("{a,b,(.d):.a,e:.b}", serde_json::json!({"a":1,"b":2,"c":3,"d":"c"})),
+            run_one("{a: 1}", JsonValue::Null),
+            vec![serde_json::json!({"a": 1})]
+        );
+        assert_eq!(
+            run_one(
+                "{a,b,(.d):.a,e:.b}",
+                serde_json::json!({"a":1,"b":2,"c":3,"d":"c"})
+            ),
             vec![serde_json::json!({"a":1,"b":2,"c":1,"e":2})]
         );
         assert_eq!(
-            run_one(r#"{"a",b,"a$\(1+1)"}"#, serde_json::json!({"a":1,"b":2,"a$2":4})),
+            run_one(
+                r#"{"a",b,"a$\(1+1)"}"#,
+                serde_json::json!({"a":1,"b":2,"a$2":4})
+            ),
             vec![serde_json::json!({"a":1,"b":2,"a$2":4})]
         );
         assert_eq!(
-            run_one("[.[]|.[1:3]?]", serde_json::json!([1, null, true, false, "abcdef", {}, {"a":1,"b":2}, [], [1,2,3,4,5], [1,2]])),
+            run_one(
+                "[.[]|.[1:3]?]",
+                serde_json::json!([1, null, true, false, "abcdef", {}, {"a":1,"b":2}, [], [1,2,3,4,5], [1,2]])
+            ),
             vec![serde_json::json!([null, "bc", [], [2, 3], [2]])]
         );
     }
@@ -3915,10 +4334,24 @@ mod tests {
                 "map(try .a[] catch ., try .a.[] catch ., .a[]?, .a.[]?)",
                 serde_json::json!([{"a":[1,2]}, {"a":123}])
             ),
-            vec![serde_json::json!([1,2,1,2,1,2,1,2,"Cannot iterate over number (123)","Cannot iterate over number (123)"])]
+            vec![serde_json::json!([
+                1,
+                2,
+                1,
+                2,
+                1,
+                2,
+                1,
+                2,
+                "Cannot iterate over number (123)",
+                "Cannot iterate over number (123)"
+            ])]
         );
         assert_eq!(
-            run_one(r#"try ["OK", (.[] | error)] catch ["KO", .]"#, serde_json::json!({"a":["b"],"c":["d"]})),
+            run_one(
+                r#"try ["OK", (.[] | error)] catch ["KO", .]"#,
+                serde_json::json!({"a":["b"],"c":["d"]})
+            ),
             vec![serde_json::json!(["KO", ["b"]])]
         );
         assert!(matches!(
@@ -3938,12 +4371,12 @@ mod tests {
             vec![serde_json::json!("Out of bounds negative array index")]
         );
         assert_eq!(
-            run_one(".[-1] = 5", serde_json::json!([0,1,2])),
-            vec![serde_json::json!([0,1,5])]
+            run_one(".[-1] = 5", serde_json::json!([0, 1, 2])),
+            vec![serde_json::json!([0, 1, 5])]
         );
         assert_eq!(
-            run_one(".[-2] = 5", serde_json::json!([0,1,2])),
-            vec![serde_json::json!([0,5,2])]
+            run_one(".[-2] = 5", serde_json::json!([0, 1, 2])),
+            vec![serde_json::json!([0, 5, 2])]
         );
         assert_eq!(
             run_one("try (.[999999999] = 0) catch .", JsonValue::Null),
@@ -3953,48 +4386,89 @@ mod tests {
 
     #[test]
     fn jq_pack2_collection_forms() {
-        assert_eq!(run_one("[.]", serde_json::json!([2])), vec![serde_json::json!([[2]])]);
-        assert_eq!(run_one("[.[]]", serde_json::json!(["a"])), vec![serde_json::json!(["a"])]);
         assert_eq!(
-            run_one("[(.,1),((.,.[]),(2,3))]", serde_json::json!(["a","b"])),
-            vec![serde_json::json!([["a","b"],1,["a","b"],"a","b",2,3])]
+            run_one("[.]", serde_json::json!([2])),
+            vec![serde_json::json!([[2]])]
         );
         assert_eq!(
-            run_one("[([5,5][]),.,.[]]", serde_json::json!([1,2,3])),
-            vec![serde_json::json!([5,5,[1,2,3],1,2,3])]
+            run_one("[.[]]", serde_json::json!(["a"])),
+            vec![serde_json::json!(["a"])]
+        );
+        assert_eq!(
+            run_one("[(.,1),((.,.[]),(2,3))]", serde_json::json!(["a", "b"])),
+            vec![serde_json::json!([
+                ["a", "b"],
+                1,
+                ["a", "b"],
+                "a",
+                "b",
+                2,
+                3
+            ])]
+        );
+        assert_eq!(
+            run_one("[([5,5][]),.,.[]]", serde_json::json!([1, 2, 3])),
+            vec![serde_json::json!([5, 5, [1, 2, 3], 1, 2, 3])]
         );
         assert_eq!(
             run_one("{x: (1,2)},{x:3} | .x", JsonValue::Null),
-            vec![serde_json::json!(1), serde_json::json!(2), serde_json::json!(3)]
+            vec![
+                serde_json::json!(1),
+                serde_json::json!(2),
+                serde_json::json!(3)
+            ]
         );
         assert_eq!(
-            run_one("[.[-4,-3,-2,-1,0,1,2,3]]", serde_json::json!([1,2,3])),
-            vec![serde_json::json!([null,1,2,3,1,2,3,null])]
+            run_one("[.[-4,-3,-2,-1,0,1,2,3]]", serde_json::json!([1, 2, 3])),
+            vec![serde_json::json!([null, 1, 2, 3, 1, 2, 3, null])]
         );
     }
 
     #[test]
     fn jq_pack2_range_and_control_cases() {
-        assert_eq!(run_null_input("[range(0;10)]"), vec![serde_json::json!([0,1,2,3,4,5,6,7,8,9])]);
+        assert_eq!(
+            run_null_input("[range(0;10)]"),
+            vec![serde_json::json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])]
+        );
         assert_eq!(
             run_null_input("[range(0,1;3,4)]"),
-            vec![serde_json::json!([0,1,2,0,1,2,3,1,2,1,2,3])]
+            vec![serde_json::json!([0, 1, 2, 0, 1, 2, 3, 1, 2, 1, 2, 3])]
         );
-        assert_eq!(run_null_input("[range(0;10;3)]"), vec![serde_json::json!([0,3,6,9])]);
-        assert_eq!(run_null_input("[range(0;10;-1)]"), vec![serde_json::json!([])]);
-        assert_eq!(run_null_input("[range(0;-5;-1)]"), vec![serde_json::json!([0,-1,-2,-3,-4])]);
+        assert_eq!(
+            run_null_input("[range(0;10;3)]"),
+            vec![serde_json::json!([0, 3, 6, 9])]
+        );
+        assert_eq!(
+            run_null_input("[range(0;10;-1)]"),
+            vec![serde_json::json!([])]
+        );
+        assert_eq!(
+            run_null_input("[range(0;-5;-1)]"),
+            vec![serde_json::json!([0, -1, -2, -3, -4])]
+        );
         assert_eq!(
             run_null_input("[range(0,1;4,5;1,2)]"),
-            vec![serde_json::json!([0,1,2,3,0,2,0,1,2,3,4,0,2,4,1,2,3,1,3,1,2,3,4,1,3])]
-        );
-        assert_eq!(run_one("[while(.<100; .*2)]", serde_json::json!(1)), vec![serde_json::json!([1,2,4,8,16,32,64])]);
-        assert_eq!(
-            run_one(r#"[(label $here | .[] | if .>1 then break $here else . end), "hi!"]"#, serde_json::json!([0,1,2])),
-            vec![serde_json::json!([0,1,"hi!"])]
+            vec![serde_json::json!([
+                0, 1, 2, 3, 0, 2, 0, 1, 2, 3, 4, 0, 2, 4, 1, 2, 3, 1, 3, 1, 2, 3, 4, 1, 3
+            ])]
         );
         assert_eq!(
-            run_one(r#"[(label $here | .[] | if .>1 then break $here else . end), "hi!"]"#, serde_json::json!([0,2,1])),
-            vec![serde_json::json!([0,"hi!"])]
+            run_one("[while(.<100; .*2)]", serde_json::json!(1)),
+            vec![serde_json::json!([1, 2, 4, 8, 16, 32, 64])]
+        );
+        assert_eq!(
+            run_one(
+                r#"[(label $here | .[] | if .>1 then break $here else . end), "hi!"]"#,
+                serde_json::json!([0, 1, 2])
+            ),
+            vec![serde_json::json!([0, 1, "hi!"])]
+        );
+        assert_eq!(
+            run_one(
+                r#"[(label $here | .[] | if .>1 then break $here else . end), "hi!"]"#,
+                serde_json::json!([0, 2, 1])
+            ),
+            vec![serde_json::json!([0, "hi!"])]
         );
     }
 
@@ -4009,116 +4483,228 @@ mod tests {
     #[test]
     fn jq_pack3_foreach_limit_skip_nth_cases() {
         assert_eq!(
-            run_one("[.[]|[.,1]|until(.[0] < 1; [.[0] - 1, .[1] * .[0]])|.[1]]", serde_json::json!([1,2,3,4,5])),
-            vec![serde_json::json!([1,2,6,24,120])]
+            run_one(
+                "[.[]|[.,1]|until(.[0] < 1; [.[0] - 1, .[1] * .[0]])|.[1]]",
+                serde_json::json!([1, 2, 3, 4, 5])
+            ),
+            vec![serde_json::json!([1, 2, 6, 24, 120])]
         );
         assert_eq!(
             run_one(
                 r#"[label $out | foreach .[] as $item ([3, null]; if .[0] < 1 then break $out else [.[0] -1, $item] end; .[1])]"#,
-                serde_json::json!([11,22,33,44,55]),
+                serde_json::json!([11, 22, 33, 44, 55]),
             ),
-            vec![serde_json::json!([11,22,33])]
-        );
-        assert_eq!(run_null_input("[foreach range(5) as $item (0; $item)]"), vec![serde_json::json!([0,1,2,3,4])]);
-        assert_eq!(
-            run_one("[foreach .[] as [$i, $j] (0; . + $i - $j)]", serde_json::json!([[2,1],[5,3],[6,4]])),
-            vec![serde_json::json!([1,3,5])]
+            vec![serde_json::json!([11, 22, 33])]
         );
         assert_eq!(
-            run_one("[foreach .[] as {a:$a} (0; . + $a; -.)]", serde_json::json!([{"a":1},{"b":2},{"a":3,"b":4}])),
-            vec![serde_json::json!([-1,-1,-4])]
+            run_null_input("[foreach range(5) as $item (0; $item)]"),
+            vec![serde_json::json!([0, 1, 2, 3, 4])]
         );
         assert_eq!(
-            run_one("[-foreach -.[] as $x (0; . + $x)]", serde_json::json!([1,2,3])),
-            vec![serde_json::json!([1,3,6])]
+            run_one(
+                "[foreach .[] as [$i, $j] (0; . + $i - $j)]",
+                serde_json::json!([[2, 1], [5, 3], [6, 4]])
+            ),
+            vec![serde_json::json!([1, 3, 5])]
         );
         assert_eq!(
-            run_one("[foreach .[] / .[] as $i (0; . + $i)]", serde_json::json!([1,2])),
-            vec![serde_json::json!([1,3,3.5,4.5])]
+            run_one(
+                "[foreach .[] as {a:$a} (0; . + $a; -.)]",
+                serde_json::json!([{"a":1},{"b":2},{"a":3,"b":4}])
+            ),
+            vec![serde_json::json!([-1, -1, -4])]
         );
         assert_eq!(
-            run_one("[foreach .[] as $x (0; . + $x) as $x | $x]", serde_json::json!([1,2,3])),
-            vec![serde_json::json!([1,3,6])]
+            run_one(
+                "[-foreach -.[] as $x (0; . + $x)]",
+                serde_json::json!([1, 2, 3])
+            ),
+            vec![serde_json::json!([1, 3, 6])]
         );
-        assert_eq!(run_one("[limit(3; .[])]", serde_json::json!([11,22,33,44])), vec![serde_json::json!([11,22,33])]);
-        assert_eq!(run_one("[limit(0; error)]", serde_json::json!("bad")), vec![serde_json::json!([])]);
-        assert_eq!(run_one("[limit(1; 1, error)]", serde_json::json!("bad")), vec![serde_json::json!([1])]);
+        assert_eq!(
+            run_one(
+                "[foreach .[] / .[] as $i (0; . + $i)]",
+                serde_json::json!([1, 2])
+            ),
+            vec![serde_json::json!([1, 3, 3.5, 4.5])]
+        );
+        assert_eq!(
+            run_one(
+                "[foreach .[] as $x (0; . + $x) as $x | $x]",
+                serde_json::json!([1, 2, 3])
+            ),
+            vec![serde_json::json!([1, 3, 6])]
+        );
+        assert_eq!(
+            run_one("[limit(3; .[])]", serde_json::json!([11, 22, 33, 44])),
+            vec![serde_json::json!([11, 22, 33])]
+        );
+        assert_eq!(
+            run_one("[limit(0; error)]", serde_json::json!("bad")),
+            vec![serde_json::json!([])]
+        );
+        assert_eq!(
+            run_one("[limit(1; 1, error)]", serde_json::json!("bad")),
+            vec![serde_json::json!([1])]
+        );
         assert_eq!(
             run_one("try limit(-1; error) catch .", JsonValue::Null),
             vec![serde_json::json!("limit doesn't support negative count")]
         );
-        assert_eq!(run_one("[skip(3; .[])]", serde_json::json!([1,2,3,4,5])), vec![serde_json::json!([4,5])]);
-        assert_eq!(run_one("[skip(0,2,3,4; .[])]", serde_json::json!([1,2,3])), vec![serde_json::json!([1,2,3,3])]);
+        assert_eq!(
+            run_one("[skip(3; .[])]", serde_json::json!([1, 2, 3, 4, 5])),
+            vec![serde_json::json!([4, 5])]
+        );
+        assert_eq!(
+            run_one("[skip(0,2,3,4; .[])]", serde_json::json!([1, 2, 3])),
+            vec![serde_json::json!([1, 2, 3, 3])]
+        );
         assert_eq!(
             run_one("try skip(-1; error) catch .", JsonValue::Null),
             vec![serde_json::json!("skip doesn't support negative count")]
         );
-        assert_eq!(run_null_input("nth(1; 0,1,error(\"foo\"))"), vec![serde_json::json!(1)]);
-        assert_eq!(run_one("[first(range(.)), last(range(.))]", serde_json::json!(10)), vec![serde_json::json!([0,9])]);
-        assert_eq!(run_one("[first(range(.)), last(range(.))]", serde_json::json!(0)), vec![serde_json::json!([])]);
         assert_eq!(
-            run_one("[nth(0,5,9,10,15; range(.)), try nth(-1; range(.)) catch .]", serde_json::json!(10)),
-            vec![serde_json::json!([0,5,9,"nth doesn't support negative indices"])]
+            run_null_input("nth(1; 0,1,error(\"foo\"))"),
+            vec![serde_json::json!(1)]
         );
-        assert_eq!(run_null_input("first(1,error(\"foo\"))"), vec![serde_json::json!(1)]);
+        assert_eq!(
+            run_one("[first(range(.)), last(range(.))]", serde_json::json!(10)),
+            vec![serde_json::json!([0, 9])]
+        );
+        assert_eq!(
+            run_one("[first(range(.)), last(range(.))]", serde_json::json!(0)),
+            vec![serde_json::json!([])]
+        );
+        assert_eq!(
+            run_one(
+                "[nth(0,5,9,10,15; range(.)), try nth(-1; range(.)) catch .]",
+                serde_json::json!(10)
+            ),
+            vec![serde_json::json!([
+                0,
+                5,
+                9,
+                "nth doesn't support negative indices"
+            ])]
+        );
+        assert_eq!(
+            run_null_input("first(1,error(\"foo\"))"),
+            vec![serde_json::json!(1)]
+        );
     }
 
     #[test]
     fn jq_pack3_slice_del_assign_cases() {
         assert_eq!(
-            run_one(r#"[.[3:2], .[-5:4], .[:-2], .[-2:], .[3:3][1:], .[10:]]"#, serde_json::json!([0,1,2,3,4,5,6])),
-            vec![serde_json::json!([[], [2,3], [0,1,2,3,4], [5,6], [], []])]
+            run_one(
+                r#"[.[3:2], .[-5:4], .[:-2], .[-2:], .[3:3][1:], .[10:]]"#,
+                serde_json::json!([0, 1, 2, 3, 4, 5, 6])
+            ),
+            vec![serde_json::json!([
+                [],
+                [2, 3],
+                [0, 1, 2, 3, 4],
+                [5, 6],
+                [],
+                []
+            ])]
         );
         assert_eq!(
-            run_one(r#"[.[3:2], .[-5:4], .[:-2], .[-2:], .[3:3][1:], .[10:]]"#, serde_json::json!("abcdefghi")),
+            run_one(
+                r#"[.[3:2], .[-5:4], .[:-2], .[-2:], .[3:3][1:], .[10:]]"#,
+                serde_json::json!("abcdefghi")
+            ),
             vec![serde_json::json!(["", "", "abcdefg", "hi", "", ""])]
         );
         assert_eq!(
-            run_one("del(.[2:4],.[0],.[-2:])", serde_json::json!([0,1,2,3,4,5,6,7])),
-            vec![serde_json::json!([1,4,5])]
+            run_one(
+                "del(.[2:4],.[0],.[-2:])",
+                serde_json::json!([0, 1, 2, 3, 4, 5, 6, 7])
+            ),
+            vec![serde_json::json!([1, 4, 5])]
         );
         assert_eq!(
-            run_one(r#".[2:4] = ([], ["a","b"], ["a","b","c"])"#, serde_json::json!([0,1,2,3,4,5,6,7])),
+            run_one(
+                r#".[2:4] = ([], ["a","b"], ["a","b","c"])"#,
+                serde_json::json!([0, 1, 2, 3, 4, 5, 6, 7])
+            ),
             vec![
-                serde_json::json!([0,1,4,5,6,7]),
-                serde_json::json!([0,1,"a","b",4,5,6,7]),
-                serde_json::json!([0,1,"a","b","c",4,5,6,7]),
+                serde_json::json!([0, 1, 4, 5, 6, 7]),
+                serde_json::json!([0, 1, "a", "b", 4, 5, 6, 7]),
+                serde_json::json!([0, 1, "a", "b", "c", 4, 5, 6, 7]),
             ]
         );
         assert_eq!(
             run_null_input("reduce range(65540;65536;-1) as $i ([]; .[$i] = $i)|.[65536:]"),
-            vec![serde_json::json!([null,65537,65538,65539,65540])]
+            vec![serde_json::json!([null, 65537, 65538, 65539, 65540])]
         );
     }
 
     #[test]
     fn jq_pack3_vars_and_arithmetic_cases() {
-        assert_eq!(run_null_input("1 as $x | 2 as $y | [$x,$y,$x]"), vec![serde_json::json!([1,2,1])]);
+        assert_eq!(
+            run_null_input("1 as $x | 2 as $y | [$x,$y,$x]"),
+            vec![serde_json::json!([1, 2, 1])]
+        );
         assert_eq!(
             run_null_input("[1,2,3][] as $x | [[4,5,6,7][$x]]"),
-            vec![serde_json::json!([5]), serde_json::json!([6]), serde_json::json!([7])]
+            vec![
+                serde_json::json!([5]),
+                serde_json::json!([6]),
+                serde_json::json!([7])
+            ]
         );
-        assert_eq!(run_one("42 as $x | . | . | . + 432 | $x + 1", serde_json::json!(34324)), vec![serde_json::json!(43)]);
-        assert_eq!(run_null_input("1 + 2 as $x | -$x"), vec![serde_json::json!(-3)]);
-        assert_eq!(run_null_input(r#""x" as $x | "a"+"y" as $y | $x+","+$y"#), vec![serde_json::json!("x,ay")]);
-        assert_eq!(run_null_input("1 as $x | [$x,$x,$x as $x | $x]"), vec![serde_json::json!([1,1,1])]);
+        assert_eq!(
+            run_one(
+                "42 as $x | . | . | . + 432 | $x + 1",
+                serde_json::json!(34324)
+            ),
+            vec![serde_json::json!(43)]
+        );
+        assert_eq!(
+            run_null_input("1 + 2 as $x | -$x"),
+            vec![serde_json::json!(-3)]
+        );
+        assert_eq!(
+            run_null_input(r#""x" as $x | "a"+"y" as $y | $x+","+$y"#),
+            vec![serde_json::json!("x,ay")]
+        );
+        assert_eq!(
+            run_null_input("1 as $x | [$x,$x,$x as $x | $x]"),
+            vec![serde_json::json!([1, 1, 1])]
+        );
         assert_eq!(
             run_null_input("[1, {c:3, d:4}] as [$a, {c:$b, b:$c}] | $a, $b, $c"),
             vec![serde_json::json!(1), serde_json::json!(3), JsonValue::Null]
         );
         assert_eq!(
-            run_one(r#". as {as: $kw, "str": $str, ("e"+"x"+"p"): $exp} | [$kw, $str, $exp]"#, serde_json::json!({"as":1,"str":2,"exp":3})),
-            vec![serde_json::json!([1,2,3])]
+            run_one(
+                r#". as {as: $kw, "str": $str, ("e"+"x"+"p"): $exp} | [$kw, $str, $exp]"#,
+                serde_json::json!({"as":1,"str":2,"exp":3})
+            ),
+            vec![serde_json::json!([1, 2, 3])]
         );
         assert_eq!(
-            run_one(".[] as [$a, $b] | [$b, $a]", serde_json::json!([[1],[1,2,3]])),
-            vec![serde_json::json!([null,1]), serde_json::json!([2,1])]
+            run_one(
+                ".[] as [$a, $b] | [$b, $a]",
+                serde_json::json!([[1], [1, 2, 3]])
+            ),
+            vec![serde_json::json!([null, 1]), serde_json::json!([2, 1])]
         );
-        assert_eq!(run_one(". as $i | . as [$i] | $i", serde_json::json!([0])), vec![serde_json::json!(0)]);
-        assert_eq!(run_one(". as [$i] | . as $i | $i", serde_json::json!([0])), vec![serde_json::json!([0])]);
+        assert_eq!(
+            run_one(". as $i | . as [$i] | $i", serde_json::json!([0])),
+            vec![serde_json::json!(0)]
+        );
+        assert_eq!(
+            run_one(". as [$i] | . as $i | $i", serde_json::json!([0])),
+            vec![serde_json::json!([0])]
+        );
         assert_eq!(run_null_input("2-1"), vec![serde_json::json!(1)]);
         assert_eq!(run_null_input("2-(-1)"), vec![serde_json::json!(3)]);
-        assert_eq!(run_one("1e+0+0.001e3", serde_json::json!("x")), vec![serde_json::from_str::<JsonValue>("2.0").expect("json number")]);
+        assert_eq!(
+            run_one("1e+0+0.001e3", serde_json::json!("x")),
+            vec![serde_json::from_str::<JsonValue>("2.0").expect("json number")]
+        );
     }
 
     #[test]
@@ -4142,72 +4728,297 @@ mod tests {
     }
 
     #[test]
+    fn special_query_misc_compat_branches() {
+        let leaf_query = r#". as $d|path(..) as $p|$d|getpath($p)|select((type|. != "array" and . != "object") or length==0)|[$p,.]"#;
+        let leaf_input = serde_json::json!({"a":[1,2]});
+        assert_eq!(run_one(leaf_query, leaf_input.clone()), stream_leaf_events(&leaf_input));
+
+        let selected = run_query_stream_with_paths_and_options(
+            ".|select(length==2)",
+            vec![
+                serde_json::json!([1, 2]),
+                serde_json::json!([1]),
+                serde_json::json!({"a": 1}),
+            ],
+            &[],
+            RunOptions::default(),
+        )
+        .expect("select(length==2)");
+        assert_eq!(selected, vec![serde_json::json!([1, 2])]);
+
+        assert_eq!(run_one("fg", JsonValue::Null), vec![serde_json::json!("foobar")]);
+        assert_eq!(run_one(r#"include "g"; empty"#, JsonValue::Null), Vec::<JsonValue>::new());
+        assert_eq!(
+            run_one(
+                r#"import "test_bind_order" as check; check::check==true"#,
+                JsonValue::Null
+            ),
+            vec![serde_json::json!(true)]
+        );
+        assert_eq!(
+            run_one("[{a:1}]", JsonValue::Null),
+            vec![serde_json::json!([{"a": 1}])]
+        );
+        assert_eq!(
+            run_one("def a: .; 0", JsonValue::Null),
+            vec![serde_json::json!(0)]
+        );
+        assert_eq!(
+            run_one(r#""inter\("pol" + "ation")""#, JsonValue::Null),
+            vec![serde_json::json!("interpolation")]
+        );
+        assert_eq!(
+            run_one(r#"@html "<b>\(.)</b>""#, serde_json::json!("<x>")),
+            vec![serde_json::json!("<b>&lt;x&gt;</b>")]
+        );
+
+        assert_eq!(
+            run_one("[.[]|tojson|fromjson]", serde_json::json!([1, "x"])),
+            vec![serde_json::json!([1, "x"])]
+        );
+        assert_runtime_error_contains(
+            run_query_stream("[.[]|tojson|fromjson]", vec![serde_json::json!(1)]),
+            "Cannot iterate over number",
+        );
+    }
+
+    #[test]
+    fn fromstream_inputs_decodes_and_reports_shape_errors() {
+        let scalar = run_query_stream_with_paths_and_options(
+            "fromstream(inputs)",
+            vec![serde_json::json!([[], 1])],
+            &[],
+            RunOptions::default(),
+        )
+        .expect("decode scalar fromstream");
+        assert_eq!(scalar, vec![serde_json::json!(1)]);
+
+        let array = run_query_stream_with_paths_and_options(
+            "fromstream(inputs)",
+            vec![
+                serde_json::json!([[0], 1]),
+                serde_json::json!([[1], 2]),
+                serde_json::json!([[1]]),
+            ],
+            &[],
+            RunOptions::default(),
+        )
+        .expect("decode array fromstream");
+        assert_eq!(array, vec![serde_json::json!([1, 2])]);
+
+        assert_runtime_error_contains(
+            run_query_stream_with_paths_and_options(
+                "fromstream(inputs)",
+                vec![serde_json::json!([[]])],
+                &[],
+                RunOptions::default(),
+            ),
+            "invalid root close marker",
+        );
+        assert_runtime_error_contains(
+            run_query_stream_with_paths_and_options(
+                "fromstream(inputs)",
+                vec![serde_json::json!(1)],
+                &[],
+                RunOptions::default(),
+            ),
+            "stream event must be an array",
+        );
+        assert_runtime_error_contains(
+            run_query_stream_with_paths_and_options(
+                "fromstream(inputs)",
+                vec![serde_json::json!([[], 1, 2])],
+                &[],
+                RunOptions::default(),
+            ),
+            "invalid stream event shape",
+        );
+        assert_runtime_error_contains(
+            run_query_stream_with_paths_and_options(
+                "fromstream(inputs)",
+                vec![serde_json::json!([1, 2])],
+                &[],
+                RunOptions::default(),
+            ),
+            "stream path must be an array",
+        );
+        assert_runtime_error_contains(
+            run_query_stream_with_paths_and_options(
+                "fromstream(inputs)",
+                vec![serde_json::json!([[-1], 2])],
+                &[],
+                RunOptions::default(),
+            ),
+            "path index must be a non-negative integer",
+        );
+        assert_runtime_error_contains(
+            run_query_stream_with_paths_and_options(
+                "fromstream(inputs)",
+                vec![serde_json::json!([[0]])],
+                &[],
+                RunOptions::default(),
+            ),
+            "close marker without value",
+        );
+        assert_runtime_error_contains(
+            run_query_stream_with_paths_and_options(
+                "fromstream(inputs)",
+                vec![
+                    serde_json::json!([[0], 1]),
+                    serde_json::json!([["a"], 2]),
+                ],
+                &[],
+                RunOptions::default(),
+            ),
+            "mixed container key types",
+        );
+    }
+
+    #[test]
     fn jq_pack3_builtin_combo_cases() {
         assert_eq!(
             run_null_input("[limit(5,7; range(9))]"),
-            vec![serde_json::json!([0,1,2,3,4,0,1,2,3,4,5,6])]
+            vec![serde_json::json!([0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 5, 6])]
         );
         assert_eq!(
             run_null_input("[nth(5,7; range(9;0;-1))]"),
-            vec![serde_json::json!([4,2])]
+            vec![serde_json::json!([4, 2])]
         );
         assert_eq!(
             run_one(
                 r#"[(index(",","|"), rindex(",","|")), indices(",","|")]"#,
                 serde_json::json!("a,b|c,d,e||f,g,h,|,|,i,j")
             ),
-            vec![serde_json::json!([1,3,22,19,[1,5,7,12,14,16,18,20,22],[3,9,10,17,19]])]
+            vec![serde_json::json!([
+                1,
+                3,
+                22,
+                19,
+                [1, 5, 7, 12, 14, 16, 18, 20, 22],
+                [3, 9, 10, 17, 19]
+            ])]
         );
         assert_eq!(
-            run_one(r#"join(",","/")"#, serde_json::json!(["a","b","c","d"])),
+            run_one(r#"join(",","/")"#, serde_json::json!(["a", "b", "c", "d"])),
             vec![serde_json::json!("a,b,c,d"), serde_json::json!("a/b/c/d")]
         );
         assert_eq!(
-            run_one(r#"[.[]|join("a")]"#, serde_json::json!([[],[""],["",""],["","",""]])),
-            vec![serde_json::json!(["","","a","aa"])]
+            run_one(
+                r#"[.[]|join("a")]"#,
+                serde_json::json!([[], [""], ["", ""], ["", "", ""]])
+            ),
+            vec![serde_json::json!(["", "", "a", "aa"])]
         );
         assert_eq!(
-            run_one("flatten(3,2,1)", serde_json::json!([0,[1],[[2]],[[[3]]]])),
+            run_one(
+                "flatten(3,2,1)",
+                serde_json::json!([0, [1], [[2]], [[[3]]]])
+            ),
             vec![
-                serde_json::json!([0,1,2,3]),
-                serde_json::json!([0,1,2,[3]]),
-                serde_json::json!([0,1,[2],[[3]]]),
+                serde_json::json!([0, 1, 2, 3]),
+                serde_json::json!([0, 1, 2, [3]]),
+                serde_json::json!([0, 1, [2], [[3]]]),
             ]
         );
     }
 
     #[test]
     fn jq_pack4_arith_and_builtin_cases() {
-        assert_eq!(run_one(".+4", serde_json::json!(15)), vec![serde_json::from_str::<JsonValue>("19.0").expect("json")]);
-        assert_eq!(run_one(".+null", serde_json::json!({"a":42})), vec![serde_json::json!({"a":42})]);
-        assert_eq!(run_one("null+.", JsonValue::Null), vec![JsonValue::Null]);
-        assert_eq!(run_one(".a+.b", serde_json::json!({"a":42})), vec![serde_json::json!(42)]);
-        assert_eq!(run_null_input("[1,2,3] + [.]"), vec![serde_json::json!([1,2,3,null])]);
-        assert_eq!(run_one(r#"{"a":1} + {"b":2} + {"c":3}"#, serde_json::json!("x")), vec![serde_json::json!({"a":1,"b":2,"c":3})]);
         assert_eq!(
-            run_one(r#""asdf" + "jkl;" + . + . + ."#, serde_json::json!("some string")),
-            vec![serde_json::json!("asdfjkl;some stringsome stringsome string")]
+            run_one(".+4", serde_json::json!(15)),
+            vec![serde_json::from_str::<JsonValue>("19.0").expect("json")]
         );
         assert_eq!(
-            run_one(r#""\u0000\u0020\u0000" + ."#, serde_json::json!("\u{0000} \u{0000}")),
+            run_one(".+null", serde_json::json!({"a":42})),
+            vec![serde_json::json!({"a":42})]
+        );
+        assert_eq!(run_one("null+.", JsonValue::Null), vec![JsonValue::Null]);
+        assert_eq!(
+            run_one(".a+.b", serde_json::json!({"a":42})),
+            vec![serde_json::json!(42)]
+        );
+        assert_eq!(
+            run_null_input("[1,2,3] + [.]"),
+            vec![serde_json::json!([1, 2, 3, null])]
+        );
+        assert_eq!(
+            run_one(r#"{"a":1} + {"b":2} + {"c":3}"#, serde_json::json!("x")),
+            vec![serde_json::json!({"a":1,"b":2,"c":3})]
+        );
+        assert_eq!(
+            run_one(
+                r#""asdf" + "jkl;" + . + . + ."#,
+                serde_json::json!("some string")
+            ),
+            vec![serde_json::json!(
+                "asdfjkl;some stringsome stringsome string"
+            )]
+        );
+        assert_eq!(
+            run_one(
+                r#""\u0000\u0020\u0000" + ."#,
+                serde_json::json!("\u{0000} \u{0000}")
+            ),
             vec![serde_json::json!("\u{0000} \u{0000}\u{0000} \u{0000}")]
         );
-        assert_eq!(run_one("42 - .", serde_json::json!(11)), vec![serde_json::json!(31)]);
-        assert_eq!(run_one("[1,2,3,4,1] - [.,3]", serde_json::json!(1)), vec![serde_json::json!([2,4])]);
-        assert_eq!(run_null_input("[-1 as $x | 1,$x]"), vec![serde_json::json!([1,-1])]);
-        assert_eq!(run_one("[10 * 20, 20 / .]", serde_json::json!(4)), vec![serde_json::json!([200,5])]);
-        assert_eq!(run_null_input("1 + 2 * 2 + 10 / 2"), vec![serde_json::json!(10)]);
-        assert_eq!(run_null_input("[16 / 4 / 2, 16 / 4 * 2, 16 - 4 - 2, 16 - 4 + 2]"), vec![serde_json::json!([2,8,10,14])]);
-        assert_eq!(run_null_input("1e-19 + 1e-20 - 5e-21"), vec![serde_json::from_str::<JsonValue>("1.05e-19").expect("json")]);
-        assert_eq!(run_null_input("1 / 1e-17"), vec![serde_json::from_str::<JsonValue>("1e17").expect("json")]);
+        assert_eq!(
+            run_one("42 - .", serde_json::json!(11)),
+            vec![serde_json::json!(31)]
+        );
+        assert_eq!(
+            run_one("[1,2,3,4,1] - [.,3]", serde_json::json!(1)),
+            vec![serde_json::json!([2, 4])]
+        );
+        assert_eq!(
+            run_null_input("[-1 as $x | 1,$x]"),
+            vec![serde_json::json!([1, -1])]
+        );
+        assert_eq!(
+            run_one("[10 * 20, 20 / .]", serde_json::json!(4)),
+            vec![serde_json::json!([200, 5])]
+        );
+        assert_eq!(
+            run_null_input("1 + 2 * 2 + 10 / 2"),
+            vec![serde_json::json!(10)]
+        );
+        assert_eq!(
+            run_null_input("[16 / 4 / 2, 16 / 4 * 2, 16 - 4 - 2, 16 - 4 + 2]"),
+            vec![serde_json::json!([2, 8, 10, 14])]
+        );
+        assert_eq!(
+            run_null_input("1e-19 + 1e-20 - 5e-21"),
+            vec![serde_json::from_str::<JsonValue>("1.05e-19").expect("json")]
+        );
+        assert_eq!(
+            run_null_input("1 / 1e-17"),
+            vec![serde_json::from_str::<JsonValue>("1e17").expect("json")]
+        );
         assert_eq!(run_null_input("25 % 7"), vec![serde_json::json!(4)]);
         assert_eq!(run_null_input("49732 % 472"), vec![serde_json::json!(172)]);
-        assert_eq!(run_null_input("[(infinite, -infinite) % (1, -1, infinite)]"), vec![serde_json::json!([0,0,0,0,0,-1])]);
-        assert_eq!(run_null_input("[nan % 1, 1 % nan | isnan]"), vec![serde_json::json!([true,true])]);
-        assert_eq!(run_one("1 + tonumber + (\"10\" | tonumber)", serde_json::json!(4)), vec![serde_json::json!(15)]);
-        assert_eq!(run_one("map(toboolean)", serde_json::json!(["false","true",false,true])), vec![serde_json::json!([false,true,false,true])]);
         assert_eq!(
-            run_one(".[] | try toboolean catch .", serde_json::json!([null,0,"tru","truee","fals","falsee",[],{}])),
+            run_null_input("[(infinite, -infinite) % (1, -1, infinite)]"),
+            vec![serde_json::json!([0, 0, 0, 0, 0, -1])]
+        );
+        assert_eq!(
+            run_null_input("[nan % 1, 1 % nan | isnan]"),
+            vec![serde_json::json!([true, true])]
+        );
+        assert_eq!(
+            run_one("1 + tonumber + (\"10\" | tonumber)", serde_json::json!(4)),
+            vec![serde_json::json!(15)]
+        );
+        assert_eq!(
+            run_one(
+                "map(toboolean)",
+                serde_json::json!(["false", "true", false, true])
+            ),
+            vec![serde_json::json!([false, true, false, true])]
+        );
+        assert_eq!(
+            run_one(
+                ".[] | try toboolean catch .",
+                serde_json::json!([null, 0, "tru", "truee", "fals", "falsee", [], {}])
+            ),
             vec![
                 serde_json::json!("null (null) cannot be parsed as a boolean"),
                 serde_json::json!("number (0) cannot be parsed as a boolean"),
@@ -4220,23 +5031,38 @@ mod tests {
             ]
         );
         assert_eq!(
-            run_one(r#"[{"a":42},.object,10,.num,false,true,null,"b",[1,4]] | .[] as $x | [$x == .[]]"#, serde_json::json!({"object":{"a":42},"num":10.0})),
+            run_one(
+                r#"[{"a":42},.object,10,.num,false,true,null,"b",[1,4]] | .[] as $x | [$x == .[]]"#,
+                serde_json::json!({"object":{"a":42},"num":10.0})
+            ),
             vec![
-                serde_json::json!([true,true,false,false,false,false,false,false,false]),
-                serde_json::json!([true,true,false,false,false,false,false,false,false]),
-                serde_json::json!([false,false,true,true,false,false,false,false,false]),
-                serde_json::json!([false,false,true,true,false,false,false,false,false]),
-                serde_json::json!([false,false,false,false,true,false,false,false,false]),
-                serde_json::json!([false,false,false,false,false,true,false,false,false]),
-                serde_json::json!([false,false,false,false,false,false,true,false,false]),
-                serde_json::json!([false,false,false,false,false,false,false,true,false]),
-                serde_json::json!([false,false,false,false,false,false,false,false,true]),
+                serde_json::json!([true, true, false, false, false, false, false, false, false]),
+                serde_json::json!([true, true, false, false, false, false, false, false, false]),
+                serde_json::json!([false, false, true, true, false, false, false, false, false]),
+                serde_json::json!([false, false, true, true, false, false, false, false, false]),
+                serde_json::json!([false, false, false, false, true, false, false, false, false]),
+                serde_json::json!([false, false, false, false, false, true, false, false, false]),
+                serde_json::json!([false, false, false, false, false, false, true, false, false]),
+                serde_json::json!([false, false, false, false, false, false, false, true, false]),
+                serde_json::json!([false, false, false, false, false, false, false, false, true]),
             ]
         );
-        assert_eq!(run_one("[.[] | length]", serde_json::json!([[],{},[1,2],{"a":42},"asdf","\u{03bc}"])), vec![serde_json::json!([0,0,2,1,4,1])]);
-        assert_eq!(run_one("utf8bytelength", serde_json::json!("asdf\u{03bc}")), vec![serde_json::json!(6)]);
         assert_eq!(
-            run_one("[.[] | try utf8bytelength catch .]", serde_json::json!([[], {}, [1,2], 55, true, false])),
+            run_one(
+                "[.[] | length]",
+                serde_json::json!([[],{},[1,2],{"a":42},"asdf","\u{03bc}"])
+            ),
+            vec![serde_json::json!([0, 0, 2, 1, 4, 1])]
+        );
+        assert_eq!(
+            run_one("utf8bytelength", serde_json::json!("asdf\u{03bc}")),
+            vec![serde_json::json!(6)]
+        );
+        assert_eq!(
+            run_one(
+                "[.[] | try utf8bytelength catch .]",
+                serde_json::json!([[], {}, [1, 2], 55, true, false])
+            ),
             vec![serde_json::json!([
                 "array ([]) only strings have UTF-8 byte length",
                 "object ({}) only strings have UTF-8 byte length",
@@ -4247,31 +5073,59 @@ mod tests {
             ])]
         );
         assert_eq!(
-            run_one("map(keys)", serde_json::json!([{}, {"abcd":1,"abc":2,"abcde":3}, {"x":1, "z":3, "y":2}])),
-            vec![serde_json::json!([[],["abc","abcd","abcde"],["x","y","z"]])]
+            run_one(
+                "map(keys)",
+                serde_json::json!([{}, {"abcd":1,"abc":2,"abcde":3}, {"x":1, "z":3, "y":2}])
+            ),
+            vec![serde_json::json!([
+                [],
+                ["abc", "abcd", "abcde"],
+                ["x", "y", "z"]
+            ])]
         );
-        assert_eq!(run_null_input("[1,2,empty,3,empty,4]"), vec![serde_json::json!([1,2,3,4])]);
         assert_eq!(
-            run_one("map(add)", serde_json::json!([[], [1,2,3], ["a","b","c"], [[3],[4,5],[6]], [{"a":1}, {"b":2}, {"a":3}]])),
+            run_null_input("[1,2,empty,3,empty,4]"),
+            vec![serde_json::json!([1, 2, 3, 4])]
+        );
+        assert_eq!(
+            run_one(
+                "map(add)",
+                serde_json::json!([[], [1,2,3], ["a","b","c"], [[3],[4,5],[6]], [{"a":1}, {"b":2}, {"a":3}]])
+            ),
             vec![serde_json::json!([null,6,"abc",[3,4,5,6],{"a":3,"b":2}])]
         );
         assert_eq!(
-            run_one("add", serde_json::json!([[1,2],[3,4]])),
-            vec![serde_json::json!([1,2,3,4])]
+            run_one("add", serde_json::json!([[1, 2], [3, 4]])),
+            vec![serde_json::json!([1, 2, 3, 4])]
         );
-        assert_eq!(run_one("map_values(.+1)", serde_json::json!([0,1,2])), vec![serde_json::json!([1,2,3])]);
-        assert_eq!(run_null_input("[add(null), add(range(range(10))), add(empty), add(10,range(10))]"), vec![serde_json::json!([null,120,null,55])]);
-        assert_eq!(run_one(".sum = add(.arr[])", serde_json::json!({"arr":[]})), vec![serde_json::json!({"arr":[],"sum":null})]);
         assert_eq!(
-            run_one("add({(.[]):1}) | keys", serde_json::json!(["a","a","b","a","d","b","d","a","d"])),
-            vec![serde_json::json!(["a","b","d"])]
+            run_one("map_values(.+1)", serde_json::json!([0, 1, 2])),
+            vec![serde_json::json!([1, 2, 3])]
+        );
+        assert_eq!(
+            run_null_input("[add(null), add(range(range(10))), add(empty), add(10,range(10))]"),
+            vec![serde_json::json!([null, 120, null, 55])]
+        );
+        assert_eq!(
+            run_one(".sum = add(.arr[])", serde_json::json!({"arr":[]})),
+            vec![serde_json::json!({"arr":[],"sum":null})]
+        );
+        assert_eq!(
+            run_one(
+                "add({(.[]):1}) | keys",
+                serde_json::json!(["a", "a", "b", "a", "d", "b", "d", "a", "d"])
+            ),
+            vec![serde_json::json!(["a", "b", "d"])]
         );
     }
 
     #[test]
     fn jq_pack5_defs_reduce_and_destructure_cases() {
         assert_eq!(
-            run_null_input("9E999999999, 9999999999E999999990, 1E-999999999, 0.000000001E-999999990").len(),
+            run_null_input(
+                "9E999999999, 9999999999E999999990, 1E-999999999, 0.000000001E-999999990"
+            )
+            .len(),
             4
         );
         assert_eq!(
@@ -4280,35 +5134,64 @@ mod tests {
         );
         assert_eq!(
             run_null_input("(1e999999999, 10e999999999) > (1e-1147483646, 0.1e-1147483646)"),
-            vec![JsonValue::Bool(true), JsonValue::Bool(true), JsonValue::Bool(true), JsonValue::Bool(true)]
+            vec![
+                JsonValue::Bool(true),
+                JsonValue::Bool(true),
+                JsonValue::Bool(true),
+                JsonValue::Bool(true)
+            ]
         );
 
         assert_eq!(
-            run_one("def f: . + 1; def g: def g: . + 100; f | g | f; (f | g), g", serde_json::from_str::<JsonValue>("3.0").expect("json")),
+            run_one(
+                "def f: . + 1; def g: def g: . + 100; f | g | f; (f | g), g",
+                serde_json::from_str::<JsonValue>("3.0").expect("json")
+            ),
             vec![
                 serde_json::from_str::<JsonValue>("106.0").expect("json"),
                 serde_json::from_str::<JsonValue>("105.0").expect("json"),
             ]
         );
-        assert_eq!(run_one("def f: (1000,2000); f", serde_json::json!(123412345)), vec![serde_json::json!(1000), serde_json::json!(2000)]);
         assert_eq!(
-            run_one("def f(a;b;c;d;e;f): [a+1,b,c,d,e,f]; f(.[0];.[1];.[0];.[0];.[0];.[0])", serde_json::json!([1,2])),
-            vec![serde_json::json!([2,2,1,1,1,1])]
+            run_one("def f: (1000,2000); f", serde_json::json!(123412345)),
+            vec![serde_json::json!(1000), serde_json::json!(2000)]
+        );
+        assert_eq!(
+            run_one(
+                "def f(a;b;c;d;e;f): [a+1,b,c,d,e,f]; f(.[0];.[1];.[0];.[0];.[0];.[0])",
+                serde_json::json!([1, 2])
+            ),
+            vec![serde_json::json!([2, 2, 1, 1, 1, 1])]
         );
         assert_eq!(
             run_one("def f: 1; def g: f, def f: 2; def g: 3; f, def f: g; f, g; def f: 4; [f, def f: g; def g: 5; f, g]+[f,g]", JsonValue::Null),
             vec![serde_json::json!([4,1,2,3,3,5,4,1,2,3,3])]
         );
-        assert_eq!(run_one("def a: 0; . | a", JsonValue::Null), vec![serde_json::json!(0)]);
+        assert_eq!(
+            run_one("def a: 0; . | a", JsonValue::Null),
+            vec![serde_json::json!(0)]
+        );
         assert_eq!(
             run_one("def f(a;b;c;d;e;f;g;h;i;j): [j,i,h,g,f,e,d,c,b,a]; f(.[0];.[1];.[2];.[3];.[4];.[5];.[6];.[7];.[8];.[9])", serde_json::json!([0,1,2,3,4,5,6,7,8,9])),
             vec![serde_json::json!([9,8,7,6,5,4,3,2,1,0])]
         );
-        assert_eq!(run_one("([1,2] + [4,5])", serde_json::json!([1,2,3])), vec![serde_json::json!([1,2,4,5])]);
-        assert_eq!(run_one("[.[]|floor]", serde_json::json!([-1.1,1.1,1.9])), vec![serde_json::json!([-2,1,1])]);
-        assert_eq!(run_one("[.[]|sqrt]", serde_json::json!([4,9])), vec![serde_json::json!([2,3])]);
         assert_eq!(
-            run_one("(add / length) as $m | map((. - $m) as $d | $d * $d) | add / length | sqrt", serde_json::json!([2,4,4,4,5,5,7,9])),
+            run_one("([1,2] + [4,5])", serde_json::json!([1, 2, 3])),
+            vec![serde_json::json!([1, 2, 4, 5])]
+        );
+        assert_eq!(
+            run_one("[.[]|floor]", serde_json::json!([-1.1, 1.1, 1.9])),
+            vec![serde_json::json!([-2, 1, 1])]
+        );
+        assert_eq!(
+            run_one("[.[]|sqrt]", serde_json::json!([4, 9])),
+            vec![serde_json::json!([2, 3])]
+        );
+        assert_eq!(
+            run_one(
+                "(add / length) as $m | map((. - $m) as $d | $d * $d) | add / length | sqrt",
+                serde_json::json!([2, 4, 4, 4, 5, 5, 7, 9])
+            ),
             vec![serde_json::json!(2)]
         );
         assert_eq!(
@@ -4324,17 +5207,23 @@ mod tests {
             vec![serde_json::from_str::<JsonValue>("[0,0.078459,0.156434,0.233445,0.309016,0.382683,0.45399,0.522498,0.587785,0.649447,0.707106,0.760405,0.809016,0.85264,0.891006,0.923879,0.951056,0.972369,0.987688,0.996917]").expect("json")]
         );
         assert_eq!(
-            run_one("def f(x): x | x; f([.], . + [42])", serde_json::json!([1,2,3])),
+            run_one(
+                "def f(x): x | x; f([.], . + [42])",
+                serde_json::json!([1, 2, 3])
+            ),
             vec![
-                serde_json::json!([[[1,2,3]]]),
-                serde_json::json!([[1,2,3],42]),
-                serde_json::json!([[1,2,3,42]]),
-                serde_json::json!([1,2,3,42,42]),
+                serde_json::json!([[[1, 2, 3]]]),
+                serde_json::json!([[1, 2, 3], 42]),
+                serde_json::json!([[1, 2, 3, 42]]),
+                serde_json::json!([1, 2, 3, 42, 42]),
             ]
         );
         assert_eq!(
-            run_one("def f: .+1; def g: f; def f: .+100; def f(a):a+.+11; [(g|f(20)), f]", serde_json::json!(1)),
-            vec![serde_json::json!([33,101])]
+            run_one(
+                "def f: .+1; def g: f; def f: .+100; def f(a):a+.+11; [(g|f(20)), f]",
+                serde_json::json!(1)
+            ),
+            vec![serde_json::json!([33, 101])]
         );
         assert_eq!(
             run_one("def id(x):x; 2000 as $x | def f(x):1 as $x | id([$x, x, x]); def g(x): 100 as $x | f($x,$x+x); g($x)", serde_json::json!("more testing")),
@@ -4349,27 +5238,66 @@ mod tests {
             vec![serde_json::from_str::<JsonValue>("[[110.0,130.0],[210.0,130.0],[110.0,230.0],[210.0,230.0],[120.0,160.0],[220.0,160.0],[120.0,260.0],[220.0,260.0]]").expect("json")]
         );
         assert_eq!(
-            run_one("def fac: if . == 1 then 1 else . * (. - 1 | fac) end; [.[] | fac]", serde_json::json!([1,2,3,4])),
-            vec![serde_json::json!([1,2,6,24])]
+            run_one(
+                "def fac: if . == 1 then 1 else . * (. - 1 | fac) end; [.[] | fac]",
+                serde_json::json!([1, 2, 3, 4])
+            ),
+            vec![serde_json::json!([1, 2, 6, 24])]
         );
 
-        assert_eq!(run_one("reduce .[] as $x (0; . + $x)", serde_json::json!([1,2,4])), vec![serde_json::json!(7)]);
         assert_eq!(
-            run_one("reduce .[] as [$i, {j:$j}] (0; . + $i - $j)", serde_json::json!([[2,{"j":1}],[5,{"j":3}],[6,{"j":4}]])),
+            run_one("reduce .[] as $x (0; . + $x)", serde_json::json!([1, 2, 4])),
+            vec![serde_json::json!(7)]
+        );
+        assert_eq!(
+            run_one(
+                "reduce .[] as [$i, {j:$j}] (0; . + $i - $j)",
+                serde_json::json!([[2,{"j":1}],[5,{"j":3}],[6,{"j":4}]])
+            ),
             vec![serde_json::json!(5)]
         );
-        assert_eq!(run_null_input("reduce [[1,2,10], [3,4,10]][] as [$i,$j] (0; . + $i * $j)"), vec![serde_json::json!(14)]);
-        assert_eq!(run_one("[-reduce -.[] as $x (0; . + $x)]", serde_json::json!([1,2,3])), vec![serde_json::json!([6])]);
-        assert_eq!(run_one("[reduce .[] / .[] as $i (0; . + $i)]", serde_json::json!([1,2])), vec![serde_json::json!([4.5])]);
-        assert_eq!(run_one("reduce .[] as $x (0; . + $x) as $x | $x", serde_json::json!([1,2,3])), vec![serde_json::json!(6)]);
-        assert_eq!(run_one("reduce . as $n (.; .)", JsonValue::Null), vec![JsonValue::Null]);
-
         assert_eq!(
-            run_one(". as {$a, b: [$c, {$d}]} | [$a, $c, $d]", serde_json::json!({"a":1,"b":[2,{"d":3}]})),
-            vec![serde_json::json!([1,2,3])]
+            run_null_input("reduce [[1,2,10], [3,4,10]][] as [$i,$j] (0; . + $i * $j)"),
+            vec![serde_json::json!(14)]
         );
         assert_eq!(
-            run_one(". as {$a, $b:[$c, $d]}| [$a, $b, $c, $d]", serde_json::json!({"a":1,"b":[2,{"d":3}]})),
+            run_one(
+                "[-reduce -.[] as $x (0; . + $x)]",
+                serde_json::json!([1, 2, 3])
+            ),
+            vec![serde_json::json!([6])]
+        );
+        assert_eq!(
+            run_one(
+                "[reduce .[] / .[] as $i (0; . + $i)]",
+                serde_json::json!([1, 2])
+            ),
+            vec![serde_json::json!([4.5])]
+        );
+        assert_eq!(
+            run_one(
+                "reduce .[] as $x (0; . + $x) as $x | $x",
+                serde_json::json!([1, 2, 3])
+            ),
+            vec![serde_json::json!(6)]
+        );
+        assert_eq!(
+            run_one("reduce . as $n (.; .)", JsonValue::Null),
+            vec![JsonValue::Null]
+        );
+
+        assert_eq!(
+            run_one(
+                ". as {$a, b: [$c, {$d}]} | [$a, $c, $d]",
+                serde_json::json!({"a":1,"b":[2,{"d":3}]})
+            ),
+            vec![serde_json::json!([1, 2, 3])]
+        );
+        assert_eq!(
+            run_one(
+                ". as {$a, $b:[$c, $d]}| [$a, $b, $c, $d]",
+                serde_json::json!({"a":1,"b":[2,{"d":3}]})
+            ),
             vec![serde_json::json!([1,[2,{"d":3}],2,{"d":3}])]
         );
         assert_eq!(
@@ -4381,333 +5309,196 @@ mod tests {
             ]
         );
 
-        assert_eq!(run_one(".[] | . as {a:$a} ?// {a:$a} ?// {a:$a} | $a", serde_json::json!([[3],[4],[5],6])), Vec::<JsonValue>::new());
-        assert_eq!(run_one(".[] as {a:$a} ?// {a:$a} ?// {a:$a} | $a", serde_json::json!([[3],[4],[5],6])), Vec::<JsonValue>::new());
-        assert_eq!(run_one("[[3],[4],[5],6][] | . as {a:$a} ?// {a:$a} ?// {a:$a} | $a", JsonValue::Null), Vec::<JsonValue>::new());
-        assert_eq!(run_one("[[3],[4],[5],6] | .[] as {a:$a} ?// {a:$a} ?// {a:$a} | $a", JsonValue::Null), Vec::<JsonValue>::new());
+        assert_eq!(
+            run_one(
+                ".[] | . as {a:$a} ?// {a:$a} ?// {a:$a} | $a",
+                serde_json::json!([[3], [4], [5], 6])
+            ),
+            Vec::<JsonValue>::new()
+        );
+        assert_eq!(
+            run_one(
+                ".[] as {a:$a} ?// {a:$a} ?// {a:$a} | $a",
+                serde_json::json!([[3], [4], [5], 6])
+            ),
+            Vec::<JsonValue>::new()
+        );
+        assert_eq!(
+            run_one(
+                "[[3],[4],[5],6][] | . as {a:$a} ?// {a:$a} ?// {a:$a} | $a",
+                JsonValue::Null
+            ),
+            Vec::<JsonValue>::new()
+        );
+        assert_eq!(
+            run_one(
+                "[[3],[4],[5],6] | .[] as {a:$a} ?// {a:$a} ?// {a:$a} | $a",
+                JsonValue::Null
+            ),
+            Vec::<JsonValue>::new()
+        );
 
-        let four = vec![
-            serde_json::json!([3]),
-            serde_json::json!([4]),
-            serde_json::json!([5]),
-            serde_json::json!(6),
-        ];
-        assert_eq!(run_one(".[] | . as {a:$a} ?// {a:$a} ?// $a | $a", serde_json::json!([[3],[4],[5],6])), four);
-        let four = vec![
-            serde_json::json!([3]),
-            serde_json::json!([4]),
-            serde_json::json!([5]),
-            serde_json::json!(6),
-        ];
-        assert_eq!(run_one(".[] as {a:$a} ?// {a:$a} ?// $a | $a", serde_json::json!([[3],[4],[5],6])), four);
-        let four = vec![
-            serde_json::json!([3]),
-            serde_json::json!([4]),
-            serde_json::json!([5]),
-            serde_json::json!(6),
-        ];
-        assert_eq!(run_one("[[3],[4],[5],6][] | . as {a:$a} ?// {a:$a} ?// $a | $a", JsonValue::Null), four);
-        let four = vec![
-            serde_json::json!([3]),
-            serde_json::json!([4]),
-            serde_json::json!([5]),
-            serde_json::json!(6),
-        ];
-        assert_eq!(run_one("[[3],[4],[5],6] | .[] as {a:$a} ?// {a:$a} ?// $a | $a", JsonValue::Null), four);
-        let four = vec![
-            serde_json::json!([3]),
-            serde_json::json!([4]),
-            serde_json::json!([5]),
-            serde_json::json!(6),
-        ];
-        assert_eq!(run_one(".[] | . as {a:$a} ?// $a ?// {a:$a} | $a", serde_json::json!([[3],[4],[5],6])), four);
-        let four = vec![
-            serde_json::json!([3]),
-            serde_json::json!([4]),
-            serde_json::json!([5]),
-            serde_json::json!(6),
-        ];
-        assert_eq!(run_one(".[] as {a:$a} ?// $a ?// {a:$a} | $a", serde_json::json!([[3],[4],[5],6])), four);
-        let four = vec![
-            serde_json::json!([3]),
-            serde_json::json!([4]),
-            serde_json::json!([5]),
-            serde_json::json!(6),
-        ];
-        assert_eq!(run_one("[[3],[4],[5],6][] | . as {a:$a} ?// $a ?// {a:$a} | $a", JsonValue::Null), four);
+        let four = expected_four_case_values();
+        for query in [
+            ".[] | . as {a:$a} ?// {a:$a} ?// $a | $a",
+            ".[] as {a:$a} ?// {a:$a} ?// $a | $a",
+            ".[] | . as {a:$a} ?// $a ?// {a:$a} | $a",
+            ".[] as {a:$a} ?// $a ?// {a:$a} | $a",
+        ] {
+            let actual = run_one(query, serde_json::json!([[3], [4], [5], 6]));
+            assert_eq!(actual.as_slice(), four.as_slice(), "query {query}");
+        }
+        for query in [
+            "[[3],[4],[5],6][] | . as {a:$a} ?// {a:$a} ?// $a | $a",
+            "[[3],[4],[5],6] | .[] as {a:$a} ?// {a:$a} ?// $a | $a",
+            "[[3],[4],[5],6][] | . as {a:$a} ?// $a ?// {a:$a} | $a",
+        ] {
+            let actual = run_one(query, JsonValue::Null);
+            assert_eq!(actual.as_slice(), four.as_slice(), "query {query}");
+        }
     }
 
     #[test]
     fn jq_pack6_fixture_cluster_1001_1369_cases() {
-        for case in FIXTURE_CASES_1001_80 {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("jq_1001_80", FIXTURE_CASES_1001_80);
     }
 
     #[test]
     fn jq_pack_cluster_320_363_cases() {
-        for case in FIXTURE_CASES_320_363 {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("jq_320_363", FIXTURE_CASES_320_363);
     }
 
     #[test]
     fn jq_pack_cluster_403_433_cases() {
-        for case in FIXTURE_CASES_403_433 {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("jq_403_433", FIXTURE_CASES_403_433);
     }
 
     #[test]
     fn jq_pack_cluster_364_391_cases() {
-        for case in FIXTURE_CASES_364_391 {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("jq_364_391", FIXTURE_CASES_364_391);
     }
 
     #[test]
     fn jq_pack_cluster_506_519_cases() {
-        for case in FIXTURE_CASES_506_519 {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("jq_506_519", FIXTURE_CASES_506_519);
     }
 
     #[test]
     fn jq_pack_cluster_295_307_cases() {
-        for case in FIXTURE_CASES_295_307 {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("jq_295_307", FIXTURE_CASES_295_307);
     }
 
     #[test]
     fn jq_pack_cluster_308_319_cases() {
-        for case in FIXTURE_CASES_308_319 {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("jq_308_319", FIXTURE_CASES_308_319);
     }
 
     #[test]
     fn jq_pack_cluster_434_445_cases() {
-        for case in FIXTURE_CASES_434_445 {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("jq_434_445", FIXTURE_CASES_434_445);
     }
 
     #[test]
     fn jq_pack_cluster_487_492_cases() {
-        for case in FIXTURE_CASES_487_492 {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("jq_487_492", FIXTURE_CASES_487_492);
     }
 
     #[test]
     fn jq_pack_cluster_290_294_cases() {
-        for case in FIXTURE_CASES_290_294 {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("jq_290_294", FIXTURE_CASES_290_294);
     }
 
     #[test]
     fn jq_pack_cluster_475_479_cases() {
-        for case in FIXTURE_CASES_475_479 {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("jq_475_479", FIXTURE_CASES_475_479);
     }
 
     #[test]
     fn jq_pack_remaining_compile_cases() {
-        for case in FIXTURE_CASES_REMAINING_COMPILE {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("jq_remaining_compile", FIXTURE_CASES_REMAINING_COMPILE);
     }
 
     #[test]
     fn onig_fixture_cases() {
-        for case in FIXTURE_CASES_ONIG_ALL {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("onig_all", FIXTURE_CASES_ONIG_ALL);
     }
 
     #[test]
     fn man_fixture_fail_cases() {
-        for case in FIXTURE_CASES_MAN_FAIL_183 {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("man_fail_183", FIXTURE_CASES_MAN_FAIL_183);
     }
 
     #[test]
     fn jq171_extra_compat_cases() {
-        for case in FIXTURE_CASES_JQ171_EXTRA {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("jq171_extra", FIXTURE_CASES_JQ171_EXTRA);
     }
 
     #[test]
     fn man171_extra_compat_cases() {
-        for case in FIXTURE_CASES_MAN171_EXTRA {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("man171_extra", FIXTURE_CASES_MAN171_EXTRA);
     }
 
     #[test]
     fn manonig_fixture_cases() {
-        for case in FIXTURE_CASES_MANONIG_ALL {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("manonig_all", FIXTURE_CASES_MANONIG_ALL);
     }
 
     #[test]
     fn optional_extra_fixture_cases() {
-        for case in FIXTURE_CASES_OPTIONAL_EXTRA {
-            let input = parse_jsonish_value(case.input).expect("fixture input");
-            let expected = case
-                .outputs
-                .iter()
-                .map(|line| parse_jsonish_value(line).expect("fixture output"))
-                .collect::<Vec<_>>();
-            let actual = run_one(case.query, input);
-            assert_eq!(actual, expected, "query {}", case.query);
-        }
+        assert_fixture_cluster("optional_extra", FIXTURE_CASES_OPTIONAL_EXTRA);
     }
 
     #[test]
-    fn base64_pipeline_and_try_compat_cases() {
+    fn format_pipeline_and_try_compat_cases() {
         let s = serde_json::json!("<>&'\"\t");
-        assert_eq!(run_one("(@base64|@base64d)", s.clone()), vec![s]);
+        assert_eq!(run_one("(@base64|@base64d)", s.clone()), vec![s.clone()]);
+        assert_eq!(run_one("(@uri|@urid)", s.clone()), vec![s]);
+
+        assert!(validate_query("(@uri|@urid)").is_ok());
+        assert!(validate_query(". | try @urid catch .").is_ok());
 
         assert_eq!(
             run_one("@base64d", serde_json::json!("=")),
             vec![serde_json::json!("")]
         );
         assert_eq!(
-            run_one(". | try @base64d catch .", serde_json::json!("Not base64 data")),
+            run_one(
+                ". | try @base64d catch .",
+                serde_json::json!("Not base64 data")
+            ),
             vec![serde_json::json!(
                 "string (\"Not base64 data\") is not valid base64 data"
             )]
         );
         assert_eq!(
             run_one(". | try @base64d catch .", serde_json::json!("QUJDa")),
-            vec![serde_json::json!("string (\"QUJDa\") trailing base64 byte found")]
+            vec![serde_json::json!(
+                "string (\"QUJDa\") trailing base64 byte found"
+            )]
         );
+        assert_eq!(
+            run_one(". | try @urid catch .", serde_json::json!("%F0%93%81")),
+            vec![serde_json::json!(
+                "string (\"%F0%93%81\") is not a valid uri encoding"
+            )]
+        );
+    }
+
+    #[test]
+    fn format_pipeline_parser_accepts_and_rejects_expected_forms() {
+        let direct = parse_format_pipeline_steps("@uri|@urid").expect("direct pipeline");
+        assert_eq!(direct, vec!["@uri", "@urid"]);
+
+        let wrapped =
+            parse_format_pipeline_steps("(. | @base64 | @base64d)").expect("wrapped pipeline");
+        assert_eq!(wrapped, vec!["@base64", "@base64d"]);
+
+        let try_steps =
+            parse_try_catch_format_steps(". | try @urid catch .").expect("try catch form");
+        assert_eq!(try_steps, vec!["@urid"]);
+
+        assert!(parse_format_pipeline_steps("(@uri|.,@urid)").is_none());
+        assert!(parse_try_catch_format_steps(". | try (@urid|@uri) catch 0").is_none());
     }
 
     #[test]
@@ -4722,7 +5513,9 @@ mod tests {
 
         assert_eq!(
             actual,
-            vec![serde_json::json!([{"offset":0,"length":0,"string":"","captures":[{"offset":0,"string":"","length":0,"name":null}]},{"offset":1,"length":0,"string":"","captures":[{"offset":1,"string":"","length":0,"name":null}]},{"offset":2,"length":0,"string":"","captures":[{"offset":2,"string":"","length":0,"name":null}]},{"offset":3,"length":0,"string":"","captures":[{"offset":3,"string":"","length":0,"name":null}]}])]
+            vec![
+                serde_json::json!([{"offset":0,"length":0,"string":"","captures":[{"offset":0,"string":"","length":0,"name":null}]},{"offset":1,"length":0,"string":"","captures":[{"offset":1,"string":"","length":0,"name":null}]},{"offset":2,"length":0,"string":"","captures":[{"offset":2,"string":"","length":0,"name":null}]},{"offset":3,"length":0,"string":"","captures":[{"offset":3,"string":"","length":0,"name":null}]}])
+            ]
         );
     }
 }

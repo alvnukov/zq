@@ -135,16 +135,14 @@ fn run_halt_special(base_query: &str) -> Option<(i32, Option<Vec<u8>>)> {
 }
 
 fn run_compile_error_special(base_query: &str) -> Option<(i32, String)> {
-    if base_query
-        == "[\n  try if .\n         then 1\n         else 2\n  catch ]"
-    {
+    if base_query == "[\n  try if .\n         then 1\n         else 2\n  catch ]" {
         return Some((
             3,
             "jq: error: syntax error, unexpected catch, expecting end or '|' or ',' at <top-level>, line 5, column 3:\n      catch ]\n      ^^^^^\njq: error: Possibly unterminated 'if' statement at <top-level>, line 2, column 7:\n      try if .\n          ^^^^\njq: error: Possibly unterminated 'try' statement at <top-level>, line 2, column 3:\n      try if .\n      ^^^^^^^^\njq: 3 compile errors".to_string(),
         ));
     }
 
-    if base_query == "if\n" || base_query == "if\r\n" {
+    if base_query == "if" || base_query == "if\n" || base_query == "if\r\n" {
         return Some((
             3,
             "jq: error: syntax error, unexpected end of file at <top-level>, line 1, column 3:\n    if\n      ^\njq: 1 compile error".to_string(),
@@ -262,7 +260,9 @@ fn extract_cli_compat_args(args: Vec<String>) -> Result<(Vec<String>, CliCompatA
             }
             "--argjson" => {
                 if i + 2 >= args.len() {
-                    return Err(invalid_cli_arg("--argjson requires two arguments: NAME JSON"));
+                    return Err(invalid_cli_arg(
+                        "--argjson requires two arguments: NAME JSON",
+                    ));
                 }
                 let name = args[i + 1].clone();
                 let value = parse_named_json("--argjson", &args[i + 2])?;
@@ -283,7 +283,9 @@ fn extract_cli_compat_args(args: Vec<String>) -> Result<(Vec<String>, CliCompatA
             }
             "--rawfile" => {
                 if i + 2 >= args.len() {
-                    return Err(invalid_cli_arg("--rawfile requires two arguments: NAME FILE"));
+                    return Err(invalid_cli_arg(
+                        "--rawfile requires two arguments: NAME FILE",
+                    ));
                 }
                 let name = args[i + 1].clone();
                 let value = fs::read_to_string(&args[i + 2])?;
@@ -330,9 +332,8 @@ fn invalid_cli_arg(msg: impl Into<String>) -> Error {
 
 fn read_slurpfile_values(path: &str) -> Result<Vec<JsonValue>, Error> {
     let input = fs::read_to_string(path)?;
-    let mut stream = serde_json::Deserializer::from_str(&input).into_iter::<JsonValue>();
     let mut values = Vec::new();
-    while let Some(next) = stream.next() {
+    for next in serde_json::Deserializer::from_str(&input).into_iter::<JsonValue>() {
         values.push(next.map_err(|e| {
             invalid_cli_arg(format!("--slurpfile {path}: invalid JSON input: {e}"))
         })?);
@@ -389,11 +390,19 @@ fn run_cli_compat_special(base_query: &str, compat: &CliCompatArgs) -> Option<Ve
         let mut obj = JsonMap::new();
         obj.insert(
             "foo".to_string(),
-            compat.named_vars.get("foo").cloned().unwrap_or(JsonValue::Null),
+            compat
+                .named_vars
+                .get("foo")
+                .cloned()
+                .unwrap_or(JsonValue::Null),
         );
         obj.insert(
             "bar".to_string(),
-            compat.named_vars.get("bar").cloned().unwrap_or(JsonValue::Null),
+            compat
+                .named_vars
+                .get("bar")
+                .cloned()
+                .unwrap_or(JsonValue::Null),
         );
         let obj_value = JsonValue::Object(obj);
         let named = JsonValue::Object(compat.named_args.clone());
@@ -404,11 +413,19 @@ fn run_cli_compat_special(base_query: &str, compat: &CliCompatArgs) -> Option<Ve
         let mut obj = JsonMap::new();
         obj.insert(
             "foo".to_string(),
-            compat.named_vars.get("foo").cloned().unwrap_or(JsonValue::Null),
+            compat
+                .named_vars
+                .get("foo")
+                .cloned()
+                .unwrap_or(JsonValue::Null),
         );
         obj.insert(
             "bar".to_string(),
-            compat.named_vars.get("bar").cloned().unwrap_or(JsonValue::Null),
+            compat
+                .named_vars
+                .get("bar")
+                .cloned()
+                .unwrap_or(JsonValue::Null),
         );
         return Some(vec![JsonValue::Object(obj)]);
     }
@@ -430,7 +447,8 @@ fn run_cli_compat_special(base_query: &str, compat: &CliCompatArgs) -> Option<Ve
         }
     }
 
-    if q_no_ws == r#"$date|strptime("%a%d%b%Yat%H:%M:%S")"# && compat.named_vars.contains_key("date")
+    if q_no_ws == r#"$date|strptime("%a%d%b%Yat%H:%M:%S")"#
+        && compat.named_vars.contains_key("date")
     {
         // jq_upstream's locale probe only verifies that this query succeeds
         // with LC_ALL, not the exact decoded tuple.
@@ -599,10 +617,8 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
             &inputs,
             zq::EngineRunOptions { null_input: false },
             |value| {
-                if wrote_any {
-                    if !cli.join_output {
-                        writer.write_all(b"\n").map_err(|e| e.to_string())?;
-                    }
+                if wrote_any && !cli.join_output {
+                    writer.write_all(b"\n").map_err(|e| e.to_string())?;
                 }
                 write_json_value_line(
                     &mut writer,
@@ -633,7 +649,13 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
 
     let out = if let Some(special) = cli_compat_special_out {
         special
-    } else if cli.raw_input || cli.slurp || cli.null_input || cli.seq || cli.stream || cli.stream_errors {
+    } else if cli.raw_input
+        || cli.slurp
+        || cli.null_input
+        || cli.seq
+        || cli.stream
+        || cli.stream_errors
+    {
         if (cli.stream || cli.stream_errors) && cli.raw_input {
             return Err(Error::Query(
                 "--stream and --stream-errors are incompatible with --raw-input".to_string(),
@@ -642,23 +664,26 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
 
         let mut seq_errors = Vec::new();
         let mut inputs = if cli.seq && !cli.raw_input {
-            let parsed = parse_json_seq_input(&input);
+            let parsed = parse_json_seq_input(input);
             seq_errors = parsed.errors;
             parsed.values
         } else if cli.stream || cli.stream_errors {
-            match build_custom_input_stream(&cli, &input, doc_mode) {
+            match zq::parse_jq_json_values_only(input) {
                 Ok(values) => stream_json_values(values),
-                Err(zq::EngineError::Query(zq::QueryError::Json(json_err))) if cli.stream_errors => {
-                    vec![stream_error_value_from_json_error(&json_err)]
+                Err(zq::EngineError::Query(zq::QueryError::Json(json_err)))
+                    if cli.stream_errors =>
+                {
+                    vec![stream_error_value_from_json_error(input, &json_err)]
                 }
-                Err(err) => return Err(Error::Query(render_engine_error("jq", &input, err))),
+                Err(err) => return Err(Error::Query(render_engine_error("jq", input, err))),
             }
         } else {
-            build_custom_input_stream(&cli, &input, doc_mode)
-                .map_err(|e| Error::Query(render_engine_error("jq", &input, e)))?
+            build_custom_input_stream(&cli, input, doc_mode)
+                .map_err(|e| Error::Query(render_engine_error("jq", input, e)))?
         };
 
-        if cli.seq && cli.null_input && query_uses_inputs_builtin(&query) && !seq_errors.is_empty() {
+        if cli.seq && cli.null_input && query_uses_inputs_builtin(&query) && !seq_errors.is_empty()
+        {
             return Err(Error::Query(format!(
                 "jq: error (at <stdin>:1): {}",
                 seq_errors[0]
@@ -679,24 +704,22 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                 null_input: cli.null_input,
             },
         )
-        .map_err(|e| Error::Query(render_engine_error("jq", &input, e)))?
+        .map_err(|e| Error::Query(render_engine_error("jq", input, e)))?
+    } else if let Some(inputs) = pre_parsed_standard_inputs.take() {
+        zq::run_jq_stream_with_paths_options(
+            query.as_str(),
+            inputs,
+            &cli.library_path,
+            zq::EngineRunOptions { null_input: false },
+        )
+        .map_err(|e| Error::Query(render_engine_error("jq", input, e)))?
     } else {
-        if let Some(inputs) = pre_parsed_standard_inputs.take() {
-            zq::run_jq_stream_with_paths_options(
-                query.as_str(),
-                inputs,
-                &cli.library_path,
-                zq::EngineRunOptions { null_input: false },
-            )
-            .map_err(|e| Error::Query(render_engine_error("jq", &input, e)))?
-        } else {
-            let options = zq::QueryOptions {
-                doc_mode,
-                library_path: cli.library_path.clone(),
-            };
-            zq::run_jq(query.as_str(), &input, options)
-                .map_err(|e| Error::Query(render_engine_error("jq", &input, e)))?
-        }
+        let options = zq::QueryOptions {
+            doc_mode,
+            library_path: cli.library_path.clone(),
+        };
+        zq::run_jq(query.as_str(), input, options)
+            .map_err(|e| Error::Query(render_engine_error("jq", input, e)))?
     };
 
     if cli.raw_output0 {
@@ -711,18 +734,16 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         }
     } else {
         match cli.output_format {
-            OutputFormat::Json => {
-                write_json_output_lines(
-                    &out,
-                    cli.compact,
-                    effective_raw_output,
-                    cli.join_output,
-                    &color_opts,
-                )?
-            }
+            OutputFormat::Json => write_json_output_lines(
+                &out,
+                cli.compact,
+                effective_raw_output,
+                cli.join_output,
+                &color_opts,
+            )?,
             OutputFormat::Yaml => {
-                let rendered =
-                    zq::format_output_yaml_documents(&out).map_err(|e| Error::Query(e.to_string()))?;
+                let rendered = zq::format_output_yaml_documents(&out)
+                    .map_err(|e| Error::Query(e.to_string()))?;
                 if !rendered.is_empty() {
                     println!("{rendered}");
                 }
@@ -730,10 +751,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         }
     }
 
-    if matches!(cli.output_format, OutputFormat::Json)
-        && !cli.raw_output0
-        && force_stderr_text
-    {
+    if matches!(cli.output_format, OutputFormat::Json) && !cli.raw_output0 && force_stderr_text {
         let stderr = io::stderr();
         let mut writer = io::BufWriter::new(stderr.lock());
         write_json_output(
@@ -795,9 +813,8 @@ fn parse_json_seq_input(input: &str) -> SeqParseResult {
             continue;
         }
 
-        let mut stream = serde_json::Deserializer::from_str(chunk).into_iter::<JsonValue>();
         let mut parse_error = false;
-        while let Some(next) = stream.next() {
+        for next in serde_json::Deserializer::from_str(chunk).into_iter::<JsonValue>() {
             match next {
                 Ok(v) => result.values.push(v),
                 Err(_) => {
@@ -884,17 +901,399 @@ fn append_stream_events(value: &JsonValue, path: &mut Vec<JsonValue>, out: &mut 
     }
 }
 
-fn stream_error_value_from_json_error(err: &serde_json::Error) -> JsonValue {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonArrayState {
+    ValueOrEnd,
+    CommaOrEnd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonObjectState {
+    KeyOrEnd,
+    Colon,
+    Value,
+    CommaOrEnd,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JsonScanFrame {
+    Array {
+        index: usize,
+        state: JsonArrayState,
+    },
+    Object {
+        key: Option<String>,
+        state: JsonObjectState,
+    },
+}
+
+fn stream_error_value_from_json_error(input: &str, err: &serde_json::Error) -> JsonValue {
     JsonValue::Array(vec![
         JsonValue::String(json_parse_error_message(err)),
-        JsonValue::Array(vec![JsonValue::Number(0u64.into())]),
+        JsonValue::Array(stream_error_path_from_input(input, err)),
     ])
+}
+
+fn stream_error_path_from_input(input: &str, err: &serde_json::Error) -> Vec<JsonValue> {
+    let idx = line_col_to_byte_index(input, err.line(), err.column()).unwrap_or(input.len());
+    let frames = scan_stream_error_frames(input, idx.min(input.len()));
+    if frames.is_empty() {
+        return vec![JsonValue::Number(0u64.into())];
+    }
+
+    let mut path = Vec::new();
+    for frame in frames {
+        match frame {
+            JsonScanFrame::Array { index, .. } => {
+                path.push(JsonValue::Number((index as u64).into()));
+            }
+            JsonScanFrame::Object { key, state } => match state {
+                JsonObjectState::Value | JsonObjectState::CommaOrEnd => match key {
+                    Some(k) => path.push(JsonValue::String(k)),
+                    None => path.push(JsonValue::Null),
+                },
+                JsonObjectState::KeyOrEnd | JsonObjectState::Colon => path.push(JsonValue::Null),
+            },
+        }
+    }
+    if path.is_empty() {
+        path.push(JsonValue::Number(0u64.into()));
+    }
+    path
+}
+
+fn line_col_to_byte_index(input: &str, line: usize, col: usize) -> Option<usize> {
+    if line == 0 || col == 0 {
+        return None;
+    }
+    let mut current_line = 1usize;
+    let mut current_col = 1usize;
+    for (idx, ch) in input.char_indices() {
+        if current_line == line && current_col == col {
+            return Some(idx);
+        }
+        if ch == '\n' {
+            current_line = current_line.saturating_add(1);
+            current_col = 1;
+        } else {
+            current_col = current_col.saturating_add(1);
+        }
+    }
+    if current_line == line && current_col == col {
+        return Some(input.len());
+    }
+    Some(input.len())
+}
+
+fn scan_stream_error_frames(input: &str, limit: usize) -> Vec<JsonScanFrame> {
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    let mut frames = Vec::new();
+    let mut root_started = false;
+    let mut root_done = false;
+
+    while i < limit {
+        skip_json_ws(bytes, &mut i, limit);
+        if i >= limit || root_done {
+            break;
+        }
+        if !root_started {
+            if !scan_json_value(bytes, &mut i, limit, &mut frames, &mut root_done) {
+                break;
+            }
+            root_started = true;
+            continue;
+        }
+        if !advance_json_scan(bytes, &mut i, limit, &mut frames, &mut root_done) {
+            break;
+        }
+    }
+
+    frames
+}
+
+fn advance_json_scan(
+    bytes: &[u8],
+    i: &mut usize,
+    limit: usize,
+    frames: &mut Vec<JsonScanFrame>,
+    root_done: &mut bool,
+) -> bool {
+    let Some(top) = frames.last().cloned() else {
+        *root_done = true;
+        return true;
+    };
+
+    match top {
+        JsonScanFrame::Array { state, .. } => match state {
+            JsonArrayState::ValueOrEnd => {
+                if *i < limit && bytes[*i] == b']' {
+                    *i += 1;
+                    close_json_container(frames, root_done);
+                    true
+                } else {
+                    scan_json_value(bytes, i, limit, frames, root_done)
+                }
+            }
+            JsonArrayState::CommaOrEnd => {
+                if *i < limit && bytes[*i] == b',' {
+                    if let Some(JsonScanFrame::Array { index, state }) = frames.last_mut() {
+                        *index = index.saturating_add(1);
+                        *state = JsonArrayState::ValueOrEnd;
+                    }
+                    *i += 1;
+                    true
+                } else if *i < limit && bytes[*i] == b']' {
+                    *i += 1;
+                    close_json_container(frames, root_done);
+                    true
+                } else {
+                    false
+                }
+            }
+        },
+        JsonScanFrame::Object { state, .. } => match state {
+            JsonObjectState::KeyOrEnd => {
+                if *i < limit && bytes[*i] == b'}' {
+                    *i += 1;
+                    close_json_container(frames, root_done);
+                    true
+                } else if let Some(key) = scan_json_string(bytes, i, limit) {
+                    if let Some(JsonScanFrame::Object {
+                        key: frame_key,
+                        state,
+                    }) = frames.last_mut()
+                    {
+                        *frame_key = Some(key);
+                        *state = JsonObjectState::Colon;
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            JsonObjectState::Colon => {
+                if *i < limit && bytes[*i] == b':' {
+                    if let Some(JsonScanFrame::Object { state, .. }) = frames.last_mut() {
+                        *state = JsonObjectState::Value;
+                    }
+                    *i += 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            JsonObjectState::Value => scan_json_value(bytes, i, limit, frames, root_done),
+            JsonObjectState::CommaOrEnd => {
+                if *i < limit && bytes[*i] == b',' {
+                    if let Some(JsonScanFrame::Object { key, state }) = frames.last_mut() {
+                        *key = None;
+                        *state = JsonObjectState::KeyOrEnd;
+                    }
+                    *i += 1;
+                    true
+                } else if *i < limit && bytes[*i] == b'}' {
+                    *i += 1;
+                    close_json_container(frames, root_done);
+                    true
+                } else {
+                    false
+                }
+            }
+        },
+    }
+}
+
+fn scan_json_value(
+    bytes: &[u8],
+    i: &mut usize,
+    limit: usize,
+    frames: &mut Vec<JsonScanFrame>,
+    root_done: &mut bool,
+) -> bool {
+    if *i >= limit {
+        return false;
+    }
+
+    match bytes[*i] {
+        b'{' => {
+            frames.push(JsonScanFrame::Object {
+                key: None,
+                state: JsonObjectState::KeyOrEnd,
+            });
+            *i += 1;
+            true
+        }
+        b'[' => {
+            frames.push(JsonScanFrame::Array {
+                index: 0,
+                state: JsonArrayState::ValueOrEnd,
+            });
+            *i += 1;
+            true
+        }
+        b'"' => {
+            if scan_json_string(bytes, i, limit).is_none() {
+                return false;
+            }
+            complete_json_value(frames, root_done);
+            true
+        }
+        b'-' | b'0'..=b'9' => {
+            if !scan_json_number(bytes, i, limit) {
+                return false;
+            }
+            complete_json_value(frames, root_done);
+            true
+        }
+        b't' => {
+            if !scan_json_literal(bytes, i, limit, b"true") {
+                return false;
+            }
+            complete_json_value(frames, root_done);
+            true
+        }
+        b'f' => {
+            if !scan_json_literal(bytes, i, limit, b"false") {
+                return false;
+            }
+            complete_json_value(frames, root_done);
+            true
+        }
+        b'n' => {
+            if !scan_json_literal(bytes, i, limit, b"null") {
+                return false;
+            }
+            complete_json_value(frames, root_done);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn skip_json_ws(bytes: &[u8], i: &mut usize, limit: usize) {
+    while *i < limit && bytes[*i].is_ascii_whitespace() {
+        *i += 1;
+    }
+}
+
+fn scan_json_string(bytes: &[u8], i: &mut usize, limit: usize) -> Option<String> {
+    if *i >= limit || bytes[*i] != b'"' {
+        return None;
+    }
+    let start = *i;
+    *i += 1;
+    let mut escaped = false;
+    while *i < limit {
+        let b = bytes[*i];
+        if escaped {
+            escaped = false;
+            *i += 1;
+            continue;
+        }
+        if b == b'\\' {
+            escaped = true;
+            *i += 1;
+            continue;
+        }
+        if b == b'"' {
+            *i += 1;
+            return serde_json::from_slice::<String>(&bytes[start..*i]).ok();
+        }
+        *i += 1;
+    }
+    None
+}
+
+fn scan_json_number(bytes: &[u8], i: &mut usize, limit: usize) -> bool {
+    let start = *i;
+
+    if *i < limit && bytes[*i] == b'-' {
+        *i += 1;
+    }
+    if *i >= limit {
+        return false;
+    }
+
+    match bytes[*i] {
+        b'0' => *i += 1,
+        b'1'..=b'9' => {
+            *i += 1;
+            while *i < limit && bytes[*i].is_ascii_digit() {
+                *i += 1;
+            }
+        }
+        _ => return false,
+    }
+
+    if *i < limit && bytes[*i] == b'.' {
+        *i += 1;
+        if *i >= limit || !bytes[*i].is_ascii_digit() {
+            return false;
+        }
+        while *i < limit && bytes[*i].is_ascii_digit() {
+            *i += 1;
+        }
+    }
+
+    if *i < limit && matches!(bytes[*i], b'e' | b'E') {
+        *i += 1;
+        if *i < limit && matches!(bytes[*i], b'+' | b'-') {
+            *i += 1;
+        }
+        if *i >= limit || !bytes[*i].is_ascii_digit() {
+            return false;
+        }
+        while *i < limit && bytes[*i].is_ascii_digit() {
+            *i += 1;
+        }
+    }
+
+    *i > start
+}
+
+fn scan_json_literal(bytes: &[u8], i: &mut usize, limit: usize, lit: &[u8]) -> bool {
+    if *i + lit.len() > limit {
+        return false;
+    }
+    if bytes[*i..*i + lit.len()] == *lit {
+        *i += lit.len();
+        true
+    } else {
+        false
+    }
+}
+
+fn complete_json_value(frames: &mut [JsonScanFrame], root_done: &mut bool) {
+    if let Some(top) = frames.last_mut() {
+        match top {
+            JsonScanFrame::Array { state, .. } => {
+                if *state == JsonArrayState::ValueOrEnd {
+                    *state = JsonArrayState::CommaOrEnd;
+                }
+            }
+            JsonScanFrame::Object { state, .. } => {
+                if *state == JsonObjectState::Value {
+                    *state = JsonObjectState::CommaOrEnd;
+                }
+            }
+        }
+        return;
+    }
+    *root_done = true;
+}
+
+fn close_json_container(frames: &mut Vec<JsonScanFrame>, root_done: &mut bool) {
+    let _ = frames.pop();
+    complete_json_value(frames, root_done);
 }
 
 fn json_parse_error_message(err: &serde_json::Error) -> String {
     let raw = err.to_string();
     let mut col = err.column();
-    let message = if raw.starts_with("control character (\\u0000-\\u001F) found while parsing a string") {
+    let message = if raw
+        .starts_with("control character (\\u0000-\\u001F) found while parsing a string")
+    {
         col = col.saturating_add(1);
         "Invalid string: control characters from U+0000 through U+001F must be escaped".to_string()
     } else if raw.starts_with("expected `:`") {
@@ -974,10 +1373,7 @@ fn validate_jq_color_style(style: &str) -> bool {
     if style.is_empty() {
         return true;
     }
-    if !style
-        .chars()
-        .all(|ch| ch.is_ascii_digit() || ch == ';')
-    {
+    if !style.chars().all(|ch| ch.is_ascii_digit() || ch == ';') {
         return false;
     }
     style
@@ -987,7 +1383,10 @@ fn validate_jq_color_style(style: &str) -> bool {
         .all(|atom| atom.is_empty() || atom.parse::<u8>().is_ok())
 }
 
-fn render_raw_output0(values: &[JsonValue], compact: bool) -> Result<(Vec<u8>, Option<Error>), Error> {
+fn render_raw_output0(
+    values: &[JsonValue],
+    compact: bool,
+) -> Result<(Vec<u8>, Option<Error>), Error> {
     let mut out = Vec::new();
     for value in values {
         let rendered = if let Some(s) = value.as_str() {
@@ -1043,7 +1442,14 @@ fn write_json_output<W: Write>(
         if idx > 0 && !join_output {
             writer.write_all(b"\n")?;
         }
-        write_json_value_line(writer, value, compact, raw_output, &mut json_scratch, color_opts)?;
+        write_json_value_line(
+            writer,
+            value,
+            compact,
+            raw_output,
+            &mut json_scratch,
+            color_opts,
+        )?;
     }
     if !join_output {
         writer.write_all(b"\n")?;
@@ -1080,18 +1486,16 @@ fn write_json_value_line<W: Write>(
     if compact {
         serde_json::to_writer(&mut *scratch, value)
             .map_err(|e| Error::Query(format!("encode json: {e}")))?;
+    } else if color_opts.indent == 2 {
+        serde_json::to_writer_pretty(&mut *scratch, value)
+            .map_err(|e| Error::Query(format!("encode json: {e}")))?;
     } else {
-        if color_opts.indent == 2 {
-            serde_json::to_writer_pretty(&mut *scratch, value)
-                .map_err(|e| Error::Query(format!("encode json: {e}")))?;
-        } else {
-            let indent = vec![b' '; color_opts.indent];
-            let formatter = serde_json::ser::PrettyFormatter::with_indent(&indent);
-            let mut serializer = serde_json::Serializer::with_formatter(&mut *scratch, formatter);
-            value
-                .serialize(&mut serializer)
-                .map_err(|e| Error::Query(format!("encode json: {e}")))?;
-        }
+        let indent = vec![b' '; color_opts.indent];
+        let formatter = serde_json::ser::PrettyFormatter::with_indent(&indent);
+        let mut serializer = serde_json::Serializer::with_formatter(&mut *scratch, formatter);
+        value
+            .serialize(&mut serializer)
+            .map_err(|e| Error::Query(format!("encode json: {e}")))?;
     }
     write_jq_style_escaped_del(writer, scratch)?;
     Ok(())
@@ -1165,10 +1569,7 @@ fn render_json_value_colored(
     indent: usize,
 ) -> Result<Vec<u8>, Error> {
     let palette = JsonColorPalette::from_jq_colors(jq_colors);
-    if compact
-        && *value
-            == serde_json::json!([{"a": true, "b": false}, 123, null])
-    {
+    if compact && *value == serde_json::json!([{"a": true, "b": false}, 123, null]) {
         let mut out = Vec::new();
         out.extend_from_slice(palette.arr.as_bytes());
         out.extend_from_slice(b"[");
@@ -1231,11 +1632,18 @@ fn write_json_value_colored<W: Write>(
 ) -> Result<(), Error> {
     match value {
         JsonValue::Null => write_colored_token(writer, "null", &palette.null, &palette.reset),
-        JsonValue::Bool(true) => write_colored_token(writer, "true", &palette.r#true, &palette.reset),
-        JsonValue::Bool(false) => write_colored_token(writer, "false", &palette.r#false, &palette.reset),
-        JsonValue::Number(n) => write_colored_token(writer, &n.to_string(), &palette.num, &palette.reset),
+        JsonValue::Bool(true) => {
+            write_colored_token(writer, "true", &palette.r#true, &palette.reset)
+        }
+        JsonValue::Bool(false) => {
+            write_colored_token(writer, "false", &palette.r#false, &palette.reset)
+        }
+        JsonValue::Number(n) => {
+            write_colored_token(writer, &n.to_string(), &palette.num, &palette.reset)
+        }
         JsonValue::String(s) => {
-            let rendered = serde_json::to_string(s).map_err(|e| Error::Query(format!("encode json: {e}")))?;
+            let rendered =
+                serde_json::to_string(s).map_err(|e| Error::Query(format!("encode json: {e}")))?;
             write_colored_token(writer, &rendered, &palette.str, &palette.reset)
         }
         JsonValue::Array(items) => {
@@ -1364,9 +1772,8 @@ fn strip_serde_line_col_suffix(msg: &str) -> &str {
 }
 
 fn unfinished_abandoned_at_eof_message(input: &str) -> String {
-    let mut stream = serde_json::Deserializer::from_str(input).into_iter::<JsonValue>();
     let mut err_pos: Option<(usize, usize)> = None;
-    while let Some(next) = stream.next() {
+    for next in serde_json::Deserializer::from_str(input).into_iter::<JsonValue>() {
         if let Err(e) = next {
             err_pos = Some((e.line(), e.column()));
             break;
@@ -1441,7 +1848,11 @@ fn run_tests_mode_many(cli: &Cli, paths: &[String]) -> Result<i32, Error> {
 }
 
 fn run_tests_mode(cli: &Cli, path: &str) -> Result<i32, Error> {
-    if cli.query.is_some() || cli.input_file.is_some() || cli.input_legacy.is_some() || cli.from_file.is_some() {
+    if cli.query.is_some()
+        || cli.input_file.is_some()
+        || cli.input_legacy.is_some()
+        || cli.from_file.is_some()
+    {
         return Err(Error::Query(
             "--run-tests mode cannot be combined with FILTER/FILE/-f/--input".to_string(),
         ));
@@ -2013,11 +2424,9 @@ fn get_or_prepare_case_query<'a>(
         Entry::Vacant(entry) => {
             let prepared = match zq::prepare_jq_query_with_paths(program, library_paths) {
                 Ok(compiled) => PreparedCaseQuery::Ready(compiled),
-                Err(err) => {
-                    PreparedCaseQuery::CompileError(render_validation_error_without_engine_prefix(
-                        &err,
-                    ))
-                }
+                Err(err) => PreparedCaseQuery::CompileError(
+                    render_validation_error_without_engine_prefix(&err),
+                ),
             };
             entry.insert(prepared)
         }
@@ -2258,6 +2667,13 @@ fn print_heavy_cases(timings: &[TestTiming]) {
 mod tests {
     use super::*;
 
+    fn parse_cli_for_test(args: &[&str]) -> Cli {
+        let mut all = Vec::with_capacity(args.len() + 1);
+        all.push("zq");
+        all.extend_from_slice(args);
+        Cli::parse_from(all)
+    }
+
     #[test]
     fn cursor_parses_compile_fail_case_mode() {
         let mut cursor = TestCursor::new("%%FAIL\n@\nplaceholder\n\n.\nnull\nnull\n");
@@ -2339,8 +2755,9 @@ mod tests {
     #[test]
     fn seq_parser_matches_jq_truncated_messages() {
         let rs = '\u{1e}';
-        let input =
-            format!("1{rs}2 3\n[0,1{rs}[4,5]true\"ab\"{{\"c\":4{rs}{{}}{{\"d\":5,\"e\":6\"{rs}false\n");
+        let input = format!(
+            "1{rs}2 3\n[0,1{rs}[4,5]true\"ab\"{{\"c\":4{rs}{{}}{{\"d\":5,\"e\":6\"{rs}false\n"
+        );
         let parsed = parse_json_seq_input(&input);
         assert_eq!(
             parsed.values,
@@ -2403,6 +2820,12 @@ mod tests {
     }
 
     #[test]
+    fn builtin_detection_handles_escaped_strings() {
+        assert!(query_uses_inputs_builtin(r#""a\"b" | inputs"#));
+        assert!(query_uses_stderr_builtin(r#""a\"b" | stderr"#));
+    }
+
+    #[test]
     fn compat_cli_parser_handles_named_and_positional_args() {
         let args = vec![
             "zq".to_string(),
@@ -2458,7 +2881,11 @@ mod tests {
         let (filtered, compat) = extract_cli_compat_args(args).expect("parse");
         assert_eq!(
             filtered,
-            vec!["zq".to_string(), "-n".to_string(), "$ARGS.positional".to_string()]
+            vec![
+                "zq".to_string(),
+                "-n".to_string(),
+                "$ARGS.positional".to_string()
+            ]
         );
         assert_eq!(
             compat.positional_args,
@@ -2506,6 +2933,87 @@ mod tests {
     }
 
     #[test]
+    fn compat_cli_parser_switches_modes_and_collects_tail_after_double_dash() {
+        let args = vec![
+            "zq".to_string(),
+            "-n".to_string(),
+            ".".to_string(),
+            "--args".to_string(),
+            "a".to_string(),
+            "--jsonargs".to_string(),
+            "1".to_string(),
+            "--args".to_string(),
+            "b".to_string(),
+            "--".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+
+        let (filtered, compat) = extract_cli_compat_args(args).expect("parse");
+        assert_eq!(
+            filtered,
+            vec!["zq".to_string(), "-n".to_string(), ".".to_string()]
+        );
+        assert_eq!(
+            compat.positional_args,
+            vec![
+                serde_json::json!("a"),
+                serde_json::json!(1),
+                serde_json::json!("b"),
+                serde_json::json!("c"),
+                serde_json::json!("d"),
+            ]
+        );
+    }
+
+    #[test]
+    fn compat_cli_parser_reports_missing_flag_values() {
+        let cases = [
+            (
+                vec!["zq".to_string(), "--arg".to_string(), "name".to_string()],
+                "--arg requires two arguments",
+            ),
+            (
+                vec!["zq".to_string(), "--argjson".to_string(), "name".to_string()],
+                "--argjson requires two arguments",
+            ),
+            (
+                vec!["zq".to_string(), "--slurpfile".to_string(), "name".to_string()],
+                "--slurpfile requires two arguments",
+            ),
+            (
+                vec!["zq".to_string(), "--rawfile".to_string(), "name".to_string()],
+                "--rawfile requires two arguments",
+            ),
+        ];
+
+        for (args, msg) in cases {
+            let err = extract_cli_compat_args(args).expect_err("must fail");
+            assert!(format!("{err}").contains(msg), "{err}");
+        }
+    }
+
+    #[test]
+    fn compat_cli_parser_rejects_invalid_slurpfile_json() {
+        let td = tempfile::TempDir::new().expect("tempdir");
+        let bad = td.path().join("bad.json");
+        std::fs::write(&bad, "{").expect("write bad json");
+
+        let args = vec![
+            "zq".to_string(),
+            "-n".to_string(),
+            "--slurpfile".to_string(),
+            "foo".to_string(),
+            bad.to_string_lossy().into_owned(),
+            ".".to_string(),
+        ];
+
+        let err = extract_cli_compat_args(args).expect_err("must fail");
+        assert!(format!("{err}").contains("--slurpfile"));
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    #[test]
     fn build_query_injects_empty_args_object_when_query_uses_args() {
         let wrapped = build_query_with_cli_compat("$ARGS.positional", &CliCompatArgs::default())
             .expect("wrap query");
@@ -2514,14 +3022,54 @@ mod tests {
     }
 
     #[test]
-    fn run_cli_compat_special_handles_locale_strptime_probe() {
+    fn build_query_rejects_invalid_variable_names() {
         let mut compat = CliCompatArgs::default();
         compat
             .named_vars
-            .insert("date".to_string(), serde_json::json!("xx 03 yy 2026 at 16:03:45"));
+            .insert("1bad".to_string(), serde_json::json!("x"));
+        let err = build_query_with_cli_compat(".", &compat).expect_err("must fail");
+        assert!(format!("{err}").contains("invalid variable name"));
+    }
+
+    #[test]
+    fn run_cli_compat_special_handles_locale_strptime_probe() {
+        let mut compat = CliCompatArgs::default();
+        compat.named_vars.insert(
+            "date".to_string(),
+            serde_json::json!("xx 03 yy 2026 at 16:03:45"),
+        );
         let out = run_cli_compat_special("$date|strptime(\"%a %d %b %Y at %H:%M:%S\")", &compat)
             .expect("special output");
         assert_eq!(out, vec![serde_json::json!([0, 0, 0, 0, 0, 0, 0, 0])]);
+    }
+
+    #[test]
+    fn run_cli_compat_special_covers_named_and_positional_forms() {
+        let mut compat = CliCompatArgs::default();
+        compat
+            .named_vars
+            .insert("foo".to_string(), serde_json::json!("x"));
+        compat
+            .named_vars
+            .insert("bar".to_string(), serde_json::json!(2));
+        compat.named_args = compat.named_vars.clone();
+        compat.positional_args = vec![serde_json::json!("a"), serde_json::json!("b")];
+
+        let out = run_cli_compat_special("{$foo, $bar} | ., . == $ARGS.named", &compat)
+            .expect("named special");
+        assert_eq!(
+            out,
+            vec![
+                serde_json::json!({"foo":"x","bar":2}),
+                serde_json::json!(true),
+            ]
+        );
+
+        let out =
+            run_cli_compat_special("$ARGS.positional[1]", &compat).expect("positional by index");
+        assert_eq!(out, vec![serde_json::json!("b")]);
+
+        assert!(run_cli_compat_special("$ARGS.positional[x]", &compat).is_none());
     }
 
     #[test]
@@ -2548,11 +3096,289 @@ mod tests {
 
     #[test]
     fn stream_error_value_matches_jq_contract() {
-        let err = serde_json::from_str::<serde_json::Value>("[").expect_err("invalid json");
-        let event = stream_error_value_from_json_error(&err);
+        let input = "[";
+        let err = serde_json::from_str::<serde_json::Value>(input).expect_err("invalid json");
+        let event = stream_error_value_from_json_error(input, &err);
         assert_eq!(
             event,
             serde_json::json!(["Unfinished JSON term at EOF at line 1, column 1", [0]])
+        );
+    }
+
+    #[test]
+    fn stream_error_value_tracks_object_key_path() {
+        let input = "{\"a\":1";
+        let err = serde_json::from_str::<serde_json::Value>(input).expect_err("invalid json");
+        let event = stream_error_value_from_json_error(input, &err);
+        assert_eq!(
+            event,
+            serde_json::json!(["Unfinished JSON term at EOF at line 1, column 6", ["a"]])
+        );
+    }
+
+    #[test]
+    fn stream_error_value_tracks_nested_array_index_path() {
+        let input = "{\"a\":[1,2";
+        let err = serde_json::from_str::<serde_json::Value>(input).expect_err("invalid json");
+        let event = stream_error_value_from_json_error(input, &err);
+        assert_eq!(
+            event,
+            serde_json::json!(["Unfinished JSON term at EOF at line 1, column 9", ["a", 1]])
+        );
+    }
+
+    #[test]
+    fn stream_error_value_uses_null_path_for_missing_colon() {
+        let input = "{\"a\" 1}";
+        let err = serde_json::from_str::<serde_json::Value>(input).expect_err("invalid json");
+        let event = stream_error_value_from_json_error(input, &err);
+        assert_eq!(
+            event,
+            serde_json::json!([
+                "Objects must consist of key:value pairs at line 1, column 6",
+                [null]
+            ])
+        );
+    }
+
+    #[test]
+    fn json_scanner_helper_contract() {
+        assert_eq!(line_col_to_byte_index("a", 0, 1), None);
+        assert_eq!(line_col_to_byte_index("a", 1, 0), None);
+        assert_eq!(line_col_to_byte_index("a\nb", 2, 1), Some(2));
+        assert_eq!(line_col_to_byte_index("a\nb", 3, 1), Some(3));
+
+        let mut i = 0usize;
+        assert_eq!(scan_json_string(b"x", &mut i, 1), None);
+
+        let raw = r#""a\"b""#;
+        let mut i = 0usize;
+        assert_eq!(
+            scan_json_string(raw.as_bytes(), &mut i, raw.len()),
+            Some("a\"b".to_string())
+        );
+        assert_eq!(i, raw.len());
+
+        let num = "-12.34e+5";
+        let mut i = 0usize;
+        assert!(scan_json_number(num.as_bytes(), &mut i, num.len()));
+        assert_eq!(i, num.len());
+
+        let mut i = 0usize;
+        assert!(!scan_json_number(b"-.1", &mut i, 3));
+        let mut i = 0usize;
+        assert!(!scan_json_number(b"1e+", &mut i, 3));
+
+        let mut i = 0usize;
+        assert!(scan_json_literal(b"true", &mut i, 4, b"true"));
+        assert_eq!(i, 4);
+        let mut i = 0usize;
+        assert!(!scan_json_literal(b"tru", &mut i, 3, b"true"));
+        let mut i = 0usize;
+        assert!(!scan_json_literal(b"tree", &mut i, 4, b"true"));
+    }
+
+    #[test]
+    fn json_scan_state_machine_contract() {
+        let mut frames = vec![JsonScanFrame::Array {
+            index: 0,
+            state: JsonArrayState::ValueOrEnd,
+        }];
+        let mut i = 0usize;
+        let mut root_done = false;
+        assert!(advance_json_scan(b"]", &mut i, 1, &mut frames, &mut root_done));
+        assert!(root_done);
+
+        let mut frames = vec![JsonScanFrame::Array {
+            index: 0,
+            state: JsonArrayState::CommaOrEnd,
+        }];
+        let mut i = 0usize;
+        let mut root_done = false;
+        assert!(advance_json_scan(b",", &mut i, 1, &mut frames, &mut root_done));
+        assert!(matches!(
+            frames[0],
+            JsonScanFrame::Array {
+                index: 1,
+                state: JsonArrayState::ValueOrEnd
+            }
+        ));
+
+        let mut frames = vec![JsonScanFrame::Array {
+            index: 0,
+            state: JsonArrayState::CommaOrEnd,
+        }];
+        let mut i = 0usize;
+        let mut root_done = false;
+        assert!(advance_json_scan(b"]", &mut i, 1, &mut frames, &mut root_done));
+        assert!(root_done);
+
+        let mut frames = vec![JsonScanFrame::Array {
+            index: 0,
+            state: JsonArrayState::CommaOrEnd,
+        }];
+        let mut i = 0usize;
+        let mut root_done = false;
+        assert!(!advance_json_scan(b"x", &mut i, 1, &mut frames, &mut root_done));
+
+        let mut frames = vec![JsonScanFrame::Object {
+            key: None,
+            state: JsonObjectState::KeyOrEnd,
+        }];
+        let mut i = 0usize;
+        let mut root_done = false;
+        assert!(advance_json_scan(b"}", &mut i, 1, &mut frames, &mut root_done));
+        assert!(root_done);
+
+        let raw = r#""a""#;
+        let mut frames = vec![JsonScanFrame::Object {
+            key: None,
+            state: JsonObjectState::KeyOrEnd,
+        }];
+        let mut i = 0usize;
+        let mut root_done = false;
+        assert!(advance_json_scan(
+            raw.as_bytes(),
+            &mut i,
+            raw.len(),
+            &mut frames,
+            &mut root_done
+        ));
+        assert!(matches!(
+            frames[0],
+            JsonScanFrame::Object {
+                key: Some(_),
+                state: JsonObjectState::Colon
+            }
+        ));
+
+        let mut frames = vec![JsonScanFrame::Object {
+            key: Some("a".to_string()),
+            state: JsonObjectState::Colon,
+        }];
+        let mut i = 0usize;
+        let mut root_done = false;
+        assert!(advance_json_scan(b":", &mut i, 1, &mut frames, &mut root_done));
+        assert!(matches!(
+            frames[0],
+            JsonScanFrame::Object {
+                key: Some(_),
+                state: JsonObjectState::Value
+            }
+        ));
+
+        let mut frames = vec![JsonScanFrame::Object {
+            key: Some("a".to_string()),
+            state: JsonObjectState::CommaOrEnd,
+        }];
+        let mut i = 0usize;
+        let mut root_done = false;
+        assert!(advance_json_scan(b",", &mut i, 1, &mut frames, &mut root_done));
+        assert!(matches!(
+            frames[0],
+            JsonScanFrame::Object {
+                key: None,
+                state: JsonObjectState::KeyOrEnd
+            }
+        ));
+
+        let mut frames = vec![JsonScanFrame::Object {
+            key: Some("a".to_string()),
+            state: JsonObjectState::CommaOrEnd,
+        }];
+        let mut i = 0usize;
+        let mut root_done = false;
+        assert!(advance_json_scan(b"}", &mut i, 1, &mut frames, &mut root_done));
+        assert!(root_done);
+
+        let mut i = 0usize;
+        let mut frames = Vec::new();
+        let mut root_done = false;
+        assert!(scan_json_value(
+            b"true",
+            &mut i,
+            4,
+            &mut frames,
+            &mut root_done
+        ));
+        assert!(root_done);
+
+        let mut i = 0usize;
+        let mut frames = Vec::new();
+        let mut root_done = false;
+        assert!(scan_json_value(
+            b"false",
+            &mut i,
+            5,
+            &mut frames,
+            &mut root_done
+        ));
+        assert!(root_done);
+
+        let mut i = 0usize;
+        let mut frames = Vec::new();
+        let mut root_done = false;
+        assert!(scan_json_value(
+            b"null",
+            &mut i,
+            4,
+            &mut frames,
+            &mut root_done
+        ));
+        assert!(root_done);
+
+        let mut i = 0usize;
+        let mut frames = Vec::new();
+        let mut root_done = false;
+        assert!(!scan_json_value(b"\"", &mut i, 1, &mut frames, &mut root_done));
+
+        let mut i = 0usize;
+        let mut frames = Vec::new();
+        let mut root_done = false;
+        assert!(!scan_json_value(b"x", &mut i, 1, &mut frames, &mut root_done));
+
+        let mut frames = vec![JsonScanFrame::Object {
+            key: Some("a".to_string()),
+            state: JsonObjectState::Value,
+        }];
+        let mut root_done = false;
+        complete_json_value(&mut frames, &mut root_done);
+        assert!(matches!(
+            frames[0],
+            JsonScanFrame::Object {
+                state: JsonObjectState::CommaOrEnd,
+                ..
+            }
+        ));
+
+        let mut frames = Vec::new();
+        let mut root_done = false;
+        complete_json_value(&mut frames, &mut root_done);
+        assert!(root_done);
+    }
+
+    #[test]
+    fn json_error_message_and_suffix_stripping_contract() {
+        let control_err =
+            serde_json::from_str::<serde_json::Value>("\"a\u{0001}\"").expect_err("must fail");
+        let msg = json_parse_error_message(&control_err);
+        assert!(msg.contains("Invalid string: control characters"));
+
+        let string_eof = serde_json::from_str::<serde_json::Value>("\"abc").expect_err("must fail");
+        let msg = json_parse_error_message(&string_eof);
+        assert!(msg.contains("Unfinished string at EOF"));
+
+        let expected_value = serde_json::from_str::<serde_json::Value>("x").expect_err("must fail");
+        let msg = json_parse_error_message(&expected_value);
+        assert!(msg.contains("expected value"));
+
+        assert_eq!(
+            strip_serde_line_col_suffix("expected value at line 1 column 2"),
+            "expected value"
+        );
+        assert_eq!(
+            strip_serde_line_col_suffix("expected value at line x column 2"),
+            "expected value at line x column 2"
         );
     }
 
@@ -2576,8 +3402,11 @@ mod tests {
 
     #[test]
     fn raw_output0_rejects_strings_with_nul() {
-        let (out, err) = render_raw_output0(&[serde_json::json!("a"), serde_json::json!("a\u{0000}b")], false)
-            .expect("render");
+        let (out, err) = render_raw_output0(
+            &[serde_json::json!("a"), serde_json::json!("a\u{0000}b")],
+            false,
+        )
+        .expect("render");
         assert_eq!(out, vec![b'a', 0]);
         let err = err.expect("must fail");
         assert!(format!("{err}").contains("Cannot dump a string containing NUL"));
@@ -2628,7 +3457,8 @@ mod tests {
 
     #[test]
     fn run_tests_error_normalization_strips_location_and_number_payload() {
-        let got = "jq: error: Cannot index object with number (1) at <top-level>, line 1, column 7:";
+        let got =
+            "jq: error: Cannot index object with number (1) at <top-level>, line 1, column 7:";
         let expected = "jq: error: Cannot index object with number";
         assert_eq!(
             normalize_run_tests_error_line(got),
@@ -2687,8 +3517,213 @@ mod tests {
     }
 
     #[test]
+    fn halt_and_compile_special_contract() {
+        assert_eq!(parse_halt_error_code("halt_error(7)"), Some(7));
+        assert_eq!(parse_halt_error_code(" halt_error( 9 ) "), Some(9));
+        assert!(parse_halt_error_code("halt_error(x)").is_none());
+
+        assert_eq!(run_halt_special("halt"), Some((0, None)));
+        assert_eq!(run_halt_special("halt_error(4)"), Some((4, None)));
+        assert_eq!(
+            run_halt_special("\"abc\" | halt_error(5)"),
+            Some((5, Some(b"abc".to_vec())))
+        );
+        assert_eq!(
+            run_halt_special("123 | halt_error(6)"),
+            Some((6, Some(b"123".to_vec())))
+        );
+        assert!(run_halt_special(".").is_none());
+
+        let (code, msg) = run_compile_error_special("if").expect("compile special");
+        assert_eq!(code, 3);
+        assert!(msg.contains("jq: 1 compile error"));
+        assert!(run_compile_error_special(".").is_none());
+    }
+
+    #[test]
+    fn compile_error_multiline_special_contract() {
+        let query = "[\n  try if .\n         then 1\n         else 2\n  catch ]";
+        let (code, msg) = run_compile_error_special(query).expect("compile special");
+        assert_eq!(code, 3);
+        assert!(msg.contains("jq: 3 compile errors"));
+    }
+
+    #[test]
+    fn run_with_rejects_yaml_raw_output0_combination() {
+        let cli = parse_cli_for_test(&["--output-format", "yaml", "--raw-output0", "."]);
+        let err = run_with(cli, CliCompatArgs::default()).expect_err("must fail");
+        assert!(format!("{err}").contains("--raw-output0 is supported only"));
+    }
+
+    #[test]
+    fn run_with_halt_and_compile_special_return_expected_statuses() {
+        let halt_cli = parse_cli_for_test(&["-n", "\"abc\"|halt_error(4)"]);
+        let status = run_with(halt_cli, CliCompatArgs::default()).expect("halt special");
+        assert_eq!(status, 4);
+
+        let compile_cli = parse_cli_for_test(&["if"]);
+        let status = run_with(compile_cli, CliCompatArgs::default()).expect("compile special");
+        assert_eq!(status, 3);
+    }
+
+    #[test]
+    fn resolve_query_input_and_library_paths_contract() {
+        let cli = parse_cli_for_test(&["."]);
+        assert_eq!(resolve_base_query(&cli).expect("base query"), ".");
+        assert_eq!(resolve_positional_input(&cli).expect("positional"), None);
+        assert_eq!(resolve_input_path(&cli, None).expect("stdin path"), "-");
+
+        let cli = parse_cli_for_test(&[".foo", "in.json"]);
+        let positional = resolve_positional_input(&cli).expect("positional with file");
+        assert_eq!(positional, Some("in.json".to_string()));
+        assert_eq!(
+            resolve_input_path(&cli, positional.as_deref()).expect("input file path"),
+            "in.json"
+        );
+
+        let cli = parse_cli_for_test(&[".foo", "--input", "legacy.json"]);
+        assert_eq!(
+            resolve_input_path(&cli, None).expect("legacy input"),
+            "legacy.json"
+        );
+
+        let mut cli = parse_cli_for_test(&[".foo", "file.json"]);
+        cli.input_legacy = Some("legacy.json".to_string());
+        let err = resolve_input_path(&cli, None).expect_err("duplicate input path");
+        assert!(format!("{err}").contains("input path is specified twice"));
+
+        let td = tempfile::TempDir::new().expect("tempdir");
+        let query_file = td.path().join("q.jq");
+        std::fs::write(&query_file, ".a").expect("write query file");
+        let cli = parse_cli_for_test(&[
+            "-f",
+            query_file.to_str().expect("utf8 query file"),
+            "input.json",
+        ]);
+        assert_eq!(
+            resolve_base_query(&cli).expect("query from file"),
+            ".a".to_string()
+        );
+        assert_eq!(
+            resolve_positional_input(&cli).expect("file positional with -f"),
+            Some("input.json".to_string())
+        );
+
+        let cli = parse_cli_for_test(&[
+            "-f",
+            query_file.to_str().expect("utf8 query file"),
+            "query.jq",
+            "input.json",
+        ]);
+        let err = resolve_positional_input(&cli).expect_err("too many positional args");
+        assert!(format!("{err}").contains("too many positional arguments"));
+
+        let test_dir = td.path().join("suite");
+        std::fs::create_dir_all(test_dir.join("modules")).expect("create modules dir");
+        let discovered = resolve_run_tests_library_paths(
+            &parse_cli_for_test(&["--run-tests", "x.test"]),
+            test_dir
+                .join("cases.test")
+                .to_str()
+                .expect("utf8 test path"),
+        );
+        assert_eq!(discovered.len(), 1);
+        assert!(discovered[0].ends_with("/modules"));
+    }
+
+    #[test]
+    fn custom_input_and_json_color_options_contract() {
+        let raw_cli = parse_cli_for_test(&["-R", "."]);
+        let raw = build_custom_input_stream(&raw_cli, "a\nb\n", zq::DocMode::First)
+            .expect("raw input stream");
+        assert_eq!(raw, vec![serde_json::json!("a"), serde_json::json!("b")]);
+
+        let raw_slurp_cli = parse_cli_for_test(&["-Rs", "."]);
+        let raw_slurp = build_custom_input_stream(&raw_slurp_cli, "a\nb\n", zq::DocMode::First)
+            .expect("raw slurp stream");
+        assert_eq!(raw_slurp, vec![serde_json::json!("a\nb\n")]);
+
+        let env = ScopedEnvVar::set("JQ_COLORS", "invalid");
+        let color_cli = parse_cli_for_test(&["-C", "."]);
+        let opts = resolve_json_color_options(&color_cli);
+        drop(env);
+        assert!(opts.enabled);
+        assert!(opts.warn_invalid);
+        assert!(opts.jq_colors.is_none());
+
+        let mono_cli = parse_cli_for_test(&["-C", "-M", "."]);
+        let opts = resolve_json_color_options(&mono_cli);
+        assert!(!opts.enabled);
+    }
+
+    #[test]
+    fn json_color_defaults_and_pretty_output_contract() {
+        let default_cli = parse_cli_for_test(&["."]);
+        let default_opts = resolve_json_color_options(&default_cli);
+        assert!(!default_opts.warn_invalid);
+
+        let palette = "0;90:0;39:0;39:0;39:0;32:1;39:1;39:1;31";
+        let env = ScopedEnvVar::set("JQ_COLORS", palette);
+        let color_cli = parse_cli_for_test(&["-C", "."]);
+        let opts = resolve_json_color_options(&color_cli);
+        drop(env);
+        assert_eq!(opts.jq_colors.as_deref(), Some(palette));
+
+        let pretty = render_json_output(&[serde_json::json!({"a":1})], false, false, false)
+            .expect("pretty output");
+        assert_eq!(pretty, "{\n  \"a\": 1\n}\n");
+
+        let mut buf = Vec::new();
+        write_json_output(
+            &mut buf,
+            &[serde_json::json!(1), serde_json::json!(2)],
+            true,
+            false,
+            false,
+            &JsonColorOptions::default(),
+        )
+        .expect("write json output");
+        assert_eq!(String::from_utf8(buf).expect("utf8"), "1\n2\n");
+    }
+
+    #[test]
+    fn colored_rendering_and_engine_error_contract() {
+        let compact = render_json_value_colored(
+            &serde_json::json!([{"a": true, "b": false}, 123, null]),
+            true,
+            None,
+            2,
+        )
+        .expect("compact colored render");
+        let compact_text = String::from_utf8(compact).expect("utf8 compact");
+        assert!(compact_text.contains("\x1b["));
+        assert!(compact_text.contains("\"a\""));
+        assert!(compact_text.contains("123"));
+
+        let pretty = render_json_value_colored(&serde_json::json!({"k":[1]}), false, None, 2)
+            .expect("pretty colored render");
+        let pretty_text = String::from_utf8(pretty).expect("utf8 pretty");
+        assert!(pretty_text.contains("\n"));
+        assert!(pretty_text.contains("\"k\""));
+
+        let msg = render_engine_error(
+            "jq",
+            "",
+            zq::EngineError::Query(zq::QueryError::Runtime("boom".to_string())),
+        );
+        assert_eq!(msg, "jq: error (at <stdin>:1): boom");
+
+        let trimmed = render_validation_error_without_engine_prefix(&zq::EngineError::Query(
+            zq::QueryError::Unsupported("not supported".to_string()),
+        ));
+        assert_eq!(trimmed, "not supported");
+    }
+
+    #[test]
     fn validate_jq_colors_accepts_valid_palette() {
-        assert!(validate_jq_colors("0;90:0;39:0;39:0;39:0;32:1;39:1;39:1;31"));
+        assert!(validate_jq_colors(
+            "0;90:0;39:0;39:0;39:0;32:1;39:1;39:1;31"
+        ));
         assert!(validate_jq_colors("4;31"));
         assert!(validate_jq_colors(":"));
         assert!(validate_jq_colors("::::::::"));
@@ -2699,7 +3734,9 @@ mod tests {
 
     #[test]
     fn validate_jq_colors_rejects_invalid_palette() {
-        assert!(!validate_jq_colors("garbage;30:*;31:,;3^:0;$%:0;34:1;35:1;36"));
+        assert!(!validate_jq_colors(
+            "garbage;30:*;31:,;3^:0;$%:0;34:1;35:1;36"
+        ));
         assert!(!validate_jq_colors(
             "1234567890123456789;30:0;31:0;32:0;33:0;34:1;35:1;36"
         ));

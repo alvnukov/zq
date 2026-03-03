@@ -1,0 +1,19 @@
+.
+{"foo":0}
+{"foo":0}
+
+[.[]]
+[1,2,3]
+[1,2,3]
+
+@uri
+"<>&'\"\t"
+"%3C%3E%26%27%22%09"
+
+(@uri|@urid)
+"<>&'\"\t"
+"<>&'\"\t"
+
+. | try @urid catch .
+"%F0%93%81"
+"string (\"%F0%93%81\") is not a valid uri encoding"

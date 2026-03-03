@@ -540,15 +540,19 @@ static FIXTURE_CASES_295_307: &[FixtureCase] = include!("fixtures_jq_295_307.inc
 static FIXTURE_CASES_308_319: &[FixtureCase] = include!("fixtures_jq_308_319.inc");
 static FIXTURE_CASES_434_445: &[FixtureCase] = include!("fixtures_jq_434_445.inc");
 static FIXTURE_CASES_487_492: &[FixtureCase] = include!("fixtures_jq_487_492.inc");
+static FIXTURE_CASES_290_294: &[FixtureCase] = include!("fixtures_jq_290_294.inc");
+static FIXTURE_CASES_475_479: &[FixtureCase] = include!("fixtures_jq_475_479.inc");
 
 fn fixture_cases() -> impl Iterator<Item = &'static FixtureCase> {
     FIXTURE_CASES_1001_80
         .iter()
         .chain(FIXTURE_CASES_320_363.iter())
         .chain(FIXTURE_CASES_295_307.iter())
+        .chain(FIXTURE_CASES_290_294.iter())
         .chain(FIXTURE_CASES_308_319.iter())
         .chain(FIXTURE_CASES_403_433.iter())
         .chain(FIXTURE_CASES_434_445.iter())
+        .chain(FIXTURE_CASES_475_479.iter())
         .chain(FIXTURE_CASES_487_492.iter())
         .chain(FIXTURE_CASES_364_391.iter())
         .chain(FIXTURE_CASES_506_519.iter())
@@ -3945,6 +3949,34 @@ mod tests {
     #[test]
     fn jq_pack_cluster_487_492_cases() {
         for case in FIXTURE_CASES_487_492 {
+            let input = parse_jsonish_value(case.input).expect("fixture input");
+            let expected = case
+                .outputs
+                .iter()
+                .map(|line| parse_jsonish_value(line).expect("fixture output"))
+                .collect::<Vec<_>>();
+            let actual = run_one(case.query, input);
+            assert_eq!(actual, expected, "query {}", case.query);
+        }
+    }
+
+    #[test]
+    fn jq_pack_cluster_290_294_cases() {
+        for case in FIXTURE_CASES_290_294 {
+            let input = parse_jsonish_value(case.input).expect("fixture input");
+            let expected = case
+                .outputs
+                .iter()
+                .map(|line| parse_jsonish_value(line).expect("fixture output"))
+                .collect::<Vec<_>>();
+            let actual = run_one(case.query, input);
+            assert_eq!(actual, expected, "query {}", case.query);
+        }
+    }
+
+    #[test]
+    fn jq_pack_cluster_475_479_cases() {
+        for case in FIXTURE_CASES_475_479 {
             let input = parse_jsonish_value(case.input).expect("fixture input");
             let expected = case
                 .outputs

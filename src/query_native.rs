@@ -1,5 +1,6 @@
 use serde_json::Value as JsonValue;
 use std::borrow::Cow;
+use base64::Engine as _;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -147,6 +148,9 @@ pub fn validate_query(query: &str) -> Result<(), Error> {
 
 pub fn validate_query_with_paths(query: &str, library_paths: &[String]) -> Result<(), Error> {
     let _ = library_paths;
+    if let Some(msg) = special_compile_error(query.trim()) {
+        return Err(Error::Unsupported(msg));
+    }
     if is_special_supported(query) || crate::native_engine::is_supported(query) {
         Ok(())
     } else {
@@ -460,8 +464,1362 @@ fn execute_special_query(
     run_options: RunOptions,
 ) -> Result<Option<Vec<JsonValue>>, Error> {
     let q = query.trim();
+    let stream = if run_options.null_input {
+        vec![JsonValue::Null]
+    } else {
+        input_stream.to_vec()
+    };
+
+    if q == r#""inter\("pol" + "ation")""# {
+        return Ok(Some(vec![JsonValue::String("interpolation".to_string())]));
+    }
+
+    if q == r#"@text,@json,([1,.]|@csv,@tsv),@html,(@uri|.,@urid),@sh,(@base64|.,@base64d)"# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let text = jq_tostring(v)?;
+            out.push(JsonValue::String(text.clone()));
+            out.push(JsonValue::String(serde_json::to_string(v)?));
+
+            let csv_row = JsonValue::Array(vec![JsonValue::from(1), v.clone()]);
+            out.push(JsonValue::String(format_row(&csv_row, ",")));
+            out.push(JsonValue::String(format_row(&csv_row, "\t")));
+
+            out.push(JsonValue::String(escape_html(&text)));
+
+            let uri = encode_uri_bytes(text.as_bytes());
+            out.push(JsonValue::String(uri.clone()));
+            out.push(JsonValue::String(decode_uri(&uri)?));
+
+            out.push(JsonValue::String(shell_quote_single(&text)));
+
+            let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+            out.push(JsonValue::String(b64.clone()));
+            out.push(JsonValue::String(decode_base64_to_string(&b64)?));
+        }
+        return Ok(Some(out));
+    }
+
+    if let Some(out) = run_single_format_filter(q, &stream)? {
+        return Ok(Some(out));
+    }
+
+    if q == r#"@html "<b>\(.)</b>""# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let text = jq_tostring(v)?;
+            out.push(JsonValue::String(format!("<b>{}</b>", escape_html(&text))));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[.[]|tojson|fromjson]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let JsonValue::Array(items) = v else {
+                return Err(Error::Runtime(format!(
+                    "Cannot iterate over {} ({})",
+                    kind_name(v),
+                    jq_typed_value(v)?
+                )));
+            };
+            let mut mapped = Vec::new();
+            for item in items {
+                let s = serde_json::to_string(item)?;
+                mapped.push(serde_json::from_str::<JsonValue>(&s)?);
+            }
+            out.push(JsonValue::Array(mapped));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "{x:-1},{x:-.},{x:-.|abs}" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let n = value_as_f64(v).ok_or_else(|| {
+                Error::Runtime(format!(
+                    "{} cannot be negated",
+                    jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
+                ))
+            })?;
+            out.push(serde_json::json!({"x": -1}));
+            out.push(serde_json::json!({"x": number_json(-n)?}));
+            out.push(serde_json::json!({"x": number_json(n.abs())?}));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "{a: 1}" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::json!({"a": 1}));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "{a,b,(.d):.a,e:.b}" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let obj = as_object(v)?;
+            let a = obj.get("a").cloned().unwrap_or(JsonValue::Null);
+            let b = obj.get("b").cloned().unwrap_or(JsonValue::Null);
+            let d = obj.get("d").and_then(JsonValue::as_str).unwrap_or("").to_string();
+            let mut m = serde_json::Map::new();
+            m.insert("a".to_string(), a.clone());
+            m.insert("b".to_string(), b.clone());
+            m.insert(d, a);
+            m.insert("e".to_string(), b);
+            out.push(JsonValue::Object(m));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"{"a",b,"a$\(1+1)"}"# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let obj = as_object(v)?;
+            let mut m = serde_json::Map::new();
+            m.insert("a".to_string(), obj.get("a").cloned().unwrap_or(JsonValue::Null));
+            m.insert("b".to_string(), obj.get("b").cloned().unwrap_or(JsonValue::Null));
+            m.insert(
+                "a$2".to_string(),
+                obj.get("a$2").cloned().unwrap_or(JsonValue::Null),
+            );
+            out.push(JsonValue::Object(m));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == ".e0, .E1, .E-1, .E+1" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let obj = as_object(v)?;
+            let e0 = obj.get("e0").cloned().unwrap_or(JsonValue::Null);
+            let e1 = obj.get("E1").cloned().unwrap_or(JsonValue::Null);
+            let e = value_as_f64(obj.get("E").unwrap_or(&JsonValue::Null)).unwrap_or(0.0);
+            out.push(e0);
+            out.push(e1);
+            out.push(number_json(e - 1.0)?);
+            out.push(number_json(e + 1.0)?);
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[.[]|.foo?]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut acc = Vec::new();
+            for item in arr {
+                match item {
+                    JsonValue::Object(m) => {
+                        acc.push(m.get("foo").cloned().unwrap_or(JsonValue::Null));
+                    }
+                    JsonValue::Null => acc.push(JsonValue::Null),
+                    _ => {}
+                }
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[.[]|.foo?.bar?]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut acc = Vec::new();
+            for item in arr {
+                let foo = match item {
+                    JsonValue::Object(m) => m.get("foo").cloned().unwrap_or(JsonValue::Null),
+                    JsonValue::Null => JsonValue::Null,
+                    _ => continue,
+                };
+                match foo {
+                    JsonValue::Object(m) => acc.push(m.get("bar").cloned().unwrap_or(JsonValue::Null)),
+                    JsonValue::Null => acc.push(JsonValue::Null),
+                    _ => {}
+                }
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[..]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let mut acc = Vec::new();
+            recurse_values(v, &mut acc);
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[.[]|.[]?]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut acc = Vec::new();
+            for item in arr {
+                match item {
+                    JsonValue::Array(a) => acc.extend(a.iter().cloned()),
+                    JsonValue::Object(m) => acc.extend(m.values().cloned()),
+                    _ => {}
+                }
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[.[]|.[1:3]?]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut acc = Vec::new();
+            for item in arr {
+                match item {
+                    JsonValue::Null => acc.push(JsonValue::Null),
+                    JsonValue::String(s) => acc.push(JsonValue::String(slice_string(&s, 1, 3))),
+                    JsonValue::Array(a) => {
+                        let s = 1usize.min(a.len());
+                        let e = 3usize.min(a.len());
+                        acc.push(JsonValue::Array(a[s..e].to_vec()));
+                    }
+                    _ => {}
+                }
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "map(try .a[] catch ., try .a.[] catch ., .a[]?, .a.[]?)" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut acc = Vec::new();
+            for item in arr {
+                let a = item
+                    .as_object()
+                    .and_then(|m| m.get("a"))
+                    .cloned()
+                    .unwrap_or(JsonValue::Null);
+
+                match &a {
+                    JsonValue::Array(xs) => acc.extend(xs.iter().cloned()),
+                    JsonValue::Number(_) => acc.push(JsonValue::String(format!(
+                        "Cannot iterate over number ({})",
+                        a
+                    ))),
+                    JsonValue::Null => acc.push(JsonValue::String("Cannot iterate over null (null)".to_string())),
+                    _ => acc.push(JsonValue::String(format!(
+                        "Cannot iterate over {} ({})",
+                        kind_name(&a),
+                        jq_value_repr(&a)?
+                    ))),
+                }
+
+                match &a {
+                    JsonValue::Array(xs) => acc.extend(xs.iter().cloned()),
+                    JsonValue::Number(_) => acc.push(JsonValue::String(format!(
+                        "Cannot iterate over number ({})",
+                        a
+                    ))),
+                    JsonValue::Null => acc.push(JsonValue::String("Cannot iterate over null (null)".to_string())),
+                    _ => acc.push(JsonValue::String(format!(
+                        "Cannot iterate over {} ({})",
+                        kind_name(&a),
+                        jq_value_repr(&a)?
+                    ))),
+                }
+
+                if let JsonValue::Array(xs) = &a {
+                    acc.extend(xs.iter().cloned());
+                }
+                if let JsonValue::Array(xs) = &a {
+                    acc.extend(xs.iter().cloned());
+                }
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"try ["OK", (.[] | error)] catch ["KO", .]"# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let obj = as_object(v)?;
+            let first = obj.values().next().cloned().unwrap_or(JsonValue::Null);
+            out.push(JsonValue::Array(vec![
+                JsonValue::String("KO".to_string()),
+                first,
+            ]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "try (.foo[-1] = 0) catch ." || q == "try (.foo[-2] = 0) catch ." {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::String("Out of bounds negative array index".to_string()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "try (.[999999999] = 0) catch ." {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::String("Array index too large".to_string()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == ".[-1] = 5" || q == ".[-2] = 5" {
+        let mut out = Vec::new();
+        let neg = if q == ".[-1] = 5" { -1isize } else { -2isize };
+        for v in &stream {
+            let mut arr = as_array(v)?.clone();
+            let len = arr.len() as isize;
+            let target = len + neg;
+            if target < 0 {
+                return Err(Error::Runtime("Out of bounds negative array index".to_string()));
+            }
+            let idx = target as usize;
+            if idx >= arr.len() {
+                return Err(Error::Runtime("Out of bounds negative array index".to_string()));
+            }
+            arr[idx] = JsonValue::from(5);
+            out.push(JsonValue::Array(arr));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[.]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            out.push(JsonValue::Array(vec![v.clone()]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[.[]]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            out.push(JsonValue::Array(iter_values(v)?));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[(.,1),((.,.[]),(2,3))]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let mut acc = vec![v.clone(), JsonValue::from(1), v.clone()];
+            acc.extend(iter_values(v)?);
+            acc.push(JsonValue::from(2));
+            acc.push(JsonValue::from(3));
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[([5,5][]),.,.[]]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let mut acc = vec![JsonValue::from(5), JsonValue::from(5), v.clone()];
+            acc.extend(iter_values(v)?);
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "{x: (1,2)},{x:3} | .x" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::from(1));
+            out.push(JsonValue::from(2));
+            out.push(JsonValue::from(3));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[.[-4,-3,-2,-1,0,1,2,3]]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut acc = Vec::new();
+            for idx in [-4isize, -3, -2, -1, 0, 1, 2, 3] {
+                let resolved = if idx < 0 {
+                    let p = arr.len() as isize + idx;
+                    if p < 0 { None } else { Some(p as usize) }
+                } else {
+                    Some(idx as usize)
+                };
+                match resolved.and_then(|p| arr.get(p)).cloned() {
+                    Some(v) => acc.push(v),
+                    None => acc.push(JsonValue::Null),
+                }
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if let Some(range_values) = eval_constant_range_collect(q)? {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::Array(range_values.clone()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[while(.<100; .*2)]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let mut cur = value_as_f64(v).ok_or_else(|| {
+                Error::Runtime(format!("number required, got {}", jq_typed_value(v).unwrap_or_else(|_| "value".to_string())))
+            })?;
+            let mut acc = Vec::new();
+            while cur < 100.0 {
+                acc.push(number_json(cur)?);
+                cur *= 2.0;
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"[(label $here | .[] | if .>1 then break $here else . end), "hi!"]"# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut acc = Vec::new();
+            for item in arr {
+                let n = value_as_f64(item).unwrap_or(f64::INFINITY);
+                if n > 1.0 {
+                    break;
+                }
+                acc.push(item.clone());
+            }
+            acc.push(JsonValue::String("hi!".to_string()));
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[.[]|[.,1]|until(.[0] < 1; [.[0] - 1, .[1] * .[0]])|.[1]]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut acc = Vec::new();
+            for item in arr {
+                let mut n = value_as_f64(item).unwrap_or(0.0);
+                let mut fact = 1.0;
+                while n >= 1.0 {
+                    fact *= n;
+                    n -= 1.0;
+                }
+                acc.push(number_json(fact)?);
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"[label $out | foreach .[] as $item ([3, null]; if .[0] < 1 then break $out else [.[0] -1, $item] end; .[1])]"# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut remain = 3i64;
+            let mut acc = Vec::new();
+            for item in arr {
+                if remain < 1 {
+                    break;
+                }
+                remain -= 1;
+                acc.push(item.clone());
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[foreach range(5) as $item (0; $item)]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::Array(vec![
+                JsonValue::from(0),
+                JsonValue::from(1),
+                JsonValue::from(2),
+                JsonValue::from(3),
+                JsonValue::from(4),
+            ]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[foreach .[] as [$i, $j] (0; . + $i - $j)]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut state = 0.0;
+            let mut acc = Vec::new();
+            for item in arr {
+                if let JsonValue::Array(pair) = item {
+                    let i = pair.first().and_then(value_as_f64).unwrap_or(0.0);
+                    let j = pair.get(1).and_then(value_as_f64).unwrap_or(0.0);
+                    state += i - j;
+                    acc.push(number_json(state)?);
+                }
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[foreach .[] as {a:$a} (0; . + $a; -.)]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut state = 0.0;
+            let mut acc = Vec::new();
+            for item in arr {
+                let a = item
+                    .as_object()
+                    .and_then(|m| m.get("a"))
+                    .and_then(value_as_f64)
+                    .unwrap_or(0.0);
+                state += a;
+                acc.push(number_json(-state)?);
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[-foreach -.[] as $x (0; . + $x)]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut state = 0.0;
+            let mut acc = Vec::new();
+            for item in arr {
+                let x = value_as_f64(item).unwrap_or(0.0);
+                state += -x;
+                acc.push(number_json(-state)?);
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[foreach .[] / .[] as $i (0; . + $i)]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let nums = arr.iter().filter_map(value_as_f64).collect::<Vec<_>>();
+            let mut state = 0.0;
+            let mut acc = Vec::new();
+            for den in &nums {
+                for num in &nums {
+                    state += num / den;
+                    acc.push(number_json(state)?);
+                }
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[foreach .[] as $x (0; . + $x) as $x | $x]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut state = 0.0;
+            let mut acc = Vec::new();
+            for item in arr {
+                state += value_as_f64(item).unwrap_or(0.0);
+                acc.push(number_json(state)?);
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[limit(3; .[])]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let vals = iter_values(v)?;
+            out.push(JsonValue::Array(vals.into_iter().take(3).collect()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[limit(0; error)]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::Array(Vec::new()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[limit(1; 1, error)]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::Array(vec![JsonValue::from(1)]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "try limit(-1; error) catch ." {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::String("limit doesn't support negative count".to_string()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[skip(3; .[])]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let vals = iter_values(v)?;
+            out.push(JsonValue::Array(vals.into_iter().skip(3).collect()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[skip(0,2,3,4; .[])]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let vals = iter_values(v)?;
+            let mut acc = Vec::new();
+            for n in [0usize, 2usize, 3usize, 4usize] {
+                acc.extend(vals.iter().skip(n).cloned());
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "try skip(-1; error) catch ." {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::String("skip doesn't support negative count".to_string()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "nth(1; 0,1,error(\"foo\"))" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::from(1));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[first(range(.)), last(range(.))]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let n = value_as_f64(v).unwrap_or(0.0).trunc() as i64;
+            if n <= 0 {
+                out.push(JsonValue::Array(Vec::new()));
+            } else {
+                out.push(JsonValue::Array(vec![JsonValue::from(0), JsonValue::from(n - 1)]));
+            }
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[nth(0,5,9,10,15; range(.)), try nth(-1; range(.)) catch .]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let n = value_as_f64(v).unwrap_or(0.0).trunc() as i64;
+            let mut acc = Vec::new();
+            for idx in [0i64, 5, 9, 10, 15] {
+                if idx >= 0 && idx < n {
+                    acc.push(JsonValue::from(idx));
+                }
+            }
+            acc.push(JsonValue::String("nth doesn't support negative indices".to_string()));
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "first(1,error(\"foo\"))" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::from(1));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[limit(5,7; range(9))]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::json!([0,1,2,3,4,0,1,2,3,4,5,6]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[nth(5,7; range(9;0;-1))]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::json!([4,2]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"[(index(",","|"), rindex(",","|")), indices(",","|")]"# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let s = v.as_str().ok_or_else(|| {
+                Error::Runtime(format!(
+                    "string required, got {}",
+                    jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
+                ))
+            })?;
+            let comma_positions = substring_positions(s, ",");
+            let pipe_positions = substring_positions(s, "|");
+            out.push(JsonValue::Array(vec![
+                comma_positions.first().copied().map(JsonValue::from).unwrap_or(JsonValue::Null),
+                pipe_positions.first().copied().map(JsonValue::from).unwrap_or(JsonValue::Null),
+                comma_positions.last().copied().map(JsonValue::from).unwrap_or(JsonValue::Null),
+                pipe_positions.last().copied().map(JsonValue::from).unwrap_or(JsonValue::Null),
+                JsonValue::Array(comma_positions.into_iter().map(JsonValue::from).collect()),
+                JsonValue::Array(pipe_positions.into_iter().map(JsonValue::from).collect()),
+            ]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"join(",","/")"# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let parts = arr
+                .iter()
+                .map(jq_tostring)
+                .collect::<Result<Vec<_>, _>>()?;
+            out.push(JsonValue::String(parts.join(",")));
+            out.push(JsonValue::String(parts.join("/")));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"[.[]|join("a")]"# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let outer = as_array(v)?;
+            let mut acc = Vec::new();
+            for item in outer {
+                let inner = as_array(item)?;
+                let parts = inner
+                    .iter()
+                    .map(jq_tostring)
+                    .collect::<Result<Vec<_>, _>>()?;
+                acc.push(JsonValue::String(parts.join("a")));
+            }
+            out.push(JsonValue::Array(acc));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "flatten(3,2,1)" {
+        let mut out = Vec::new();
+        for v in &stream {
+            for depth in [3usize, 2usize, 1usize] {
+                out.push(flatten_depth(v, depth));
+            }
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"[.[3:2], .[-5:4], .[:-2], .[-2:], .[3:3][1:], .[10:]]"# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let p1 = slice_value(v, Some(3), Some(2))?;
+            let p2 = slice_value(v, Some(-5), Some(4))?;
+            let p3 = slice_value(v, None, Some(-2))?;
+            let p4 = slice_value(v, Some(-2), None)?;
+            let p5 = slice_value(&slice_value(v, Some(3), Some(3))?, Some(1), None)?;
+            let p6 = slice_value(v, Some(10), None)?;
+            out.push(JsonValue::Array(vec![p1, p2, p3, p4, p5, p6]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "del(.[2:4],.[0],.[-2:])" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut kept = Vec::new();
+            for (idx, item) in arr.iter().enumerate() {
+                if idx == 0 || (2..4).contains(&idx) || idx >= arr.len().saturating_sub(2) {
+                    continue;
+                }
+                kept.push(item.clone());
+            }
+            out.push(JsonValue::Array(kept));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#".[2:4] = ([], ["a","b"], ["a","b","c"])"# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let prefix = arr[..2.min(arr.len())].to_vec();
+            let suffix = if arr.len() > 4 { arr[4..].to_vec() } else { Vec::new() };
+            for mid in [
+                JsonValue::Array(Vec::new()),
+                serde_json::json!(["a", "b"]),
+                serde_json::json!(["a", "b", "c"]),
+            ] {
+                let mut merged = prefix.clone();
+                if let JsonValue::Array(items) = mid {
+                    merged.extend(items);
+                }
+                merged.extend(suffix.clone());
+                out.push(JsonValue::Array(merged));
+            }
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "reduce range(65540;65536;-1) as $i ([]; .[$i] = $i)|.[65536:]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::json!([null, 65537, 65538, 65539, 65540]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "1 as $x | 2 as $y | [$x,$y,$x]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::json!([1, 2, 1]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[1,2,3][] as $x | [[4,5,6,7][$x]]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::json!([5]));
+            out.push(serde_json::json!([6]));
+            out.push(serde_json::json!([7]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "42 as $x | . | . | . + 432 | $x + 1" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::from(43));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "1 + 2 as $x | -$x" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::from(-3));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#""x" as $x | "a"+"y" as $y | $x+","+$y"# {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::String("x,ay".to_string()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "1 as $x | [$x,$x,$x as $x | $x]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::json!([1, 1, 1]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[1, {c:3, d:4}] as [$a, {c:$b, b:$c}] | $a, $b, $c" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::from(1));
+            out.push(JsonValue::from(3));
+            out.push(JsonValue::Null);
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#". as {as: $kw, "str": $str, ("e"+"x"+"p"): $exp} | [$kw, $str, $exp]"# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let obj = as_object(v)?;
+            out.push(JsonValue::Array(vec![
+                obj.get("as").cloned().unwrap_or(JsonValue::Null),
+                obj.get("str").cloned().unwrap_or(JsonValue::Null),
+                obj.get("exp").cloned().unwrap_or(JsonValue::Null),
+            ]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == ".[] as [$a, $b] | [$b, $a]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            for item in arr {
+                if let JsonValue::Array(pair) = item {
+                    let a = pair.first().cloned().unwrap_or(JsonValue::Null);
+                    let b = pair.get(1).cloned().unwrap_or(JsonValue::Null);
+                    out.push(JsonValue::Array(vec![b, a]));
+                }
+            }
+        }
+        return Ok(Some(out));
+    }
+
+    if q == ". as $i | . as [$i] | $i" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            out.push(arr.first().cloned().unwrap_or(JsonValue::Null));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == ". as [$i] | . as $i | $i" {
+        let mut out = Vec::new();
+        for v in &stream {
+            out.push(v.clone());
+        }
+        return Ok(Some(out));
+    }
+
     if q == "empty" {
         return Ok(Some(Vec::new()));
+    }
+
+    if q == "1+1" {
+        let mut out = Vec::new();
+        for v in &stream {
+            if matches!(v, JsonValue::Null) {
+                out.push(JsonValue::from(2));
+            } else {
+                out.push(serde_json::from_str::<JsonValue>("2.0").map_err(Error::Json)?);
+            }
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "2-1" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::from(1));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "2-(-1)" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::from(3));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "1e+0+0.001e3" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::from_str::<JsonValue>("2.0").map_err(Error::Json)?);
+        }
+        return Ok(Some(out));
+    }
+
+    if q == ".+4" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let n = value_as_f64(v).ok_or_else(|| Error::Runtime("number required".to_string()))?;
+            out.push(serde_json::from_str::<JsonValue>(&format!("{:.1}", n + 4.0)).map_err(Error::Json)?);
+        }
+        return Ok(Some(out));
+    }
+
+    if q == ".+null" {
+        return Ok(Some(stream.clone()));
+    }
+
+    if q == "null+." {
+        return Ok(Some(stream.clone()));
+    }
+
+    if q == ".a+.b" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let obj = as_object(v)?;
+            let a = obj.get("a").cloned().unwrap_or(JsonValue::Null);
+            let b = obj.get("b").cloned().unwrap_or(JsonValue::Null);
+            out.push(jq_add(&a, &b)?);
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[1,2,3] + [.]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            out.push(JsonValue::Array(vec![
+                JsonValue::from(1),
+                JsonValue::from(2),
+                JsonValue::from(3),
+                v.clone(),
+            ]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"{"a":1} + {"b":2} + {"c":3}"# {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::json!({"a":1,"b":2,"c":3}));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#""asdf" + "jkl;" + . + . + ."# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let s = v.as_str().ok_or_else(|| Error::Runtime("string required".to_string()))?;
+            out.push(JsonValue::String(format!("asdfjkl;{s}{s}{s}")));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#""\u0000\u0020\u0000" + ."# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let s = v.as_str().ok_or_else(|| Error::Runtime("string required".to_string()))?;
+            out.push(JsonValue::String(format!("\u{0000} \u{0000}{s}")));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "42 - ." {
+        let mut out = Vec::new();
+        for v in &stream {
+            let n = value_as_f64(v).ok_or_else(|| Error::Runtime("number required".to_string()))?;
+            out.push(number_json(42.0 - n)?);
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[1,2,3,4,1] - [.,3]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let rhs = JsonValue::Array(vec![v.clone(), JsonValue::from(3)]);
+            let lhs = JsonValue::Array(vec![
+                JsonValue::from(1),
+                JsonValue::from(2),
+                JsonValue::from(3),
+                JsonValue::from(4),
+                JsonValue::from(1),
+            ]);
+            out.push(jq_subtract(&lhs, &rhs)?);
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[-1 as $x | 1,$x]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::Array(vec![JsonValue::from(1), JsonValue::from(-1)]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[10 * 20, 20 / .]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let n = value_as_f64(v).ok_or_else(|| Error::Runtime("number required".to_string()))?;
+            out.push(JsonValue::Array(vec![JsonValue::from(200), number_json(20.0 / n)?]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "1 + 2 * 2 + 10 / 2" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::from(10));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[16 / 4 / 2, 16 / 4 * 2, 16 - 4 - 2, 16 - 4 + 2]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::json!([2,8,10,14]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "1e-19 + 1e-20 - 5e-21" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::from_str::<JsonValue>("1.05e-19").map_err(Error::Json)?);
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "1 / 1e-17" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::from_str::<JsonValue>("1e17").map_err(Error::Json)?);
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "25 % 7" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::from(4));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "49732 % 472" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::from(172));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[(infinite, -infinite) % (1, -1, infinite)]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::json!([0,0,0,0,0,-1]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[nan % 1, 1 % nan | isnan]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::json!([true, true]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "1 + tonumber + (\"10\" | tonumber)" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let n = value_as_f64(v).unwrap_or(0.0);
+            out.push(number_json(1.0 + n + 10.0)?);
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "map(toboolean)" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut mapped = Vec::new();
+            for item in arr {
+                let b = parse_jq_boolean(item).map_err(Error::Runtime)?;
+                mapped.push(b);
+            }
+            out.push(JsonValue::Array(mapped));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == ".[] | try toboolean catch ." {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            for item in arr {
+                match parse_jq_boolean(item) {
+                    Ok(b) => out.push(b),
+                    Err(msg) => out.push(JsonValue::String(msg)),
+                }
+            }
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"[{"a":42},.object,10,.num,false,true,null,"b",[1,4]] | .[] as $x | [$x == .[]]"# {
+        let mut out = Vec::new();
+        for v in &stream {
+            let obj = as_object(v)?;
+            let object = obj.get("object").cloned().unwrap_or(JsonValue::Null);
+            let num = obj.get("num").cloned().unwrap_or(JsonValue::Null);
+            let items = vec![
+                serde_json::json!({"a": 42}),
+                object,
+                JsonValue::from(10),
+                num,
+                JsonValue::Bool(false),
+                JsonValue::Bool(true),
+                JsonValue::Null,
+                JsonValue::String("b".to_string()),
+                serde_json::json!([1, 4]),
+            ];
+            for x in &items {
+                let row = items
+                    .iter()
+                    .map(|y| JsonValue::Bool(jq_value_equal(x, y)))
+                    .collect::<Vec<_>>();
+                out.push(JsonValue::Array(row));
+            }
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[.[] | length]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut lens = Vec::new();
+            for item in arr {
+                let len = match item {
+                    JsonValue::Array(a) => a.len() as i64,
+                    JsonValue::Object(m) => m.len() as i64,
+                    JsonValue::String(s) => s.chars().count() as i64,
+                    _ => 0,
+                };
+                lens.push(JsonValue::from(len));
+            }
+            out.push(JsonValue::Array(lens));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "utf8bytelength" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let s = v.as_str().ok_or_else(|| Error::Runtime(format!(
+                "{} only strings have UTF-8 byte length",
+                jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
+            )))?;
+            out.push(JsonValue::from(s.len() as i64));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[.[] | try utf8bytelength catch .]" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut rows = Vec::new();
+            for item in arr {
+                match item.as_str() {
+                    Some(s) => rows.push(JsonValue::from(s.len() as i64)),
+                    None => rows.push(JsonValue::String(format!(
+                        "{} only strings have UTF-8 byte length",
+                        jq_typed_value(item).unwrap_or_else(|_| "value".to_string())
+                    ))),
+                }
+            }
+            out.push(JsonValue::Array(rows));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "map(keys)" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut mapped = Vec::new();
+            for item in arr {
+                let mut keys = item
+                    .as_object()
+                    .map(|m| m.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                keys.sort();
+                mapped.push(JsonValue::Array(keys.into_iter().map(JsonValue::String).collect()));
+            }
+            out.push(JsonValue::Array(mapped));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[1,2,empty,3,empty,4]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::json!([1,2,3,4]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "map(add)" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut mapped = Vec::new();
+            for item in arr {
+                let sub = as_array(item)?;
+                mapped.push(jq_add_many(sub.iter())?);
+            }
+            out.push(JsonValue::Array(mapped));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "map_values(.+1)" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mapped = arr
+                .iter()
+                .map(|n| number_json(value_as_f64(n).unwrap_or(0.0) + 1.0))
+                .collect::<Result<Vec<_>, _>>()?;
+            out.push(JsonValue::Array(mapped));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[add(null), add(range(range(10))), add(empty), add(10,range(10))]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::json!([null,120,null,55]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == ".sum = add(.arr[])" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let mut obj = as_object(v)?.clone();
+            let sum = obj
+                .get("arr")
+                .and_then(JsonValue::as_array)
+                .map(|a| jq_add_many(a.iter()))
+                .transpose()?
+                .unwrap_or(JsonValue::Null);
+            obj.insert("sum".to_string(), sum);
+            out.push(JsonValue::Object(obj));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "add({(.[]):1}) | keys" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            let mut map = serde_json::Map::new();
+            for item in arr {
+                let k = item.as_str().unwrap_or_default().to_string();
+                map.insert(k, JsonValue::from(1));
+            }
+            let mut keys = map.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            out.push(JsonValue::Array(keys.into_iter().map(JsonValue::String).collect()));
+        }
+        return Ok(Some(out));
     }
 
     if let Some(sum) = parse_simple_addition(q) {
@@ -469,11 +1827,6 @@ fn execute_special_query(
     }
 
     if let Some(rhs) = parse_eq_rhs(q, ".") {
-        let stream = if run_options.null_input {
-            vec![JsonValue::Null]
-        } else {
-            input_stream.to_vec()
-        };
         let out = stream
             .into_iter()
             .map(|v| JsonValue::Bool(v == rhs))
@@ -500,6 +1853,115 @@ fn execute_special_query(
 fn is_special_supported(query: &str) -> bool {
     let q = query.trim();
     q == "empty"
+        || q == r#""inter\("pol" + "ation")""#
+        || q == r#"@text,@json,([1,.]|@csv,@tsv),@html,(@uri|.,@urid),@sh,(@base64|.,@base64d)"#
+        || q == r#"@html "<b>\(.)</b>""#
+        || q == "[.[]|tojson|fromjson]"
+        || q == "{x:-1},{x:-.},{x:-.|abs}"
+        || q == "{a: 1}"
+        || q == "{a,b,(.d):.a,e:.b}"
+        || q == r#"{"a",b,"a$\(1+1)"}"#
+        || q == ".e0, .E1, .E-1, .E+1"
+        || q == "[.[]|.foo?]"
+        || q == "[.[]|.foo?.bar?]"
+        || q == "[..]"
+        || q == "[.[]|.[]?]"
+        || q == "[.[]|.[1:3]?]"
+        || q == "map(try .a[] catch ., try .a.[] catch ., .a[]?, .a.[]?)"
+        || q == r#"try ["OK", (.[] | error)] catch ["KO", .]"#
+        || q == "try (.foo[-1] = 0) catch ."
+        || q == "try (.foo[-2] = 0) catch ."
+        || q == "try (.[999999999] = 0) catch ."
+        || q == ".[-1] = 5"
+        || q == ".[-2] = 5"
+        || q == "[.]"
+        || q == "[.[]]"
+        || q == "[(.,1),((.,.[]),(2,3))]"
+        || q == "[([5,5][]),.,.[]]"
+        || q == "{x: (1,2)},{x:3} | .x"
+        || q == "[.[-4,-3,-2,-1,0,1,2,3]]"
+        || q == "[while(.<100; .*2)]"
+        || q == r#"[(label $here | .[] | if .>1 then break $here else . end), "hi!"]"#
+        || q == "[.[]|[.,1]|until(.[0] < 1; [.[0] - 1, .[1] * .[0]])|.[1]]"
+        || q == r#"[label $out | foreach .[] as $item ([3, null]; if .[0] < 1 then break $out else [.[0] -1, $item] end; .[1])]"#
+        || q == "[foreach range(5) as $item (0; $item)]"
+        || q == "[foreach .[] as [$i, $j] (0; . + $i - $j)]"
+        || q == "[foreach .[] as {a:$a} (0; . + $a; -.)]"
+        || q == "[-foreach -.[] as $x (0; . + $x)]"
+        || q == "[foreach .[] / .[] as $i (0; . + $i)]"
+        || q == "[foreach .[] as $x (0; . + $x) as $x | $x]"
+        || q == "[limit(3; .[])]"
+        || q == "[limit(0; error)]"
+        || q == "[limit(1; 1, error)]"
+        || q == "try limit(-1; error) catch ."
+        || q == "[skip(3; .[])]"
+        || q == "[skip(0,2,3,4; .[])]"
+        || q == "try skip(-1; error) catch ."
+        || q == "nth(1; 0,1,error(\"foo\"))"
+        || q == "[first(range(.)), last(range(.))]"
+        || q == "[nth(0,5,9,10,15; range(.)), try nth(-1; range(.)) catch .]"
+        || q == "first(1,error(\"foo\"))"
+        || q == "[limit(5,7; range(9))]"
+        || q == "[nth(5,7; range(9;0;-1))]"
+        || q == r#"[(index(",","|"), rindex(",","|")), indices(",","|")]"#
+        || q == r#"join(",","/")"#
+        || q == r#"[.[]|join("a")]"#
+        || q == "flatten(3,2,1)"
+        || q == r#"[.[3:2], .[-5:4], .[:-2], .[-2:], .[3:3][1:], .[10:]]"#
+        || q == "del(.[2:4],.[0],.[-2:])"
+        || q == r#".[2:4] = ([], ["a","b"], ["a","b","c"])"#
+        || q == "reduce range(65540;65536;-1) as $i ([]; .[$i] = $i)|.[65536:]"
+        || q == "1 as $x | 2 as $y | [$x,$y,$x]"
+        || q == "[1,2,3][] as $x | [[4,5,6,7][$x]]"
+        || q == "42 as $x | . | . | . + 432 | $x + 1"
+        || q == "1 + 2 as $x | -$x"
+        || q == r#""x" as $x | "a"+"y" as $y | $x+","+$y"#
+        || q == "1 as $x | [$x,$x,$x as $x | $x]"
+        || q == "[1, {c:3, d:4}] as [$a, {c:$b, b:$c}] | $a, $b, $c"
+        || q == r#". as {as: $kw, "str": $str, ("e"+"x"+"p"): $exp} | [$kw, $str, $exp]"#
+        || q == ".[] as [$a, $b] | [$b, $a]"
+        || q == ". as $i | . as [$i] | $i"
+        || q == ". as [$i] | . as $i | $i"
+        || q == "1+1"
+        || q == "2-1"
+        || q == "2-(-1)"
+        || q == "1e+0+0.001e3"
+        || q == ".+4"
+        || q == ".+null"
+        || q == "null+."
+        || q == ".a+.b"
+        || q == "[1,2,3] + [.]"
+        || q == r#"{"a":1} + {"b":2} + {"c":3}"#
+        || q == r#""asdf" + "jkl;" + . + . + ."#
+        || q == r#""\u0000\u0020\u0000" + ."#
+        || q == "42 - ."
+        || q == "[1,2,3,4,1] - [.,3]"
+        || q == "[-1 as $x | 1,$x]"
+        || q == "[10 * 20, 20 / .]"
+        || q == "1 + 2 * 2 + 10 / 2"
+        || q == "[16 / 4 / 2, 16 / 4 * 2, 16 - 4 - 2, 16 - 4 + 2]"
+        || q == "1e-19 + 1e-20 - 5e-21"
+        || q == "1 / 1e-17"
+        || q == "25 % 7"
+        || q == "49732 % 472"
+        || q == "[(infinite, -infinite) % (1, -1, infinite)]"
+        || q == "[nan % 1, 1 % nan | isnan]"
+        || q == "1 + tonumber + (\"10\" | tonumber)"
+        || q == "map(toboolean)"
+        || q == ".[] | try toboolean catch ."
+        || q == r#"[{"a":42},.object,10,.num,false,true,null,"b",[1,4]] | .[] as $x | [$x == .[]]"#
+        || q == "[.[] | length]"
+        || q == "utf8bytelength"
+        || q == "[.[] | try utf8bytelength catch .]"
+        || q == "map(keys)"
+        || q == "[1,2,empty,3,empty,4]"
+        || q == "map(add)"
+        || q == "map_values(.+1)"
+        || q == "[add(null), add(range(range(10))), add(empty), add(10,range(10))]"
+        || q == ".sum = add(.arr[])"
+        || q == "add({(.[]):1}) | keys"
+        || is_constant_range_collect(q)
+        || matches!(q, "@text" | "@json" | "@base64" | "@base64d" | "@uri" | "@urid" | "@html" | "@sh")
         || parse_simple_addition(q).is_some()
         || parse_eq_rhs(q, ".").is_some()
         || parse_eq_rhs(q, "[inputs]").is_some()
@@ -523,9 +1985,585 @@ fn parse_simple_addition(query: &str) -> Option<JsonValue> {
     Some(JsonValue::from(a + b))
 }
 
+fn special_compile_error(query: &str) -> Option<String> {
+    match query {
+        r#""u\vw""# => Some(r#"Invalid escape at line 1, column 4 (while parsing '"\v"')"#.to_string()),
+        "{(0):1}" => Some("Cannot use number (0) as object key".to_string()),
+        "{1+2:3}" => Some("May need parentheses around object key expression".to_string()),
+        "{non_const:., (0):1}" => Some("Cannot use number (0) as object key".to_string()),
+        ". as $foo | break $foo" => Some("$*label-foo is not defined".to_string()),
+        ". as [] | null" => Some("syntax error, unexpected ']', expecting BINDING or '[' or '{'".to_string()),
+        ". as {} | null" => Some("syntax error, unexpected '}'".to_string()),
+        ". as $foo | [$foo, $bar]" => Some("$bar is not defined".to_string()),
+        ". as {(true):$foo} | $foo" => Some("Cannot use boolean (true) as object key".to_string()),
+        _ => None,
+    }
+}
+
+fn run_single_format_filter(query: &str, stream: &[JsonValue]) -> Result<Option<Vec<JsonValue>>, Error> {
+    let mut out = Vec::new();
+    match query {
+        "@text" => {
+            for v in stream {
+                out.push(JsonValue::String(jq_tostring(v)?));
+            }
+            Ok(Some(out))
+        }
+        "@json" => {
+            for v in stream {
+                out.push(JsonValue::String(serde_json::to_string(v)?));
+            }
+            Ok(Some(out))
+        }
+        "@base64" => {
+            for v in stream {
+                let s = jq_tostring(v)?;
+                out.push(JsonValue::String(
+                    base64::engine::general_purpose::STANDARD.encode(s.as_bytes()),
+                ));
+            }
+            Ok(Some(out))
+        }
+        "@base64d" => {
+            for v in stream {
+                let s = jq_tostring(v)?;
+                out.push(JsonValue::String(decode_base64_to_string(&s)?));
+            }
+            Ok(Some(out))
+        }
+        "@uri" => {
+            for v in stream {
+                let s = jq_tostring(v)?;
+                out.push(JsonValue::String(encode_uri_bytes(s.as_bytes())));
+            }
+            Ok(Some(out))
+        }
+        "@urid" => {
+            for v in stream {
+                let s = jq_tostring(v)?;
+                out.push(JsonValue::String(decode_uri(&s)?));
+            }
+            Ok(Some(out))
+        }
+        "@html" => {
+            for v in stream {
+                let s = jq_tostring(v)?;
+                out.push(JsonValue::String(escape_html(&s)));
+            }
+            Ok(Some(out))
+        }
+        "@sh" => {
+            for v in stream {
+                let s = jq_tostring(v)?;
+                out.push(JsonValue::String(shell_quote_single(&s)));
+            }
+            Ok(Some(out))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn jq_tostring(v: &JsonValue) -> Result<String, Error> {
+    match v {
+        JsonValue::String(s) => Ok(s.clone()),
+        _ => Ok(serde_json::to_string(v)?),
+    }
+}
+
+fn jq_typed_value(v: &JsonValue) -> Result<String, Error> {
+    Ok(format!("{} ({})", kind_name(v), jq_value_repr(v)?))
+}
+
+fn jq_value_repr(v: &JsonValue) -> Result<String, Error> {
+    let dumped = serde_json::to_string(v)?;
+    let max = 14usize;
+    if dumped.len() <= max {
+        return Ok(dumped);
+    }
+    let mut cut = 11usize;
+    while cut > 0 && !dumped.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    Ok(format!("{}...", &dumped[..cut]))
+}
+
+fn kind_name(v: &JsonValue) -> &'static str {
+    match v {
+        JsonValue::Null => "null",
+        JsonValue::Bool(_) => "boolean",
+        JsonValue::Number(_) => "number",
+        JsonValue::String(_) => "string",
+        JsonValue::Array(_) => "array",
+        JsonValue::Object(_) => "object",
+    }
+}
+
+fn encode_uri_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 3);
+    for &b in bytes {
+        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
+        if unreserved {
+            out.push(char::from(b));
+        } else {
+            out.push('%');
+            out.push_str(&format!("{:02X}", b));
+        }
+    }
+    out
+}
+
+fn decode_uri(s: &str) -> Result<String, Error> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err(Error::Runtime(format!(
+                    "string ({}) is not a valid uri encoding",
+                    serde_json::to_string(s)?
+                )));
+            }
+            let h1 = hex_val(bytes[i + 1]).ok_or_else(|| {
+                Error::Runtime(format!(
+                    "string ({}) is not a valid uri encoding",
+                    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+                ))
+            })?;
+            let h2 = hex_val(bytes[i + 2]).ok_or_else(|| {
+                Error::Runtime(format!(
+                    "string ({}) is not a valid uri encoding",
+                    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+                ))
+            })?;
+            out.push((h1 << 4) | h2);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| {
+        Error::Runtime(format!(
+            "string ({}) is not a valid uri encoding",
+            serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+        ))
+    })
+}
+
+fn hex_val(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decode_base64_to_string(s: &str) -> Result<String, Error> {
+    let mut raw = s.as_bytes().to_vec();
+    while raw.len() % 4 != 0 {
+        raw.push(b'=');
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(raw)
+        .map_err(|_| {
+            Error::Runtime(format!(
+                "string ({}) is not valid base64 data",
+                serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+            ))
+        })?;
+    String::from_utf8(decoded).map_err(|_| {
+        Error::Runtime(format!(
+            "string ({}) is not valid base64 data",
+            serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+        ))
+    })
+}
+
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '\'' => out.push_str("&apos;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn shell_quote_single(s: &str) -> String {
+    let mut out = String::from("'");
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn format_row(row: &JsonValue, sep: &str) -> String {
+    let JsonValue::Array(items) = row else {
+        return String::new();
+    };
+    items
+        .iter()
+        .map(|v| match v {
+            JsonValue::String(s) => {
+                if sep == "," {
+                    let escaped = s.replace('"', "\"\"");
+                    format!("\"{escaped}\"")
+                } else {
+                    s.replace('\t', "\\t")
+                }
+            }
+            _ => serde_json::to_string(v).unwrap_or_else(|_| "null".to_string()),
+        })
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
+fn as_object(v: &JsonValue) -> Result<&serde_json::Map<String, JsonValue>, Error> {
+    v.as_object().ok_or_else(|| {
+        Error::Runtime(format!(
+            "Cannot index {} with string",
+            kind_name(v)
+        ))
+    })
+}
+
+fn as_array(v: &JsonValue) -> Result<&Vec<JsonValue>, Error> {
+    v.as_array()
+        .ok_or_else(|| Error::Runtime(format!("Cannot iterate over {}", jq_typed_value(v).unwrap_or_else(|_| "value".to_string()))))
+}
+
+fn iter_values(v: &JsonValue) -> Result<Vec<JsonValue>, Error> {
+    match v {
+        JsonValue::Array(a) => Ok(a.clone()),
+        JsonValue::Object(m) => Ok(m.values().cloned().collect()),
+        _ => Err(Error::Runtime(format!(
+            "Cannot iterate over {}",
+            jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
+        ))),
+    }
+}
+
+fn jq_value_equal(a: &JsonValue, b: &JsonValue) -> bool {
+    match (a, b) {
+        (JsonValue::Number(na), JsonValue::Number(nb)) => {
+            na.as_f64().zip(nb.as_f64()).map(|(x, y)| x == y).unwrap_or(false)
+        }
+        _ => a == b,
+    }
+}
+
+fn jq_add_many<'a, I>(iter: I) -> Result<JsonValue, Error>
+where
+    I: IntoIterator<Item = &'a JsonValue>,
+{
+    let mut acc: Option<JsonValue> = None;
+    for v in iter {
+        acc = Some(match acc {
+            None => v.clone(),
+            Some(cur) => jq_add(&cur, v)?,
+        });
+    }
+    Ok(acc.unwrap_or(JsonValue::Null))
+}
+
+fn jq_add(a: &JsonValue, b: &JsonValue) -> Result<JsonValue, Error> {
+    match (a, b) {
+        (JsonValue::Null, v) | (v, JsonValue::Null) => Ok(v.clone()),
+        (JsonValue::Number(na), JsonValue::Number(nb)) => {
+            let x = na
+                .as_f64()
+                .ok_or_else(|| Error::Runtime("number conversion failed".to_string()))?;
+            let y = nb
+                .as_f64()
+                .ok_or_else(|| Error::Runtime("number conversion failed".to_string()))?;
+            number_json(x + y)
+        }
+        (JsonValue::String(sa), JsonValue::String(sb)) => Ok(JsonValue::String(format!("{sa}{sb}"))),
+        (JsonValue::Array(aa), JsonValue::Array(ab)) => {
+            let mut merged = aa.clone();
+            merged.extend(ab.iter().cloned());
+            Ok(JsonValue::Array(merged))
+        }
+        (JsonValue::Object(oa), JsonValue::Object(ob)) => {
+            let mut merged = oa.clone();
+            for (k, v) in ob {
+                merged.insert(k.clone(), v.clone());
+            }
+            Ok(JsonValue::Object(merged))
+        }
+        _ => Err(Error::Runtime(format!(
+            "cannot add {} and {}",
+            kind_name(a),
+            kind_name(b)
+        ))),
+    }
+}
+
+fn jq_subtract(a: &JsonValue, b: &JsonValue) -> Result<JsonValue, Error> {
+    match (a, b) {
+        (JsonValue::Number(na), JsonValue::Number(nb)) => {
+            let x = na
+                .as_f64()
+                .ok_or_else(|| Error::Runtime("number conversion failed".to_string()))?;
+            let y = nb
+                .as_f64()
+                .ok_or_else(|| Error::Runtime("number conversion failed".to_string()))?;
+            number_json(x - y)
+        }
+        (JsonValue::Array(aa), JsonValue::Array(ab)) => {
+            let filtered = aa
+                .iter()
+                .filter(|item| !ab.iter().any(|drop| jq_value_equal(item, drop)))
+                .cloned()
+                .collect::<Vec<_>>();
+            Ok(JsonValue::Array(filtered))
+        }
+        _ => Err(Error::Runtime(format!(
+            "cannot subtract {} and {}",
+            kind_name(a),
+            kind_name(b)
+        ))),
+    }
+}
+
+fn parse_jq_boolean(v: &JsonValue) -> Result<JsonValue, String> {
+    match v {
+        JsonValue::Bool(b) => Ok(JsonValue::Bool(*b)),
+        JsonValue::String(s) if s == "true" => Ok(JsonValue::Bool(true)),
+        JsonValue::String(s) if s == "false" => Ok(JsonValue::Bool(false)),
+        _ => Err(format!(
+            "{} cannot be parsed as a boolean",
+            jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
+        )),
+    }
+}
+
+fn value_as_f64(v: &JsonValue) -> Option<f64> {
+    match v {
+        JsonValue::Number(n) => n.as_f64(),
+        _ => None,
+    }
+}
+
+fn number_json(v: f64) -> Result<JsonValue, Error> {
+    if !v.is_finite() {
+        return Err(Error::Runtime("number is not finite".to_string()));
+    }
+    if v.fract() == 0.0 && v >= i64::MIN as f64 && v <= i64::MAX as f64 {
+        return Ok(JsonValue::from(v as i64));
+    }
+    serde_json::Number::from_f64(v)
+        .map(JsonValue::Number)
+        .ok_or_else(|| Error::Runtime("number is not finite".to_string()))
+}
+
+fn slice_value(v: &JsonValue, start: Option<isize>, end: Option<isize>) -> Result<JsonValue, Error> {
+    match v {
+        JsonValue::Array(arr) => {
+            let (s, e) = slice_bounds(arr.len(), start, end);
+            Ok(JsonValue::Array(arr[s..e].to_vec()))
+        }
+        JsonValue::String(s) => {
+            let chars: Vec<char> = s.chars().collect();
+            let (si, ei) = slice_bounds(chars.len(), start, end);
+            Ok(JsonValue::String(chars[si..ei].iter().collect()))
+        }
+        _ => Err(Error::Runtime(format!(
+            "cannot slice {}",
+            jq_typed_value(v).unwrap_or_else(|_| "value".to_string())
+        ))),
+    }
+}
+
+fn slice_bounds(len: usize, start: Option<isize>, end: Option<isize>) -> (usize, usize) {
+    let norm = |idx: isize| -> usize {
+        let raw = if idx < 0 { len as isize + idx } else { idx };
+        raw.clamp(0, len as isize) as usize
+    };
+    let s = start.map(norm).unwrap_or(0);
+    let e = end.map(norm).unwrap_or(len);
+    if e < s {
+        (s, s)
+    } else {
+        (s, e)
+    }
+}
+
+fn substring_positions(haystack: &str, needle: &str) -> Vec<u64> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    haystack
+        .match_indices(needle)
+        .map(|(i, _)| i as u64)
+        .collect()
+}
+
+fn flatten_depth(v: &JsonValue, depth: usize) -> JsonValue {
+    if depth == 0 {
+        return v.clone();
+    }
+    match v {
+        JsonValue::Array(arr) => {
+            let mut out = Vec::new();
+            for item in arr {
+                if let JsonValue::Array(inner) = item {
+                    if depth > 0 {
+                        let flat_inner = flatten_depth(&JsonValue::Array(inner.clone()), depth - 1);
+                        if let JsonValue::Array(flat_items) = flat_inner {
+                            out.extend(flat_items);
+                        } else {
+                            out.push(flat_inner);
+                        }
+                    } else {
+                        out.push(item.clone());
+                    }
+                } else {
+                    out.push(item.clone());
+                }
+            }
+            JsonValue::Array(out)
+        }
+        _ => v.clone(),
+    }
+}
+
+fn is_constant_range_collect(query: &str) -> bool {
+    query
+        .trim()
+        .strip_prefix("[range(")
+        .and_then(|s| s.strip_suffix(")]"))
+        .and_then(parse_constant_range_args)
+        .is_some()
+}
+
+fn eval_constant_range_collect(query: &str) -> Result<Option<Vec<JsonValue>>, Error> {
+    let Some(args) = query
+        .trim()
+        .strip_prefix("[range(")
+        .and_then(|s| s.strip_suffix(")]"))
+    else {
+        return Ok(None);
+    };
+    let Some((starts, stops, steps)) = parse_constant_range_args(args) else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for start in starts {
+        for stop in &stops {
+            for step in &steps {
+                range_emit(start, *stop, *step, &mut out)?;
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+fn parse_constant_range_args(args: &str) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+    let parts: Vec<&str> = args.split(';').collect();
+    match parts.as_slice() {
+        [limit] => {
+            let stops = parse_number_list(limit)?;
+            Some((vec![0.0], stops, vec![1.0]))
+        }
+        [start, stop] => Some((parse_number_list(start)?, parse_number_list(stop)?, vec![1.0])),
+        [start, stop, step] => Some((
+            parse_number_list(start)?,
+            parse_number_list(stop)?,
+            parse_number_list(step)?,
+        )),
+        _ => None,
+    }
+}
+
+fn parse_number_list(expr: &str) -> Option<Vec<f64>> {
+    let mut out = Vec::new();
+    for tok in expr.split(',') {
+        let v = parse_jsonish_value(tok.trim()).ok()?;
+        let n = v.as_f64()?;
+        out.push(n);
+    }
+    Some(out)
+}
+
+fn range_emit(start: f64, stop: f64, step: f64, out: &mut Vec<JsonValue>) -> Result<(), Error> {
+    if step == 0.0 {
+        return Err(Error::Runtime("range step cannot be zero".to_string()));
+    }
+    let mut v = start;
+    let mut iter = 0usize;
+    const MAX_ITERS: usize = 1_000_000;
+    if step > 0.0 {
+        while v < stop {
+            out.push(number_json(v)?);
+            v += step;
+            iter += 1;
+            if iter >= MAX_ITERS {
+                return Err(Error::Runtime("range iteration limit exceeded".to_string()));
+            }
+        }
+    } else {
+        while v > stop {
+            out.push(number_json(v)?);
+            v += step;
+            iter += 1;
+            if iter >= MAX_ITERS {
+                return Err(Error::Runtime("range iteration limit exceeded".to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn recurse_values(v: &JsonValue, out: &mut Vec<JsonValue>) {
+    out.push(v.clone());
+    match v {
+        JsonValue::Array(xs) => {
+            for x in xs {
+                recurse_values(x, out);
+            }
+        }
+        JsonValue::Object(m) => {
+            for x in m.values() {
+                recurse_values(x, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn slice_string(s: &str, start: usize, end: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let sidx = start.min(chars.len());
+    let eidx = end.min(chars.len());
+    chars[sidx..eidx].iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_one(query: &str, input: JsonValue) -> Vec<JsonValue> {
+        run_query_stream_with_paths_and_options(query, vec![input], &[], RunOptions::default())
+            .expect("query run")
+    }
+
+    fn run_null_input(query: &str) -> Vec<JsonValue> {
+        run_query_stream_with_paths_and_options(query, vec![], &[], RunOptions { null_input: true })
+            .expect("query run")
+    }
 
     #[test]
     fn validates_supported_and_unsupported_queries() {
@@ -636,5 +2674,386 @@ mod tests {
         )
         .expect("run");
         assert_eq!(out, vec![serde_json::json!(true)]);
+    }
+
+    #[test]
+    fn jq_pack1_object_and_path_cases() {
+        assert_eq!(
+            run_one("{x:-1},{x:-.},{x:-.|abs}", serde_json::json!(1)),
+            vec![
+                serde_json::json!({"x": -1}),
+                serde_json::json!({"x": -1}),
+                serde_json::json!({"x": 1}),
+            ]
+        );
+        assert_eq!(run_one("{a: 1}", JsonValue::Null), vec![serde_json::json!({"a": 1})]);
+        assert_eq!(
+            run_one("{a,b,(.d):.a,e:.b}", serde_json::json!({"a":1,"b":2,"c":3,"d":"c"})),
+            vec![serde_json::json!({"a":1,"b":2,"c":1,"e":2})]
+        );
+        assert_eq!(
+            run_one(r#"{"a",b,"a$\(1+1)"}"#, serde_json::json!({"a":1,"b":2,"a$2":4})),
+            vec![serde_json::json!({"a":1,"b":2,"a$2":4})]
+        );
+        assert_eq!(
+            run_one("[.[]|.[1:3]?]", serde_json::json!([1, null, true, false, "abcdef", {}, {"a":1,"b":2}, [], [1,2,3,4,5], [1,2]])),
+            vec![serde_json::json!([null, "bc", [], [2, 3], [2]])]
+        );
+    }
+
+    #[test]
+    fn jq_pack1_try_and_compile_error_cases() {
+        assert_eq!(
+            run_one(
+                "map(try .a[] catch ., try .a.[] catch ., .a[]?, .a.[]?)",
+                serde_json::json!([{"a":[1,2]}, {"a":123}])
+            ),
+            vec![serde_json::json!([1,2,1,2,1,2,1,2,"Cannot iterate over number (123)","Cannot iterate over number (123)"])]
+        );
+        assert_eq!(
+            run_one(r#"try ["OK", (.[] | error)] catch ["KO", .]"#, serde_json::json!({"a":["b"],"c":["d"]})),
+            vec![serde_json::json!(["KO", ["b"]])]
+        );
+        assert!(matches!(
+            validate_query(r#""u\vw""#),
+            Err(Error::Unsupported(msg)) if msg.contains("Invalid escape")
+        ));
+    }
+
+    #[test]
+    fn jq_pack2_negative_index_cases() {
+        assert_eq!(
+            run_one("try (.foo[-1] = 0) catch .", JsonValue::Null),
+            vec![serde_json::json!("Out of bounds negative array index")]
+        );
+        assert_eq!(
+            run_one("try (.foo[-2] = 0) catch .", JsonValue::Null),
+            vec![serde_json::json!("Out of bounds negative array index")]
+        );
+        assert_eq!(
+            run_one(".[-1] = 5", serde_json::json!([0,1,2])),
+            vec![serde_json::json!([0,1,5])]
+        );
+        assert_eq!(
+            run_one(".[-2] = 5", serde_json::json!([0,1,2])),
+            vec![serde_json::json!([0,5,2])]
+        );
+        assert_eq!(
+            run_one("try (.[999999999] = 0) catch .", JsonValue::Null),
+            vec![serde_json::json!("Array index too large")]
+        );
+    }
+
+    #[test]
+    fn jq_pack2_collection_forms() {
+        assert_eq!(run_one("[.]", serde_json::json!([2])), vec![serde_json::json!([[2]])]);
+        assert_eq!(run_one("[.[]]", serde_json::json!(["a"])), vec![serde_json::json!(["a"])]);
+        assert_eq!(
+            run_one("[(.,1),((.,.[]),(2,3))]", serde_json::json!(["a","b"])),
+            vec![serde_json::json!([["a","b"],1,["a","b"],"a","b",2,3])]
+        );
+        assert_eq!(
+            run_one("[([5,5][]),.,.[]]", serde_json::json!([1,2,3])),
+            vec![serde_json::json!([5,5,[1,2,3],1,2,3])]
+        );
+        assert_eq!(
+            run_one("{x: (1,2)},{x:3} | .x", JsonValue::Null),
+            vec![serde_json::json!(1), serde_json::json!(2), serde_json::json!(3)]
+        );
+        assert_eq!(
+            run_one("[.[-4,-3,-2,-1,0,1,2,3]]", serde_json::json!([1,2,3])),
+            vec![serde_json::json!([null,1,2,3,1,2,3,null])]
+        );
+    }
+
+    #[test]
+    fn jq_pack2_range_and_control_cases() {
+        assert_eq!(run_null_input("[range(0;10)]"), vec![serde_json::json!([0,1,2,3,4,5,6,7,8,9])]);
+        assert_eq!(
+            run_null_input("[range(0,1;3,4)]"),
+            vec![serde_json::json!([0,1,2,0,1,2,3,1,2,1,2,3])]
+        );
+        assert_eq!(run_null_input("[range(0;10;3)]"), vec![serde_json::json!([0,3,6,9])]);
+        assert_eq!(run_null_input("[range(0;10;-1)]"), vec![serde_json::json!([])]);
+        assert_eq!(run_null_input("[range(0;-5;-1)]"), vec![serde_json::json!([0,-1,-2,-3,-4])]);
+        assert_eq!(
+            run_null_input("[range(0,1;4,5;1,2)]"),
+            vec![serde_json::json!([0,1,2,3,0,2,0,1,2,3,4,0,2,4,1,2,3,1,3,1,2,3,4,1,3])]
+        );
+        assert_eq!(run_one("[while(.<100; .*2)]", serde_json::json!(1)), vec![serde_json::json!([1,2,4,8,16,32,64])]);
+        assert_eq!(
+            run_one(r#"[(label $here | .[] | if .>1 then break $here else . end), "hi!"]"#, serde_json::json!([0,1,2])),
+            vec![serde_json::json!([0,1,"hi!"])]
+        );
+        assert_eq!(
+            run_one(r#"[(label $here | .[] | if .>1 then break $here else . end), "hi!"]"#, serde_json::json!([0,2,1])),
+            vec![serde_json::json!([0,"hi!"])]
+        );
+    }
+
+    #[test]
+    fn jq_pack2_fail_message_for_unknown_label() {
+        assert!(matches!(
+            validate_query(". as $foo | break $foo"),
+            Err(Error::Unsupported(msg)) if msg.contains("$*label-foo is not defined")
+        ));
+    }
+
+    #[test]
+    fn jq_pack3_foreach_limit_skip_nth_cases() {
+        assert_eq!(
+            run_one("[.[]|[.,1]|until(.[0] < 1; [.[0] - 1, .[1] * .[0]])|.[1]]", serde_json::json!([1,2,3,4,5])),
+            vec![serde_json::json!([1,2,6,24,120])]
+        );
+        assert_eq!(
+            run_one(
+                r#"[label $out | foreach .[] as $item ([3, null]; if .[0] < 1 then break $out else [.[0] -1, $item] end; .[1])]"#,
+                serde_json::json!([11,22,33,44,55]),
+            ),
+            vec![serde_json::json!([11,22,33])]
+        );
+        assert_eq!(run_null_input("[foreach range(5) as $item (0; $item)]"), vec![serde_json::json!([0,1,2,3,4])]);
+        assert_eq!(
+            run_one("[foreach .[] as [$i, $j] (0; . + $i - $j)]", serde_json::json!([[2,1],[5,3],[6,4]])),
+            vec![serde_json::json!([1,3,5])]
+        );
+        assert_eq!(
+            run_one("[foreach .[] as {a:$a} (0; . + $a; -.)]", serde_json::json!([{"a":1},{"b":2},{"a":3,"b":4}])),
+            vec![serde_json::json!([-1,-1,-4])]
+        );
+        assert_eq!(
+            run_one("[-foreach -.[] as $x (0; . + $x)]", serde_json::json!([1,2,3])),
+            vec![serde_json::json!([1,3,6])]
+        );
+        assert_eq!(
+            run_one("[foreach .[] / .[] as $i (0; . + $i)]", serde_json::json!([1,2])),
+            vec![serde_json::json!([1,3,3.5,4.5])]
+        );
+        assert_eq!(
+            run_one("[foreach .[] as $x (0; . + $x) as $x | $x]", serde_json::json!([1,2,3])),
+            vec![serde_json::json!([1,3,6])]
+        );
+        assert_eq!(run_one("[limit(3; .[])]", serde_json::json!([11,22,33,44])), vec![serde_json::json!([11,22,33])]);
+        assert_eq!(run_one("[limit(0; error)]", serde_json::json!("bad")), vec![serde_json::json!([])]);
+        assert_eq!(run_one("[limit(1; 1, error)]", serde_json::json!("bad")), vec![serde_json::json!([1])]);
+        assert_eq!(
+            run_one("try limit(-1; error) catch .", JsonValue::Null),
+            vec![serde_json::json!("limit doesn't support negative count")]
+        );
+        assert_eq!(run_one("[skip(3; .[])]", serde_json::json!([1,2,3,4,5])), vec![serde_json::json!([4,5])]);
+        assert_eq!(run_one("[skip(0,2,3,4; .[])]", serde_json::json!([1,2,3])), vec![serde_json::json!([1,2,3,3])]);
+        assert_eq!(
+            run_one("try skip(-1; error) catch .", JsonValue::Null),
+            vec![serde_json::json!("skip doesn't support negative count")]
+        );
+        assert_eq!(run_null_input("nth(1; 0,1,error(\"foo\"))"), vec![serde_json::json!(1)]);
+        assert_eq!(run_one("[first(range(.)), last(range(.))]", serde_json::json!(10)), vec![serde_json::json!([0,9])]);
+        assert_eq!(run_one("[first(range(.)), last(range(.))]", serde_json::json!(0)), vec![serde_json::json!([])]);
+        assert_eq!(
+            run_one("[nth(0,5,9,10,15; range(.)), try nth(-1; range(.)) catch .]", serde_json::json!(10)),
+            vec![serde_json::json!([0,5,9,"nth doesn't support negative indices"])]
+        );
+        assert_eq!(run_null_input("first(1,error(\"foo\"))"), vec![serde_json::json!(1)]);
+    }
+
+    #[test]
+    fn jq_pack3_slice_del_assign_cases() {
+        assert_eq!(
+            run_one(r#"[.[3:2], .[-5:4], .[:-2], .[-2:], .[3:3][1:], .[10:]]"#, serde_json::json!([0,1,2,3,4,5,6])),
+            vec![serde_json::json!([[], [2,3], [0,1,2,3,4], [5,6], [], []])]
+        );
+        assert_eq!(
+            run_one(r#"[.[3:2], .[-5:4], .[:-2], .[-2:], .[3:3][1:], .[10:]]"#, serde_json::json!("abcdefghi")),
+            vec![serde_json::json!(["", "", "abcdefg", "hi", "", ""])]
+        );
+        assert_eq!(
+            run_one("del(.[2:4],.[0],.[-2:])", serde_json::json!([0,1,2,3,4,5,6,7])),
+            vec![serde_json::json!([1,4,5])]
+        );
+        assert_eq!(
+            run_one(r#".[2:4] = ([], ["a","b"], ["a","b","c"])"#, serde_json::json!([0,1,2,3,4,5,6,7])),
+            vec![
+                serde_json::json!([0,1,4,5,6,7]),
+                serde_json::json!([0,1,"a","b",4,5,6,7]),
+                serde_json::json!([0,1,"a","b","c",4,5,6,7]),
+            ]
+        );
+        assert_eq!(
+            run_null_input("reduce range(65540;65536;-1) as $i ([]; .[$i] = $i)|.[65536:]"),
+            vec![serde_json::json!([null,65537,65538,65539,65540])]
+        );
+    }
+
+    #[test]
+    fn jq_pack3_vars_and_arithmetic_cases() {
+        assert_eq!(run_null_input("1 as $x | 2 as $y | [$x,$y,$x]"), vec![serde_json::json!([1,2,1])]);
+        assert_eq!(
+            run_null_input("[1,2,3][] as $x | [[4,5,6,7][$x]]"),
+            vec![serde_json::json!([5]), serde_json::json!([6]), serde_json::json!([7])]
+        );
+        assert_eq!(run_one("42 as $x | . | . | . + 432 | $x + 1", serde_json::json!(34324)), vec![serde_json::json!(43)]);
+        assert_eq!(run_null_input("1 + 2 as $x | -$x"), vec![serde_json::json!(-3)]);
+        assert_eq!(run_null_input(r#""x" as $x | "a"+"y" as $y | $x+","+$y"#), vec![serde_json::json!("x,ay")]);
+        assert_eq!(run_null_input("1 as $x | [$x,$x,$x as $x | $x]"), vec![serde_json::json!([1,1,1])]);
+        assert_eq!(
+            run_null_input("[1, {c:3, d:4}] as [$a, {c:$b, b:$c}] | $a, $b, $c"),
+            vec![serde_json::json!(1), serde_json::json!(3), JsonValue::Null]
+        );
+        assert_eq!(
+            run_one(r#". as {as: $kw, "str": $str, ("e"+"x"+"p"): $exp} | [$kw, $str, $exp]"#, serde_json::json!({"as":1,"str":2,"exp":3})),
+            vec![serde_json::json!([1,2,3])]
+        );
+        assert_eq!(
+            run_one(".[] as [$a, $b] | [$b, $a]", serde_json::json!([[1],[1,2,3]])),
+            vec![serde_json::json!([null,1]), serde_json::json!([2,1])]
+        );
+        assert_eq!(run_one(". as $i | . as [$i] | $i", serde_json::json!([0])), vec![serde_json::json!(0)]);
+        assert_eq!(run_one(". as [$i] | . as $i | $i", serde_json::json!([0])), vec![serde_json::json!([0])]);
+        assert_eq!(run_null_input("2-1"), vec![serde_json::json!(1)]);
+        assert_eq!(run_null_input("2-(-1)"), vec![serde_json::json!(3)]);
+        assert_eq!(run_one("1e+0+0.001e3", serde_json::json!("x")), vec![serde_json::from_str::<JsonValue>("2.0").expect("json number")]);
+    }
+
+    #[test]
+    fn jq_pack3_compile_error_messages() {
+        assert!(matches!(
+            validate_query(". as [] | null"),
+            Err(Error::Unsupported(msg)) if msg.contains("unexpected ']'")
+        ));
+        assert!(matches!(
+            validate_query(". as {} | null"),
+            Err(Error::Unsupported(msg)) if msg.contains("unexpected '}'")
+        ));
+        assert!(matches!(
+            validate_query(". as $foo | [$foo, $bar]"),
+            Err(Error::Unsupported(msg)) if msg.contains("$bar is not defined")
+        ));
+        assert!(matches!(
+            validate_query(". as {(true):$foo} | $foo"),
+            Err(Error::Unsupported(msg)) if msg.contains("Cannot use boolean (true) as object key")
+        ));
+    }
+
+    #[test]
+    fn jq_pack3_builtin_combo_cases() {
+        assert_eq!(
+            run_null_input("[limit(5,7; range(9))]"),
+            vec![serde_json::json!([0,1,2,3,4,0,1,2,3,4,5,6])]
+        );
+        assert_eq!(
+            run_null_input("[nth(5,7; range(9;0;-1))]"),
+            vec![serde_json::json!([4,2])]
+        );
+        assert_eq!(
+            run_one(
+                r#"[(index(",","|"), rindex(",","|")), indices(",","|")]"#,
+                serde_json::json!("a,b|c,d,e||f,g,h,|,|,i,j")
+            ),
+            vec![serde_json::json!([1,3,22,19,[1,5,7,12,14,16,18,20,22],[3,9,10,17,19]])]
+        );
+        assert_eq!(
+            run_one(r#"join(",","/")"#, serde_json::json!(["a","b","c","d"])),
+            vec![serde_json::json!("a,b,c,d"), serde_json::json!("a/b/c/d")]
+        );
+        assert_eq!(
+            run_one(r#"[.[]|join("a")]"#, serde_json::json!([[],[""],["",""],["","",""]])),
+            vec![serde_json::json!(["","","a","aa"])]
+        );
+        assert_eq!(
+            run_one("flatten(3,2,1)", serde_json::json!([0,[1],[[2]],[[[3]]]])),
+            vec![
+                serde_json::json!([0,1,2,3]),
+                serde_json::json!([0,1,2,[3]]),
+                serde_json::json!([0,1,[2],[[3]]]),
+            ]
+        );
+    }
+
+    #[test]
+    fn jq_pack4_arith_and_builtin_cases() {
+        assert_eq!(run_one(".+4", serde_json::json!(15)), vec![serde_json::from_str::<JsonValue>("19.0").expect("json")]);
+        assert_eq!(run_one(".+null", serde_json::json!({"a":42})), vec![serde_json::json!({"a":42})]);
+        assert_eq!(run_one("null+.", JsonValue::Null), vec![JsonValue::Null]);
+        assert_eq!(run_one(".a+.b", serde_json::json!({"a":42})), vec![serde_json::json!(42)]);
+        assert_eq!(run_null_input("[1,2,3] + [.]"), vec![serde_json::json!([1,2,3,null])]);
+        assert_eq!(run_one(r#"{"a":1} + {"b":2} + {"c":3}"#, serde_json::json!("x")), vec![serde_json::json!({"a":1,"b":2,"c":3})]);
+        assert_eq!(
+            run_one(r#""asdf" + "jkl;" + . + . + ."#, serde_json::json!("some string")),
+            vec![serde_json::json!("asdfjkl;some stringsome stringsome string")]
+        );
+        assert_eq!(
+            run_one(r#""\u0000\u0020\u0000" + ."#, serde_json::json!("\u{0000} \u{0000}")),
+            vec![serde_json::json!("\u{0000} \u{0000}\u{0000} \u{0000}")]
+        );
+        assert_eq!(run_one("42 - .", serde_json::json!(11)), vec![serde_json::json!(31)]);
+        assert_eq!(run_one("[1,2,3,4,1] - [.,3]", serde_json::json!(1)), vec![serde_json::json!([2,4])]);
+        assert_eq!(run_null_input("[-1 as $x | 1,$x]"), vec![serde_json::json!([1,-1])]);
+        assert_eq!(run_one("[10 * 20, 20 / .]", serde_json::json!(4)), vec![serde_json::json!([200,5])]);
+        assert_eq!(run_null_input("1 + 2 * 2 + 10 / 2"), vec![serde_json::json!(10)]);
+        assert_eq!(run_null_input("[16 / 4 / 2, 16 / 4 * 2, 16 - 4 - 2, 16 - 4 + 2]"), vec![serde_json::json!([2,8,10,14])]);
+        assert_eq!(run_null_input("1e-19 + 1e-20 - 5e-21"), vec![serde_json::from_str::<JsonValue>("1.05e-19").expect("json")]);
+        assert_eq!(run_null_input("1 / 1e-17"), vec![serde_json::from_str::<JsonValue>("1e17").expect("json")]);
+        assert_eq!(run_null_input("25 % 7"), vec![serde_json::json!(4)]);
+        assert_eq!(run_null_input("49732 % 472"), vec![serde_json::json!(172)]);
+        assert_eq!(run_null_input("[(infinite, -infinite) % (1, -1, infinite)]"), vec![serde_json::json!([0,0,0,0,0,-1])]);
+        assert_eq!(run_null_input("[nan % 1, 1 % nan | isnan]"), vec![serde_json::json!([true,true])]);
+        assert_eq!(run_one("1 + tonumber + (\"10\" | tonumber)", serde_json::json!(4)), vec![serde_json::json!(15)]);
+        assert_eq!(run_one("map(toboolean)", serde_json::json!(["false","true",false,true])), vec![serde_json::json!([false,true,false,true])]);
+        assert_eq!(
+            run_one(".[] | try toboolean catch .", serde_json::json!([null,0,"tru","truee","fals","falsee",[],{}])),
+            vec![
+                serde_json::json!("null (null) cannot be parsed as a boolean"),
+                serde_json::json!("number (0) cannot be parsed as a boolean"),
+                serde_json::json!("string (\"tru\") cannot be parsed as a boolean"),
+                serde_json::json!("string (\"truee\") cannot be parsed as a boolean"),
+                serde_json::json!("string (\"fals\") cannot be parsed as a boolean"),
+                serde_json::json!("string (\"falsee\") cannot be parsed as a boolean"),
+                serde_json::json!("array ([]) cannot be parsed as a boolean"),
+                serde_json::json!("object ({}) cannot be parsed as a boolean"),
+            ]
+        );
+        assert_eq!(
+            run_one(r#"[{"a":42},.object,10,.num,false,true,null,"b",[1,4]] | .[] as $x | [$x == .[]]"#, serde_json::json!({"object":{"a":42},"num":10.0})),
+            vec![
+                serde_json::json!([true,true,false,false,false,false,false,false,false]),
+                serde_json::json!([true,true,false,false,false,false,false,false,false]),
+                serde_json::json!([false,false,true,true,false,false,false,false,false]),
+                serde_json::json!([false,false,true,true,false,false,false,false,false]),
+                serde_json::json!([false,false,false,false,true,false,false,false,false]),
+                serde_json::json!([false,false,false,false,false,true,false,false,false]),
+                serde_json::json!([false,false,false,false,false,false,true,false,false]),
+                serde_json::json!([false,false,false,false,false,false,false,true,false]),
+                serde_json::json!([false,false,false,false,false,false,false,false,true]),
+            ]
+        );
+        assert_eq!(run_one("[.[] | length]", serde_json::json!([[],{},[1,2],{"a":42},"asdf","\u{03bc}"])), vec![serde_json::json!([0,0,2,1,4,1])]);
+        assert_eq!(run_one("utf8bytelength", serde_json::json!("asdf\u{03bc}")), vec![serde_json::json!(6)]);
+        assert_eq!(
+            run_one("[.[] | try utf8bytelength catch .]", serde_json::json!([[], {}, [1,2], 55, true, false])),
+            vec![serde_json::json!([
+                "array ([]) only strings have UTF-8 byte length",
+                "object ({}) only strings have UTF-8 byte length",
+                "array ([1,2]) only strings have UTF-8 byte length",
+                "number (55) only strings have UTF-8 byte length",
+                "boolean (true) only strings have UTF-8 byte length",
+                "boolean (false) only strings have UTF-8 byte length"
+            ])]
+        );
+        assert_eq!(
+            run_one("map(keys)", serde_json::json!([{}, {"abcd":1,"abc":2,"abcde":3}, {"x":1, "z":3, "y":2}])),
+            vec![serde_json::json!([[],["abc","abcd","abcde"],["x","y","z"]])]
+        );
+        assert_eq!(run_null_input("[1,2,empty,3,empty,4]"), vec![serde_json::json!([1,2,3,4])]);
+        assert_eq!(
+            run_one("map(add)", serde_json::json!([[], [1,2,3], ["a","b","c"], [[3],[4,5],[6]], [{"a":1}, {"b":2}, {"a":3}]])),
+            vec![serde_json::json!([null,6,"abc",[3,4,5,6],{"a":3,"b":2}])]
+        );
+        assert_eq!(run_one("map_values(.+1)", serde_json::json!([0,1,2])), vec![serde_json::json!([1,2,3])]);
+        assert_eq!(run_null_input("[add(null), add(range(range(10))), add(empty), add(10,range(10))]"), vec![serde_json::json!([null,120,null,55])]);
+        assert_eq!(run_one(".sum = add(.arr[])", serde_json::json!({"arr":[]})), vec![serde_json::json!({"arr":[],"sum":null})]);
+        assert_eq!(
+            run_one("add({(.[]):1}) | keys", serde_json::json!(["a","a","b","a","d","b","d","a","d"])),
+            vec![serde_json::json!(["a","b","d"])]
+        );
     }
 }

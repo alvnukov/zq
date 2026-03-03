@@ -27,6 +27,11 @@ enum Stage {
     Literal(JsonValue),
     Path(Vec<Accessor>),
     SelectTest { path: Vec<Accessor>, regex: Regex },
+    SelectCompare {
+        path: Vec<Accessor>,
+        op: CompareOp,
+        rhs: JsonValue,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +42,12 @@ enum Accessor {
     IndexOpt(i64),
     Iter,
     IterOpt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompareOp {
+    Eq,
+    Ne,
 }
 
 pub fn try_execute(query: &str, inputs: &[JsonValue], run_options: RunOptions) -> TryExecute {
@@ -149,6 +160,7 @@ fn run_stage(stage: &Stage, input: JsonValue) -> Result<Vec<JsonValue>, String> 
         Stage::Literal(v) => Ok(vec![v.clone()]),
         Stage::Path(accessors) => run_path(accessors, input),
         Stage::SelectTest { path, regex } => run_select_test(path, regex, input),
+        Stage::SelectCompare { path, op, rhs } => run_select_compare(path, *op, rhs, input),
     }
 }
 
@@ -167,6 +179,35 @@ fn run_select_test(path: &[Accessor], regex: &Regex, input: JsonValue) -> Result
             matches_count += 1;
         }
     }
+    let mut out = Vec::with_capacity(matches_count);
+    if matches_count == 0 {
+        return Ok(out);
+    }
+    for _ in 1..matches_count {
+        out.push(input.clone());
+    }
+    out.push(input);
+    Ok(out)
+}
+
+fn run_select_compare(
+    path: &[Accessor],
+    op: CompareOp,
+    rhs: &JsonValue,
+    input: JsonValue,
+) -> Result<Vec<JsonValue>, String> {
+    let values = run_path(path, input.clone())?;
+    let mut matches_count = 0usize;
+    for lhs in values {
+        let is_match = match op {
+            CompareOp::Eq => lhs == *rhs,
+            CompareOp::Ne => lhs != *rhs,
+        };
+        if is_match {
+            matches_count += 1;
+        }
+    }
+
     let mut out = Vec::with_capacity(matches_count);
     if matches_count == 0 {
         return Ok(out);
@@ -312,7 +353,9 @@ fn parse_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<S
     }
 
     if chars.peek().copied() == Some('s') {
-        if let Some(stage) = parse_select_test_stage(chars) {
+        let mut probe = chars.clone();
+        if let Some(stage) = parse_select_stage(&mut probe) {
+            *chars = probe;
             return Some(stage);
         }
     }
@@ -377,7 +420,7 @@ fn parse_path_accessors(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) ->
     Some(accessors)
 }
 
-fn parse_select_test_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<Stage> {
+fn parse_select_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<Stage> {
     parse_keyword(chars, "select")?;
     skip_ws(chars);
     if chars.next() != Some('(') {
@@ -386,27 +429,70 @@ fn parse_select_test_stage(chars: &mut std::iter::Peekable<std::str::Chars<'_>>)
     skip_ws(chars);
     let path = parse_path_accessors(chars)?;
     skip_ws(chars);
-    if chars.next() != Some('|') {
+    match chars.peek().copied() {
+        Some('|') => {
+            chars.next();
+            skip_ws(chars);
+            parse_keyword(chars, "test")?;
+            skip_ws(chars);
+            if chars.next() != Some('(') {
+                return None;
+            }
+            skip_ws(chars);
+            let pattern = parse_string(chars)?;
+            skip_ws(chars);
+            if chars.next() != Some(')') {
+                return None;
+            }
+            skip_ws(chars);
+            if chars.next() != Some(')') {
+                return None;
+            }
+            let regex = Regex::new(&pattern).ok()?;
+            Some(Stage::SelectTest { path, regex })
+        }
+        _ => {
+            let op = parse_select_compare_op(chars)?;
+            let rhs = parse_select_rhs_literal(chars)?;
+            skip_ws(chars);
+            if chars.next() != Some(')') {
+                return None;
+            }
+            Some(Stage::SelectCompare { path, op, rhs })
+        }
+    }
+}
+
+fn parse_select_compare_op(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<CompareOp> {
+    skip_ws(chars);
+    let first = chars.next()?;
+    let second = chars.next()?;
+    match (first, second) {
+        ('=', '=') => Some(CompareOp::Eq),
+        ('!', '=') => Some(CompareOp::Ne),
+        _ => None,
+    }
+}
+
+fn parse_select_rhs_literal(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<JsonValue> {
+    skip_ws(chars);
+    if chars.peek().copied() == Some('"') {
+        return Some(JsonValue::String(parse_string(chars)?));
+    }
+
+    let mut raw = String::new();
+    while let Some(ch) = chars.peek().copied() {
+        if ch == ')' || ch.is_ascii_whitespace() {
+            break;
+        }
+        raw.push(ch);
+        chars.next();
+    }
+
+    if raw.is_empty() {
         return None;
     }
-    skip_ws(chars);
-    parse_keyword(chars, "test")?;
-    skip_ws(chars);
-    if chars.next() != Some('(') {
-        return None;
-    }
-    skip_ws(chars);
-    let pattern = parse_string(chars)?;
-    skip_ws(chars);
-    if chars.next() != Some(')') {
-        return None;
-    }
-    skip_ws(chars);
-    if chars.next() != Some(')') {
-        return None;
-    }
-    let regex = Regex::new(&pattern).ok()?;
-    Some(Stage::SelectTest { path, regex })
+    serde_json::from_str(raw.trim()).ok()
 }
 
 fn parse_keyword(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, expected: &str) -> Option<()> {
@@ -663,6 +749,41 @@ mod tests {
         match out {
             TryExecute::Executed(Ok(values)) => {
                 assert_eq!(values, vec![serde_json::json!(2), serde_json::json!(3)])
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn supports_select_compare_eq_filter() {
+        let input = vec![
+            serde_json::json!({"i": 1}),
+            serde_json::json!({"i": 2}),
+            serde_json::json!({"i": 3}),
+        ];
+        let out = try_execute("select(.i==2)", &input, RunOptions { null_input: false });
+        match out {
+            TryExecute::Executed(Ok(values)) => {
+                assert_eq!(values, vec![serde_json::json!({"i": 2})]);
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn supports_select_compare_ne_filter() {
+        let input = vec![
+            serde_json::json!({"i": 1}),
+            serde_json::json!({"i": 2}),
+            serde_json::json!({"i": 3}),
+        ];
+        let out = try_execute("select(.i!=2)", &input, RunOptions { null_input: false });
+        match out {
+            TryExecute::Executed(Ok(values)) => {
+                assert_eq!(
+                    values,
+                    vec![serde_json::json!({"i": 1}), serde_json::json!({"i": 3})]
+                );
             }
             other => panic!("unexpected outcome: {other:?}"),
         }

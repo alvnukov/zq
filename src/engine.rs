@@ -276,6 +276,11 @@ pub fn format_query_error(tool: &str, input: &str, err: &crate::QueryError) -> S
                 "{tool}: error: Top-level program not given (try \".\")\n{tool}: 1 compile error"
             );
         }
+        if msg.starts_with("too many function parameters or local function definitions (max 4095)") {
+            return format!(
+                "{tool}: error: too many function parameters or local function definitions (max 4095)\n{tool}: 1 compile error"
+            );
+        }
     }
 
     let base = format!("{tool}: {err}");

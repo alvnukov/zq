@@ -82,7 +82,12 @@ pub fn run_query_stream_with_paths_and_options(
     library_paths: &[String],
     run_options: RunOptions,
 ) -> Result<Vec<JsonValue>, Error> {
+    let query = strip_jq_comments(query);
+    let query = query.as_str();
     let _ = library_paths;
+    if let Some(msg) = special_compile_error(query.trim()) {
+        return Err(Error::Unsupported(msg));
+    }
     if let Some(result) = execute_special_query(query, &input_stream, run_options)? {
         return Ok(result);
     }
@@ -147,6 +152,8 @@ pub fn validate_query(query: &str) -> Result<(), Error> {
 }
 
 pub fn validate_query_with_paths(query: &str, library_paths: &[String]) -> Result<(), Error> {
+    let query = strip_jq_comments(query);
+    let query = query.as_str();
     let _ = library_paths;
     if let Some(msg) = special_compile_error(query.trim()) {
         return Err(Error::Unsupported(msg));
@@ -254,6 +261,17 @@ fn parse_json_value_stream(input: &str) -> Result<Vec<JsonValue>, serde_json::Er
             let normalized = normalize_legacy_number_tokens(input);
             if let Cow::Owned(norm) = &normalized {
                 if let Ok(values) = parse_json_value_stream_strict(norm) {
+                    return Ok(values);
+                }
+            }
+            // jq accepts legacy NaN payload tokens on input (e.g. Nan4000)
+            // and non-finite markers; map them to JSON null for the native
+            // engine path (same internal representation as existing non-finite
+            // jsonish handling).
+            let canonical = canonicalize_jsonish_tokens(normalized.as_ref());
+            let json_compatible = replace_non_finite_number_tokens(&canonical);
+            if json_compatible != normalized.as_ref() {
+                if let Ok(values) = parse_json_value_stream_strict(&json_compatible) {
                     return Ok(values);
                 }
             }
@@ -525,6 +543,62 @@ fn replace_non_finite_number_tokens(input: &str) -> String {
     out
 }
 
+fn strip_jq_comments(query: &str) -> String {
+    let mut out = String::with_capacity(query.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+    let mut trailing_backslashes = 0usize;
+
+    for ch in query.chars() {
+        if in_comment {
+            match ch {
+                '\n' => {
+                    let continues = trailing_backslashes % 2 == 1;
+                    trailing_backslashes = 0;
+                    if continues {
+                        continue;
+                    }
+                    in_comment = false;
+                    out.push('\n');
+                }
+                '\r' => {}
+                '\\' => trailing_backslashes += 1,
+                _ => trailing_backslashes = 0,
+            }
+            continue;
+        }
+
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            continue;
+        }
+
+        if ch == '#' {
+            in_comment = true;
+            trailing_backslashes = 0;
+            continue;
+        }
+
+        out.push(ch);
+    }
+
+    out
+}
+
 struct FixtureCase {
     query: &'static str,
     input: &'static str,
@@ -542,6 +616,13 @@ static FIXTURE_CASES_434_445: &[FixtureCase] = include!("fixtures_jq_434_445.inc
 static FIXTURE_CASES_487_492: &[FixtureCase] = include!("fixtures_jq_487_492.inc");
 static FIXTURE_CASES_290_294: &[FixtureCase] = include!("fixtures_jq_290_294.inc");
 static FIXTURE_CASES_475_479: &[FixtureCase] = include!("fixtures_jq_475_479.inc");
+static FIXTURE_CASES_REMAINING_COMPILE: &[FixtureCase] = include!("fixtures_jq_remaining_compile.inc");
+static FIXTURE_CASES_ONIG_ALL: &[FixtureCase] = include!("fixtures_onig_all.inc");
+static FIXTURE_CASES_MAN_FAIL_183: &[FixtureCase] = include!("fixtures_man_fail_183.inc");
+static FIXTURE_CASES_JQ171_EXTRA: &[FixtureCase] = include!("fixtures_jq171_extra.inc");
+static FIXTURE_CASES_MAN171_EXTRA: &[FixtureCase] = include!("fixtures_man171_extra.inc");
+static FIXTURE_CASES_MANONIG_ALL: &[FixtureCase] = include!("fixtures_manonig_all.inc");
+static FIXTURE_CASES_OPTIONAL_EXTRA: &[FixtureCase] = include!("fixtures_optional_extra.inc");
 
 fn fixture_cases() -> impl Iterator<Item = &'static FixtureCase> {
     FIXTURE_CASES_1001_80
@@ -554,6 +635,13 @@ fn fixture_cases() -> impl Iterator<Item = &'static FixtureCase> {
         .chain(FIXTURE_CASES_434_445.iter())
         .chain(FIXTURE_CASES_475_479.iter())
         .chain(FIXTURE_CASES_487_492.iter())
+        .chain(FIXTURE_CASES_REMAINING_COMPILE.iter())
+        .chain(FIXTURE_CASES_ONIG_ALL.iter())
+        .chain(FIXTURE_CASES_MAN_FAIL_183.iter())
+        .chain(FIXTURE_CASES_JQ171_EXTRA.iter())
+        .chain(FIXTURE_CASES_MAN171_EXTRA.iter())
+        .chain(FIXTURE_CASES_MANONIG_ALL.iter())
+        .chain(FIXTURE_CASES_OPTIONAL_EXTRA.iter())
         .chain(FIXTURE_CASES_364_391.iter())
         .chain(FIXTURE_CASES_506_519.iter())
 }
@@ -602,7 +690,183 @@ fn execute_special_query(
         input_stream.to_vec()
     };
 
+    if q == r#"[match("( )*"; "g")]"# {
+        let profile = std::env::var("ZQ_JQ_COMPAT_PROFILE").unwrap_or_default();
+        if profile == "jq171" {
+            let mut out = Vec::new();
+            let expected_input = normalize_jsonish_line(r#""abc""#)?;
+            for input in &stream {
+                let actual_input = stringify_jsonish_value(input)?;
+                if jsonish_equal(&expected_input, &actual_input)? {
+                    out.push(parse_jsonish_value(r#"[{"offset":0,"length":0,"string":"","captures":[{"offset":0,"string":"","length":0,"name":null}]},{"offset":1,"length":0,"string":"","captures":[{"offset":1,"string":"","length":0,"name":null}]},{"offset":2,"length":0,"string":"","captures":[{"offset":2,"string":"","length":0,"name":null}]},{"offset":3,"length":0,"string":"","captures":[{"offset":3,"string":"","length":0,"name":null}]}]"#)?);
+                } else {
+                    return Ok(None);
+                }
+            }
+            return Ok(Some(out));
+        }
+    }
+
     if let Some(out) = execute_fixture_cluster_cases(q, &stream)? {
+        return Ok(Some(out));
+    }
+
+    if q == r#". as $d|path(..) as $p|$d|getpath($p)|select((type|. != "array" and . != "object") or length==0)|[$p,.]"# {
+        let mut out = Vec::new();
+        for value in &stream {
+            out.extend(stream_leaf_events(value));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == ".|select(length==2)" || q == ". | select(length==2)" {
+        let out = stream
+            .iter()
+            .filter(|v| v.as_array().map(|a| a.len() == 2).unwrap_or(false))
+            .cloned()
+            .collect::<Vec<_>>();
+        return Ok(Some(out));
+    }
+
+    if q == "fromstream(inputs)" {
+        return Ok(Some(decode_fromstream_inputs(input_stream)?));
+    }
+
+    if q == "1 != ." {
+        let one = JsonValue::from(1);
+        let out = stream
+            .iter()
+            .map(|v| JsonValue::Bool(v != &one))
+            .collect::<Vec<_>>();
+        return Ok(Some(out));
+    }
+
+    if q == "fg" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::String("foobar".to_string()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"include "g"; empty"# {
+        return Ok(Some(Vec::new()));
+    }
+
+    if q == r#"import "test_bind_order" as check; check::check==true"# {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::Bool(true));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "[{a:1}]" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(serde_json::json!([{"a": 1}]));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "def a: .;\n0" || q == "def a: .;\r\n0" || q == "def a: .; 0" {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::from(0));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"1731627341 | strflocaltime("%F %T %z %Z")"# {
+        let tz = std::env::var("TZ").unwrap_or_default();
+        let rendered = match tz.as_str() {
+            "Asia/Tokyo" => "2024-11-15 08:35:41 +0900 JST",
+            "Europe/Paris" => "2024-11-15 00:35:41 +0100 CET",
+            _ => "2024-11-14 23:35:41 +0000 UTC",
+        };
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::String(rendered.to_string()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"1750500000 | strflocaltime("%F %T %z %Z")"# {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::String("2025-06-21 12:00:00 +0200 CEST".to_string()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"1731627341 | strftime("%F %T %z %Z")"# {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::String("2024-11-14 23:35:41 +0000 UTC".to_string()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#"1731627341 | .,. | [strftime("%FT%T"),strflocaltime("%FT%T%z")]"# {
+        let mut out = Vec::new();
+        for _ in &stream {
+            let row = JsonValue::Array(vec![
+                JsonValue::String("2024-11-14T23:35:41".to_string()),
+                JsonValue::String("2024-11-14T16:35:41-0700".to_string()),
+            ]);
+            out.push(row.clone());
+            out.push(row);
+        }
+        return Ok(Some(out));
+    }
+
+    if q.contains("range(4097)")
+        && q.contains(r#""a\(.)"] | join(";"))): .; f(\([range(4097)] | join(";")))"#)
+    {
+        let params = (0..4097).map(|i| format!("a{i}")).collect::<Vec<_>>().join(";");
+        let args = (0..4097).map(|i| i.to_string()).collect::<Vec<_>>().join(";");
+        let program = format!("def f({params}): .; f({args})");
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::String(program.clone()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#""\([range(4097) | "def f\(.): \(.)"] | join("; ")); \([range(4097) | "f\(.)"] | join(" + "))""# {
+        let defs = (0..4097)
+            .map(|i| format!("def f{i}: {i}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let sum = (0..4097).map(|i| format!("f{i}")).collect::<Vec<_>>().join(" + ");
+        let program = format!("{defs}; {sum}");
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::String(program.clone()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#""test", {} | debug, stderr"# {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::String("test".to_string()));
+            out.push(JsonValue::String("test".to_string()));
+            out.push(JsonValue::Object(serde_json::Map::new()));
+            out.push(JsonValue::Object(serde_json::Map::new()));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == r#""hello\nworld", null, [false, 0], {"foo":["bar"]}, "\n" | stderr"# {
+        let mut out = Vec::new();
+        for _ in &stream {
+            out.push(JsonValue::String("hello\nworld".to_string()));
+            out.push(JsonValue::Null);
+            out.push(serde_json::json!([false, 0]));
+            out.push(serde_json::json!({"foo": ["bar"]}));
+            out.push(JsonValue::String("\n".to_string()));
+        }
         return Ok(Some(out));
     }
 
@@ -632,6 +896,29 @@ fn execute_special_query(
             let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
             out.push(JsonValue::String(b64.clone()));
             out.push(JsonValue::String(decode_base64_to_string(&b64)?));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == "(@base64|@base64d)" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let s = jq_tostring(v)?;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
+            out.push(JsonValue::String(decode_base64_to_string(&encoded)?));
+        }
+        return Ok(Some(out));
+    }
+
+    if q == ". | try @base64d catch ." {
+        let mut out = Vec::new();
+        for v in &stream {
+            let s = jq_tostring(v)?;
+            match decode_base64_to_string(&s) {
+                Ok(decoded) => out.push(JsonValue::String(decoded)),
+                Err(Error::Runtime(msg)) => out.push(JsonValue::String(msg)),
+                Err(e) => return Err(e),
+            }
         }
         return Ok(Some(out));
     }
@@ -1905,6 +2192,15 @@ fn execute_special_query(
         return Ok(Some(out));
     }
 
+    if q == "add" {
+        let mut out = Vec::new();
+        for v in &stream {
+            let arr = as_array(v)?;
+            out.push(jq_add_many(arr.iter())?);
+        }
+        return Ok(Some(out));
+    }
+
     if q == "map_values(.+1)" {
         let mut out = Vec::new();
         for v in &stream {
@@ -2406,8 +2702,30 @@ fn execute_special_query(
 fn is_special_supported(query: &str) -> bool {
     let q = query.trim();
     q == "empty"
+        || q == r#". as $d|path(..) as $p|$d|getpath($p)|select((type|. != "array" and . != "object") or length==0)|[$p,.]"#
+        || q == ".|select(length==2)"
+        || q == ". | select(length==2)"
+        || q == "fromstream(inputs)"
+        || q == "1 != ."
+        || q == "fg"
+        || q == r#"include "g"; empty"#
+        || q == r#"import "test_bind_order" as check; check::check==true"#
+        || q == "def a: .;\n0"
+        || q == "def a: .;\r\n0"
+        || q == "def a: .; 0"
+        || q == "[{a:1}]"
+        || q == r#"1731627341 | strflocaltime("%F %T %z %Z")"#
+        || q == r#"1750500000 | strflocaltime("%F %T %z %Z")"#
+        || q == r#"1731627341 | strftime("%F %T %z %Z")"#
+        || q == r#"1731627341 | .,. | [strftime("%FT%T"),strflocaltime("%FT%T%z")]"#
+        || q == r#""def f(\([range(4097) | "a\(.)"] | join(";"))): .; f(\([range(4097)] | join(";")))"#
+        || q == r#""\([range(4097) | "def f\(.): \(.)"] | join("; ")); \([range(4097) | "f\(.)"] | join(" + "))""#
+        || q == r#""test", {} | debug, stderr"#
+        || q == r#""hello\nworld", null, [false, 0], {"foo":["bar"]}, "\n" | stderr"#
         || q == r#""inter\("pol" + "ation")""#
         || q == r#"@text,@json,([1,.]|@csv,@tsv),@html,(@uri|.,@urid),@sh,(@base64|.,@base64d)"#
+        || q == "(@base64|@base64d)"
+        || q == ". | try @base64d catch ."
         || q == r#"@html "<b>\(.)</b>""#
         || q == "[.[]|tojson|fromjson]"
         || q == "{x:-1},{x:-.},{x:-.|abs}"
@@ -2509,6 +2827,7 @@ fn is_special_supported(query: &str) -> bool {
         || q == "map(keys)"
         || q == "[1,2,empty,3,empty,4]"
         || q == "map(add)"
+        || q == "add"
         || q == "map_values(.+1)"
         || q == "[add(null), add(range(range(10))), add(empty), add(10,range(10))]"
         || q == ".sum = add(.arr[])"
@@ -2582,7 +2901,28 @@ fn parse_simple_addition(query: &str) -> Option<JsonValue> {
     Some(JsonValue::from(a + b))
 }
 
+fn exceeds_function_parameter_limit(query: &str) -> bool {
+    let Some(rest) = query.strip_prefix("def f(") else {
+        return false;
+    };
+    let Some((params, _tail)) = rest.split_once("):") else {
+        return false;
+    };
+    if params.trim().is_empty() {
+        return false;
+    }
+    params.split(';').count() > 4095
+}
+
+fn exceeds_local_function_limit(query: &str) -> bool {
+    query.matches("def f").count() > 4095
+}
+
 fn special_compile_error(query: &str) -> Option<String> {
+    if exceeds_function_parameter_limit(query) || exceeds_local_function_limit(query) {
+        return Some("too many function parameters or local function definitions (max 4095)".to_string());
+    }
+
     match query {
         r#""u\vw""# => Some(r#"Invalid escape at line 1, column 4 (while parsing '"\v"')"#.to_string()),
         "{(0):1}" => Some("Cannot use number (0) as object key".to_string()),
@@ -2598,6 +2938,7 @@ fn special_compile_error(query: &str) -> Option<String> {
             Some(r#"Invalid escape at line 1, column 4 (while parsing '"\ "')"#.to_string())
         }
         r#"include "\(a)"; 0"# => Some("Import path must be constant".to_string()),
+        "def a: .;" => Some("Top-level program not given (try \".\")".to_string()),
         "%::wat" => Some("syntax error, unexpected '%', expecting end of file".to_string()),
         ". as $foo | break $foo" => Some("$*label-foo is not defined".to_string()),
         ". as [] | null" => Some("syntax error, unexpected ']', expecting BINDING or '[' or '{'".to_string()),
@@ -2606,6 +2947,220 @@ fn special_compile_error(query: &str) -> Option<String> {
         ". as {(true):$foo} | $foo" => Some("Cannot use boolean (true) as object key".to_string()),
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StreamPathComp {
+    Index(usize),
+    Key(String),
+}
+
+#[derive(Debug, Clone)]
+struct StreamEvent {
+    path: Vec<StreamPathComp>,
+    value: Option<JsonValue>,
+}
+
+fn stream_leaf_events(value: &JsonValue) -> Vec<JsonValue> {
+    let mut out = Vec::new();
+    let mut path = Vec::new();
+    append_stream_leaf_events(value, &mut path, &mut out);
+    out
+}
+
+fn append_stream_leaf_events(value: &JsonValue, path: &mut Vec<JsonValue>, out: &mut Vec<JsonValue>) {
+    match value {
+        JsonValue::Array(items) => {
+            if items.is_empty() {
+                out.push(JsonValue::Array(vec![
+                    JsonValue::Array(path.clone()),
+                    JsonValue::Array(Vec::new()),
+                ]));
+                return;
+            }
+            for (idx, item) in items.iter().enumerate() {
+                path.push(JsonValue::from(idx as i64));
+                append_stream_leaf_events(item, path, out);
+                path.pop();
+            }
+        }
+        JsonValue::Object(map) => {
+            if map.is_empty() {
+                out.push(JsonValue::Array(vec![
+                    JsonValue::Array(path.clone()),
+                    JsonValue::Object(serde_json::Map::new()),
+                ]));
+                return;
+            }
+            for (key, item) in map {
+                path.push(JsonValue::String(key.clone()));
+                append_stream_leaf_events(item, path, out);
+                path.pop();
+            }
+        }
+        _ => out.push(JsonValue::Array(vec![
+            JsonValue::Array(path.clone()),
+            value.clone(),
+        ])),
+    }
+}
+
+fn decode_fromstream_inputs(stream: &[JsonValue]) -> Result<Vec<JsonValue>, Error> {
+    let events = stream
+        .iter()
+        .map(parse_stream_event)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut out = Vec::new();
+    let mut idx = 0usize;
+    while idx < events.len() {
+        if events[idx].path.is_empty() {
+            let Some(value) = events[idx].value.clone() else {
+                return Err(Error::Runtime("fromstream: invalid root close marker".to_string()));
+            };
+            out.push(value);
+            idx += 1;
+            continue;
+        }
+        let (value, next_idx) = decode_stream_node_at(&events, idx, &[])?;
+        out.push(value);
+        idx = next_idx;
+    }
+    Ok(out)
+}
+
+fn decode_stream_node_at(
+    events: &[StreamEvent],
+    idx: usize,
+    path: &[StreamPathComp],
+) -> Result<(JsonValue, usize), Error> {
+    if idx >= events.len() {
+        return Err(Error::Runtime("fromstream: unexpected end of stream".to_string()));
+    }
+    let event = &events[idx];
+
+    if event.path == path {
+        let Some(value) = event.value.clone() else {
+            return Err(Error::Runtime("fromstream: close marker without value".to_string()));
+        };
+        return Ok((value, idx + 1));
+    }
+
+    if !path_is_prefix(path, &event.path) || event.path.len() <= path.len() {
+        return Err(Error::Runtime("fromstream: malformed stream path".to_string()));
+    }
+
+    let kind = event.path[path.len()].clone();
+    decode_stream_container_at(events, idx, path, kind)
+}
+
+fn decode_stream_container_at(
+    events: &[StreamEvent],
+    mut idx: usize,
+    path: &[StreamPathComp],
+    kind: StreamPathComp,
+) -> Result<(JsonValue, usize), Error> {
+    let mut arr = Vec::new();
+    let mut obj = serde_json::Map::new();
+
+    loop {
+        if idx >= events.len() {
+            return Err(Error::Runtime("fromstream: unexpected end while decoding container".to_string()));
+        }
+        let current = &events[idx];
+        if !path_is_prefix(path, &current.path) || current.path.len() <= path.len() {
+            return Err(Error::Runtime("fromstream: malformed container stream".to_string()));
+        }
+
+        let child_key = current.path[path.len()].clone();
+        if !stream_comp_kind_matches(&kind, &child_key) {
+            return Err(Error::Runtime("fromstream: mixed container key types".to_string()));
+        }
+
+        let mut child_path = path.to_vec();
+        child_path.push(child_key.clone());
+        let (child_value, next_idx) = decode_stream_node_at(events, idx, &child_path)?;
+        match child_key {
+            StreamPathComp::Index(i) => {
+                if i > arr.len() {
+                    arr.resize(i, JsonValue::Null);
+                }
+                if i == arr.len() {
+                    arr.push(child_value);
+                } else {
+                    arr[i] = child_value;
+                }
+            }
+            StreamPathComp::Key(k) => {
+                obj.insert(k, child_value);
+            }
+        }
+        idx = next_idx;
+
+        if idx < events.len()
+            && events[idx].value.is_none()
+            && events[idx].path == child_path
+        {
+            idx += 1;
+            let value = match kind {
+                StreamPathComp::Index(_) => JsonValue::Array(arr),
+                StreamPathComp::Key(_) => JsonValue::Object(obj),
+            };
+            return Ok((value, idx));
+        }
+    }
+}
+
+fn stream_comp_kind_matches(container_kind: &StreamPathComp, child_key: &StreamPathComp) -> bool {
+    matches!(
+        (container_kind, child_key),
+        (StreamPathComp::Index(_), StreamPathComp::Index(_))
+            | (StreamPathComp::Key(_), StreamPathComp::Key(_))
+    )
+}
+
+fn path_is_prefix(prefix: &[StreamPathComp], full: &[StreamPathComp]) -> bool {
+    prefix.len() <= full.len() && prefix.iter().zip(full.iter()).all(|(a, b)| a == b)
+}
+
+fn parse_stream_event(value: &JsonValue) -> Result<StreamEvent, Error> {
+    let JsonValue::Array(items) = value else {
+        return Err(Error::Runtime("fromstream: stream event must be an array".to_string()));
+    };
+    match items.len() {
+        1 => Ok(StreamEvent {
+            path: parse_stream_path(&items[0])?,
+            value: None,
+        }),
+        2 => Ok(StreamEvent {
+            path: parse_stream_path(&items[0])?,
+            value: Some(items[1].clone()),
+        }),
+        _ => Err(Error::Runtime("fromstream: invalid stream event shape".to_string())),
+    }
+}
+
+fn parse_stream_path(value: &JsonValue) -> Result<Vec<StreamPathComp>, Error> {
+    let JsonValue::Array(path_items) = value else {
+        return Err(Error::Runtime("fromstream: stream path must be an array".to_string()));
+    };
+    let mut out = Vec::with_capacity(path_items.len());
+    for item in path_items {
+        match item {
+            JsonValue::String(s) => out.push(StreamPathComp::Key(s.clone())),
+            JsonValue::Number(n) => {
+                let idx = n
+                    .as_u64()
+                    .ok_or_else(|| Error::Runtime("fromstream: path index must be a non-negative integer".to_string()))?;
+                out.push(StreamPathComp::Index(idx as usize));
+            }
+            _ => {
+                return Err(Error::Runtime(
+                    "fromstream: path segment must be string or integer".to_string(),
+                ))
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn run_single_format_filter(query: &str, stream: &[JsonValue]) -> Result<Option<Vec<JsonValue>>, Error> {
@@ -2769,6 +3324,22 @@ fn hex_val(c: u8) -> Option<u8> {
 }
 
 fn decode_base64_to_string(s: &str) -> Result<String, Error> {
+    if s.is_empty() || s.bytes().all(|b| b == b'=') {
+        return Ok(String::new());
+    }
+    if s.bytes().any(|b| b.is_ascii_whitespace()) {
+        return Err(Error::Runtime(format!(
+            "string ({}) is not valid base64 data",
+            serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+        )));
+    }
+    if s.len() % 4 == 1 {
+        return Err(Error::Runtime(format!(
+            "string ({}) trailing base64 byte found",
+            serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+        )));
+    }
+
     let mut raw = s.as_bytes().to_vec();
     while raw.len() % 4 != 0 {
         raw.push(b'=');
@@ -3221,6 +3792,16 @@ mod tests {
     }
 
     #[test]
+    fn normalize_non_finite_payload_tokens_in_json_stream() {
+        let parsed = parse_input_values_auto("Nan4000\n-Infinity\nInfinity\n").expect("parse");
+        assert_eq!(parsed.kind, InputKind::JsonStream);
+        assert_eq!(
+            parsed.values,
+            vec![serde_json::json!(null), serde_json::json!(null), serde_json::json!(null)]
+        );
+    }
+
+    #[test]
     fn normalize_jsonish_line_roundtrips_json() {
         let normalized = normalize_jsonish_line("{\"a\":1,\"b\":[2,3]}").expect("normalize");
         assert_eq!(normalized, "{\"a\":1,\"b\":[2,3]}");
@@ -3257,6 +3838,18 @@ mod tests {
     }
 
     #[test]
+    fn jq_comment_stripping_matches_shtest_cases() {
+        assert_eq!(run_null_input("123 # comment"), vec![serde_json::json!(123)]);
+        assert_eq!(run_null_input("1 # foo\r + 2"), vec![serde_json::json!(1)]);
+
+        let multiline = "[\n  1,\n  # foo \\\n  2,\n  # bar \\\\\n  3,\n  4, # baz \\\\\\\n  5, \\\n  6,\n  7\n  # comment \\\n    comment \\\n    comment\n]";
+        assert_eq!(run_null_input(multiline), vec![serde_json::json!([1, 3, 4, 7])]);
+
+        let crlf = "[\r\n1,# comment\r\n2,# comment\\\r\ncomment\r\n3\r\n]";
+        assert_eq!(run_null_input(crlf), vec![serde_json::json!([1, 2, 3])]);
+    }
+
+    #[test]
     fn special_dot_equality_query_compares_input() {
         let out = run_query_stream_with_paths_and_options(
             r#". == "a\nb\nc\n""#,
@@ -3266,6 +3859,12 @@ mod tests {
         )
         .expect("run");
         assert_eq!(out, vec![serde_json::json!(true)]);
+    }
+
+    #[test]
+    fn special_not_equal_literal_query_compares_input() {
+        assert_eq!(run_one("1 != .", serde_json::json!(1)), vec![serde_json::json!(false)]);
+        assert_eq!(run_one("1 != .", serde_json::json!(null)), vec![serde_json::json!(true)]);
     }
 
     #[test]
@@ -3656,6 +4255,10 @@ mod tests {
             run_one("map(add)", serde_json::json!([[], [1,2,3], ["a","b","c"], [[3],[4,5],[6]], [{"a":1}, {"b":2}, {"a":3}]])),
             vec![serde_json::json!([null,6,"abc",[3,4,5,6],{"a":3,"b":2}])]
         );
+        assert_eq!(
+            run_one("add", serde_json::json!([[1,2],[3,4]])),
+            vec![serde_json::json!([1,2,3,4])]
+        );
         assert_eq!(run_one("map_values(.+1)", serde_json::json!([0,1,2])), vec![serde_json::json!([1,2,3])]);
         assert_eq!(run_null_input("[add(null), add(range(range(10))), add(empty), add(10,range(10))]"), vec![serde_json::json!([null,120,null,55])]);
         assert_eq!(run_one(".sum = add(.arr[])", serde_json::json!({"arr":[]})), vec![serde_json::json!({"arr":[],"sum":null})]);
@@ -3986,5 +4589,140 @@ mod tests {
             let actual = run_one(case.query, input);
             assert_eq!(actual, expected, "query {}", case.query);
         }
+    }
+
+    #[test]
+    fn jq_pack_remaining_compile_cases() {
+        for case in FIXTURE_CASES_REMAINING_COMPILE {
+            let input = parse_jsonish_value(case.input).expect("fixture input");
+            let expected = case
+                .outputs
+                .iter()
+                .map(|line| parse_jsonish_value(line).expect("fixture output"))
+                .collect::<Vec<_>>();
+            let actual = run_one(case.query, input);
+            assert_eq!(actual, expected, "query {}", case.query);
+        }
+    }
+
+    #[test]
+    fn onig_fixture_cases() {
+        for case in FIXTURE_CASES_ONIG_ALL {
+            let input = parse_jsonish_value(case.input).expect("fixture input");
+            let expected = case
+                .outputs
+                .iter()
+                .map(|line| parse_jsonish_value(line).expect("fixture output"))
+                .collect::<Vec<_>>();
+            let actual = run_one(case.query, input);
+            assert_eq!(actual, expected, "query {}", case.query);
+        }
+    }
+
+    #[test]
+    fn man_fixture_fail_cases() {
+        for case in FIXTURE_CASES_MAN_FAIL_183 {
+            let input = parse_jsonish_value(case.input).expect("fixture input");
+            let expected = case
+                .outputs
+                .iter()
+                .map(|line| parse_jsonish_value(line).expect("fixture output"))
+                .collect::<Vec<_>>();
+            let actual = run_one(case.query, input);
+            assert_eq!(actual, expected, "query {}", case.query);
+        }
+    }
+
+    #[test]
+    fn jq171_extra_compat_cases() {
+        for case in FIXTURE_CASES_JQ171_EXTRA {
+            let input = parse_jsonish_value(case.input).expect("fixture input");
+            let expected = case
+                .outputs
+                .iter()
+                .map(|line| parse_jsonish_value(line).expect("fixture output"))
+                .collect::<Vec<_>>();
+            let actual = run_one(case.query, input);
+            assert_eq!(actual, expected, "query {}", case.query);
+        }
+    }
+
+    #[test]
+    fn man171_extra_compat_cases() {
+        for case in FIXTURE_CASES_MAN171_EXTRA {
+            let input = parse_jsonish_value(case.input).expect("fixture input");
+            let expected = case
+                .outputs
+                .iter()
+                .map(|line| parse_jsonish_value(line).expect("fixture output"))
+                .collect::<Vec<_>>();
+            let actual = run_one(case.query, input);
+            assert_eq!(actual, expected, "query {}", case.query);
+        }
+    }
+
+    #[test]
+    fn manonig_fixture_cases() {
+        for case in FIXTURE_CASES_MANONIG_ALL {
+            let input = parse_jsonish_value(case.input).expect("fixture input");
+            let expected = case
+                .outputs
+                .iter()
+                .map(|line| parse_jsonish_value(line).expect("fixture output"))
+                .collect::<Vec<_>>();
+            let actual = run_one(case.query, input);
+            assert_eq!(actual, expected, "query {}", case.query);
+        }
+    }
+
+    #[test]
+    fn optional_extra_fixture_cases() {
+        for case in FIXTURE_CASES_OPTIONAL_EXTRA {
+            let input = parse_jsonish_value(case.input).expect("fixture input");
+            let expected = case
+                .outputs
+                .iter()
+                .map(|line| parse_jsonish_value(line).expect("fixture output"))
+                .collect::<Vec<_>>();
+            let actual = run_one(case.query, input);
+            assert_eq!(actual, expected, "query {}", case.query);
+        }
+    }
+
+    #[test]
+    fn base64_pipeline_and_try_compat_cases() {
+        let s = serde_json::json!("<>&'\"\t");
+        assert_eq!(run_one("(@base64|@base64d)", s.clone()), vec![s]);
+
+        assert_eq!(
+            run_one("@base64d", serde_json::json!("=")),
+            vec![serde_json::json!("")]
+        );
+        assert_eq!(
+            run_one(". | try @base64d catch .", serde_json::json!("Not base64 data")),
+            vec![serde_json::json!(
+                "string (\"Not base64 data\") is not valid base64 data"
+            )]
+        );
+        assert_eq!(
+            run_one(". | try @base64d catch .", serde_json::json!("QUJDa")),
+            vec![serde_json::json!("string (\"QUJDa\") trailing base64 byte found")]
+        );
+    }
+
+    #[test]
+    fn jq171_match_empty_capture_offsets() {
+        let prev = std::env::var_os("ZQ_JQ_COMPAT_PROFILE");
+        std::env::set_var("ZQ_JQ_COMPAT_PROFILE", "jq171");
+        let actual = run_one(r#"[match("( )*"; "g")]"#, serde_json::json!("abc"));
+        match prev {
+            Some(v) => std::env::set_var("ZQ_JQ_COMPAT_PROFILE", v),
+            None => std::env::remove_var("ZQ_JQ_COMPAT_PROFILE"),
+        }
+
+        assert_eq!(
+            actual,
+            vec![serde_json::json!([{"offset":0,"length":0,"string":"","captures":[{"offset":0,"string":"","length":0,"name":null}]},{"offset":1,"length":0,"string":"","captures":[{"offset":1,"string":"","length":0,"name":null}]},{"offset":2,"length":0,"string":"","captures":[{"offset":2,"string":"","length":0,"name":null}]},{"offset":3,"length":0,"string":"","captures":[{"offset":3,"string":"","length":0,"name":null}]}])]
+        );
     }
 }

@@ -62,11 +62,13 @@ pub struct Cli {
     #[arg(
         long = "run-tests",
         value_name = "FILE",
-        num_args = 0..=1,
+        action = ArgAction::Append,
+        value_delimiter = ',',
+        num_args = 0..,
         default_missing_value = "-",
-        help = "Run jq-style test file from FILE or stdin"
+        help = "Run jq-style test file(s) from FILE or stdin"
     )]
-    pub run_tests: Option<String>,
+    pub run_tests: Vec<String>,
     #[arg(
         long = "skip",
         value_name = "N",
@@ -89,6 +91,13 @@ pub struct Cli {
         action = ArgAction::SetTrue
     )]
     pub compact: bool,
+    #[arg(
+        long = "indent",
+        value_name = "N",
+        value_parser = clap::value_parser!(u8).range(0..=7),
+        help = "Use N spaces for indentation (0-7)"
+    )]
+    pub indent: Option<u8>,
     #[arg(
         short = 'C',
         long = "color-output",

@@ -84,3 +84,64 @@ fn run_tests_mode_skip_and_take() {
     assert!(text.contains("Skipped 1 tests"), "stdout:\n{text}");
     assert!(text.contains("1 of 1 tests passed"), "stdout:\n{text}");
 }
+
+#[test]
+fn run_tests_mode_multiple_files_repeated_flag() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let tf1 = td.path().join("a.test");
+    let tf2 = td.path().join("b.test");
+    fs::write(&tf1, ".\nnull\nnull\n\n").expect("write a.test");
+    fs::write(&tf2, ".\n1\n1\n\n").expect("write b.test");
+
+    let out = run_zq(&[
+        "--run-tests",
+        tf1.to_str().expect("path a"),
+        "--run-tests",
+        tf2.to_str().expect("path b"),
+    ]);
+    assert!(
+        out.status.success(),
+        "status={:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        stdout_text(&out),
+        stderr_text(&out)
+    );
+
+    let text = stdout_text(&out);
+    assert!(text.contains("== run-tests [1/2]:"), "stdout:\n{text}");
+    assert!(text.contains("== run-tests [2/2]:"), "stdout:\n{text}");
+    assert_eq!(
+        text.matches("1 of 1 tests passed").count(),
+        2,
+        "stdout:\n{text}"
+    );
+}
+
+#[test]
+fn run_tests_mode_multiple_files_comma_list() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let tf1 = td.path().join("a.test");
+    let tf2 = td.path().join("b.test");
+    fs::write(&tf1, ".\nnull\nnull\n\n").expect("write a.test");
+    fs::write(&tf2, ".\n1\n1\n\n").expect("write b.test");
+    let list_arg = format!(
+        "{},{}",
+        tf1.to_str().expect("path a"),
+        tf2.to_str().expect("path b")
+    );
+
+    let out = run_zq(&["--run-tests", &list_arg]);
+    assert!(
+        out.status.success(),
+        "status={:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        stdout_text(&out),
+        stderr_text(&out)
+    );
+    let text = stdout_text(&out);
+    assert_eq!(
+        text.matches("1 of 1 tests passed").count(),
+        2,
+        "stdout:\n{text}"
+    );
+}

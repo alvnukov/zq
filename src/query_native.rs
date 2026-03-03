@@ -1847,7 +1847,7 @@ fn eval_fold_access(value: JsonValue, accessor: &FoldAccessor) -> Result<JsonVal
 }
 
 fn fold_negate_value(value: JsonValue) -> Result<JsonValue, Error> {
-    Ok(number_json(-fold_require_number(&value)?)?)
+    number_json(-fold_require_number(&value)?)
 }
 
 fn fold_require_number(value: &JsonValue) -> Result<f64, Error> {
@@ -5954,7 +5954,7 @@ fn parse_def_fixture_query(query: &str) -> Option<DefFixtureSpec> {
             .expect("valid def-backtracking-function-calls regex")
     });
     if let Some(captures) = backtracking_calls_re.captures(source) {
-        let vec_values = vec![
+        let vec_values = [
             captures.get(1)?.as_str().parse::<i64>().ok()?,
             captures.get(2)?.as_str().parse::<i64>().ok()?,
         ];

@@ -1,9 +1,9 @@
 # zq
 
-[![CI](https://github.com/alvnukov/zq/actions/workflows/ci.yml/badge.svg)](https://github.com/alvnukov/zq/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/codecov/c/github/alvnukov/zq)](https://codecov.io/gh/alvnukov/zq)
-[![Release](https://img.shields.io/github/v/release/alvnukov/zq?sort=semver)](https://github.com/alvnukov/zq/releases)
-[![Homebrew](https://img.shields.io/homebrew/v/alvnukov/tap/zq?label=homebrew)](https://github.com/alvnukov/homebrew-tap)
+[![CI](https://github.com/alvnukov/zq/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/alvnukov/zq/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/github/actions/workflow/status/alvnukov/zq/ci.yml?branch=main&event=push&label=coverage)](https://github.com/alvnukov/zq/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/tag/alvnukov/zq?sort=semver&label=release)](https://github.com/alvnukov/zq/releases)
+[![Homebrew Tap](https://img.shields.io/badge/homebrew-alvnukov%2Ftap-2e7d32?logo=homebrew)](https://github.com/alvnukov/homebrew-tap)
 [![License](https://img.shields.io/github/license/alvnukov/zq)](LICENSE)
 
 `zq` is a standalone jq-compatible query engine with native in-repo runtime.

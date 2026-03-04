@@ -122,7 +122,7 @@ Add dependency:
 
 ```toml
 [dependencies]
-zq = { git = "https://github.com/alvnukov/zq", tag = "v1.2.0" }
+zq = { git = "https://github.com/alvnukov/zq", tag = "v1.2.1" }
 ```
 
 Minimal embedding example:

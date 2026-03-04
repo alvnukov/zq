@@ -1,6 +1,6 @@
 [package]
 name = "zq"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "Standalone jq-compatible query engine with JSON/YAML input and JSON/YAML output"

@@ -2458,7 +2458,21 @@ fn resolve_base_query(cli: &Cli) -> Result<String, Error> {
     if let Some(path) = cli.from_file.as_deref() {
         return fs::read_to_string(path).map_err(Error::from);
     }
+    if requires_filter_for_interactive_stdin(cli, io::stdin().is_terminal()) {
+        return Err(Error::Query(
+            "jq: error: missing FILTER (run with a filter like '.' or pipe input into zq)".to_string(),
+        ));
+    }
     Ok(cli.query.clone().unwrap_or_else(|| ".".to_string()))
+}
+
+fn requires_filter_for_interactive_stdin(cli: &Cli, stdin_is_terminal: bool) -> bool {
+    stdin_is_terminal
+        && cli.query.is_none()
+        && cli.from_file.is_none()
+        && cli.input_file.is_none()
+        && cli.input_legacy.is_none()
+        && !cli.null_input
 }
 
 fn resolve_run_tests_library_paths(cli: &Cli, path: &str) -> Vec<String> {
@@ -4080,6 +4094,28 @@ mod tests {
         );
         assert_eq!(discovered.len(), 1);
         assert!(discovered[0].ends_with("/modules"));
+    }
+
+    #[test]
+    fn requires_filter_for_interactive_stdin_contract() {
+        let cli = parse_cli_for_test(&[]);
+        assert!(requires_filter_for_interactive_stdin(&cli, true));
+        assert!(!requires_filter_for_interactive_stdin(&cli, false));
+
+        let with_query = parse_cli_for_test(&["."]);
+        assert!(!requires_filter_for_interactive_stdin(&with_query, true));
+
+        let null_input = parse_cli_for_test(&["-n"]);
+        assert!(!requires_filter_for_interactive_stdin(&null_input, true));
+
+        let with_input_file = parse_cli_for_test(&[".", "input.json"]);
+        assert!(!requires_filter_for_interactive_stdin(&with_input_file, true));
+
+        let with_input_legacy = parse_cli_for_test(&[".", "--input", "input.json"]);
+        assert!(!requires_filter_for_interactive_stdin(
+            &with_input_legacy,
+            true
+        ));
     }
 
     #[test]

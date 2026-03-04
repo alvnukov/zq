@@ -1,4 +1,5 @@
-use clap::{ArgAction, Parser, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 
 const JQ_COMPAT_HELP: &str = "\
 jq compatibility options accepted by zq:
@@ -19,6 +20,9 @@ jq compatibility options accepted by zq:
     args_override_self = true
 )]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+
     #[arg(
         value_name = "FILTER",
         help = "jq filter expression (defaults to . when omitted)"
@@ -218,6 +222,15 @@ pub struct Cli {
         help = "Output format: json (jq-like output) or yaml"
     )]
     pub output_format: OutputFormat,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CliCommand {
+    #[command(about = "Generate shell completion scripts (kubectl style)")]
+    Completion {
+        #[arg(value_enum, value_name = "SHELL")]
+        shell: Shell,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

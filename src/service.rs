@@ -1,4 +1,5 @@
-use clap::{error::ErrorKind, Parser};
+use clap::{error::ErrorKind, CommandFactory, Parser};
+use clap_complete::generate;
 use serde::Serialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::borrow::Cow;
@@ -9,7 +10,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::cli::{Cli, OutputFormat};
+use crate::cli::{Cli, CliCommand, OutputFormat};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -23,7 +24,21 @@ pub fn run() -> Result<i32, Error> {
     let Some((cli, compat_args)) = parse_cli_with_compat_args()? else {
         return Ok(0);
     };
+    if let Some(command) = &cli.command {
+        return run_cli_command(command);
+    }
     run_with(cli, compat_args)
+}
+
+fn run_cli_command(command: &CliCommand) -> Result<i32, Error> {
+    match command {
+        CliCommand::Completion { shell } => {
+            let mut cmd = Cli::command();
+            let name = cmd.get_name().to_string();
+            generate(*shell, &mut cmd, name, &mut io::stdout());
+            Ok(0)
+        }
+    }
 }
 
 fn query_uses_any_builtin(query: &str, builtins: &[&str]) -> bool {

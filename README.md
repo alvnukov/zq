@@ -78,6 +78,22 @@ zq --run-tests .tmp/jq/tests/jq.test --skip 100 --take 50
 - supports `--skip N` and `--take N`
 - supports `-L/--library-path`
 
+Shell completion (kubectl style):
+
+```bash
+# bash
+source <(zq completion bash)
+
+# zsh
+source <(zq completion zsh)
+
+# fish
+zq completion fish | source
+
+# powershell
+zq completion powershell | Out-String | Invoke-Expression
+```
+
 Output modes:
 
 - `--output-format json` (default)

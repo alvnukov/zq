@@ -151,6 +151,7 @@ fn parity_help_contract() {
         "--stream",
         "--stream-errors",
         "--diff",
+        "completion",
         "--arg name value",
         "--argjson name value",
         "--slurpfile name file",
@@ -165,6 +166,36 @@ fn parity_help_contract() {
     assert!(
         !text.contains(" yq "),
         "help must not advertise yq language mode"
+    );
+}
+
+#[test]
+fn parity_completion_bash_contract() {
+    let out = run_zq(&["completion", "bash"]);
+    assert_ok(&out, "completion bash");
+    let text = stdout_text(&out);
+    assert!(
+        text.contains("_zq()"),
+        "bash completion must define _zq function"
+    );
+    assert!(
+        text.contains("complete -F _zq"),
+        "bash completion must register zq completer"
+    );
+}
+
+#[test]
+fn parity_completion_zsh_contract() {
+    let out = run_zq(&["completion", "zsh"]);
+    assert_ok(&out, "completion zsh");
+    let text = stdout_text(&out);
+    assert!(
+        text.contains("#compdef zq"),
+        "zsh completion must declare compdef header"
+    );
+    assert!(
+        text.contains("compdef _zq zq"),
+        "zsh completion must register zq completer"
     );
 }
 

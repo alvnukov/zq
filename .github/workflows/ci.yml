@@ -28,6 +28,7 @@ jobs:
         env:
           ZQ_RUN_JQ_UPSTREAM: "1"
           GIT_TERMINAL_PROMPT: "0"
+          RUST_TEST_THREADS: "1"
         shell: bash
         run: |
           set -euo pipefail

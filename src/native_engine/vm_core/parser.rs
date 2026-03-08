@@ -14,6 +14,7 @@ use std::rc::Rc;
 mod literal_utils;
 mod module_resolve;
 mod stage_helpers;
+mod symbol_rewrite;
 
 use self::literal_utils::{
     const_object_key_error, fold_large_integer_literal_equality, parse_number_literal,
@@ -31,6 +32,10 @@ use self::module_resolve::{
 use self::stage_helpers::{
     abs_stage, append_chain_stage, bracket_bound_to_stage, by_impl_keys_stage, isfinite_stage,
     loc_stage, select_stage, type_eq_stage, type_ne_stage,
+};
+use self::symbol_rewrite::{
+    collect_pattern_bindings, push_unique_binding, rewrite_binding_pattern_symbol_ids,
+    rewrite_stage_symbol_ids, wrap_with_import_bindings,
 };
 
 const MAX_LOCAL_FUNCTION_PARAMETERS_OR_DEFS: usize = 4095;
@@ -3427,28 +3432,6 @@ impl Parser {
     }
 }
 
-fn wrap_with_import_bindings(mut stage: Stage, bindings: &[(String, ZqValue)]) -> Stage {
-    for (name, value) in bindings.iter().rev() {
-        stage = Stage::Bind {
-            source: Box::new(Stage::Literal(value.clone())),
-            pattern: BindingPattern::Var(name.clone()),
-            body: Box::new(stage),
-        };
-    }
-    stage
-}
-
-fn rewrite_binding_key_spec_symbol_ids(
-    key: &mut BindingKeySpec,
-    function_id_map: &BTreeMap<usize, usize>,
-    function_name_map: &BTreeMap<usize, String>,
-    param_id_map: &BTreeMap<usize, usize>,
-) {
-    if let BindingKeySpec::Expr(expr) = key {
-        rewrite_stage_symbol_ids(expr, function_id_map, function_name_map, param_id_map);
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -3777,294 +3760,110 @@ mod tests {
             "isfinite stage shape: {stage:?}"
         );
     }
-}
 
-fn rewrite_binding_pattern_symbol_ids(
-    pattern: &mut BindingPattern,
-    function_id_map: &BTreeMap<usize, usize>,
-    function_name_map: &BTreeMap<usize, String>,
-    param_id_map: &BTreeMap<usize, usize>,
-) {
-    match pattern {
-        BindingPattern::Var(_) => {}
-        BindingPattern::Array(items) | BindingPattern::Alternatives(items) => {
-            for item in items {
-                rewrite_binding_pattern_symbol_ids(
-                    item,
-                    function_id_map,
-                    function_name_map,
-                    param_id_map,
-                );
+    #[test]
+    fn wrap_with_import_bindings_preserves_binding_order() {
+        let wrapped = wrap_with_import_bindings(
+            Stage::Identity,
+            &[
+                ("a".to_string(), ZqValue::from(1)),
+                ("b".to_string(), ZqValue::from(2)),
+            ],
+        );
+        assert_eq!(
+            wrapped,
+            Stage::Bind {
+                source: Box::new(Stage::Literal(ZqValue::from(1))),
+                pattern: BindingPattern::Var("a".to_string()),
+                body: Box::new(Stage::Bind {
+                    source: Box::new(Stage::Literal(ZqValue::from(2))),
+                    pattern: BindingPattern::Var("b".to_string()),
+                    body: Box::new(Stage::Identity),
+                }),
             }
-        }
-        BindingPattern::Object(entries) => {
-            for entry in entries {
-                rewrite_binding_key_spec_symbol_ids(
-                    &mut entry.key,
-                    function_id_map,
-                    function_name_map,
-                    param_id_map,
-                );
-                rewrite_binding_pattern_symbol_ids(
-                    &mut entry.pattern,
-                    function_id_map,
-                    function_name_map,
-                    param_id_map,
-                );
-            }
-        }
+        );
     }
-}
 
-fn rewrite_stage_symbol_ids(
-    stage: &mut Stage,
-    function_id_map: &BTreeMap<usize, usize>,
-    function_name_map: &BTreeMap<usize, String>,
-    param_id_map: &BTreeMap<usize, usize>,
-) {
-    match stage {
-        Stage::Call {
+    #[test]
+    fn rewrite_stage_symbol_ids_rewrites_function_and_param_ids() {
+        let mut stage = Stage::Call {
+            function_id: Some(1),
+            param_id: Some(10),
+            name: "old".to_string(),
+            args: vec![Stage::Call {
+                function_id: Some(2),
+                param_id: None,
+                name: "keep".to_string(),
+                args: Vec::new(),
+            }],
+        };
+        let function_id_map = BTreeMap::from([(1usize, 11usize)]);
+        let function_name_map = BTreeMap::from([(1usize, "ns::new".to_string())]);
+        let param_id_map = BTreeMap::from([(10usize, 20usize)]);
+
+        rewrite_stage_symbol_ids(
+            &mut stage,
+            &function_id_map,
+            &function_name_map,
+            &param_id_map,
+        );
+
+        let Stage::Call {
             function_id,
             param_id,
             name,
             args,
-        } => {
-            if let Some(old) = *function_id {
-                if let Some(new_id) = function_id_map.get(&old).copied() {
-                    *function_id = Some(new_id);
-                    if let Some(new_name) = function_name_map.get(&old) {
-                        *name = new_name.clone();
-                    }
-                }
-            }
-            if let Some(old) = *param_id {
-                if let Some(new_id) = param_id_map.get(&old).copied() {
-                    *param_id = Some(new_id);
-                }
-            }
-            for arg in args {
-                rewrite_stage_symbol_ids(arg, function_id_map, function_name_map, param_id_map);
-            }
-        }
-        Stage::Chain(items)
-        | Stage::Pipe(items)
-        | Stage::Comma(items)
-        | Stage::ArrayLiteral(items) => {
-            for item in items {
-                rewrite_stage_symbol_ids(item, function_id_map, function_name_map, param_id_map);
-            }
-        }
-        Stage::ObjectLiteral(entries) => {
-            for (key, value) in entries {
-                if let ObjectKey::Expr(expr) = key {
-                    rewrite_stage_symbol_ids(
-                        expr,
-                        function_id_map,
-                        function_name_map,
-                        param_id_map,
-                    );
-                }
-                rewrite_stage_symbol_ids(value, function_id_map, function_name_map, param_id_map);
-            }
-        }
-        Stage::RegexMatch { spec, flags, .. } | Stage::RegexCapture { spec, flags, .. } => {
-            rewrite_stage_symbol_ids(spec, function_id_map, function_name_map, param_id_map);
-            if let Some(flags) = flags {
-                rewrite_stage_symbol_ids(flags, function_id_map, function_name_map, param_id_map);
-            }
-        }
-        Stage::RegexScan { regex, flags } | Stage::RegexSplits { regex, flags } => {
-            rewrite_stage_symbol_ids(regex, function_id_map, function_name_map, param_id_map);
-            if let Some(flags) = flags {
-                rewrite_stage_symbol_ids(flags, function_id_map, function_name_map, param_id_map);
-            }
-        }
-        Stage::RegexSub {
-            regex,
-            replacement,
-            flags,
-            ..
-        } => {
-            rewrite_stage_symbol_ids(regex, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(
-                replacement,
-                function_id_map,
-                function_name_map,
-                param_id_map,
-            );
-            rewrite_stage_symbol_ids(flags, function_id_map, function_name_map, param_id_map);
-        }
-        Stage::Label { body, .. } | Stage::Format { expr: body, .. } => {
-            rewrite_stage_symbol_ids(body, function_id_map, function_name_map, param_id_map);
-        }
-        Stage::Has(inner)
-        | Stage::In(inner)
-        | Stage::StartsWith(inner)
-        | Stage::EndsWith(inner)
-        | Stage::Split(inner)
-        | Stage::Join(inner)
-        | Stage::LTrimStr(inner)
-        | Stage::RTrimStr(inner)
-        | Stage::TrimStr(inner)
-        | Stage::Indices(inner)
-        | Stage::IndexOf(inner)
-        | Stage::RIndexOf(inner)
-        | Stage::Contains(inner)
-        | Stage::Inside(inner)
-        | Stage::BSearch(inner)
-        | Stage::SortByImpl(inner)
-        | Stage::GroupByImpl(inner)
-        | Stage::UniqueByImpl(inner)
-        | Stage::MinByImpl(inner)
-        | Stage::MaxByImpl(inner)
-        | Stage::Path(inner)
-        | Stage::GetPath(inner)
-        | Stage::DelPaths(inner)
-        | Stage::TruncateStream(inner)
-        | Stage::FromStream(inner)
-        | Stage::Flatten(inner)
-        | Stage::FlattenRaw(inner)
-        | Stage::Nth(inner)
-        | Stage::FirstBy(inner)
-        | Stage::LastBy(inner)
-        | Stage::IsEmpty(inner)
-        | Stage::AddBy(inner)
-        | Stage::Select(inner)
-        | Stage::Map(inner)
-        | Stage::MapValues(inner)
-        | Stage::WithEntries(inner)
-        | Stage::RecurseBy(inner)
-        | Stage::Walk(inner)
-        | Stage::Repeat(inner)
-        | Stage::Strptime(inner)
-        | Stage::Error(inner)
-        | Stage::HaltError(inner)
-        | Stage::UnaryMinus(inner)
-        | Stage::UnaryNot(inner) => {
-            rewrite_stage_symbol_ids(inner, function_id_map, function_name_map, param_id_map);
-        }
-        Stage::SetPath(lhs, rhs)
-        | Stage::Modify(lhs, rhs)
-        | Stage::NthBy(lhs, rhs)
-        | Stage::LimitBy(lhs, rhs)
-        | Stage::SkipBy(lhs, rhs)
-        | Stage::While(lhs, rhs)
-        | Stage::Until(lhs, rhs)
-        | Stage::Any(lhs, rhs)
-        | Stage::All(lhs, rhs)
-        | Stage::RecurseByCond(lhs, rhs) => {
-            rewrite_stage_symbol_ids(lhs, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(rhs, function_id_map, function_name_map, param_id_map);
-        }
-        Stage::Range(start, end, step) => {
-            rewrite_stage_symbol_ids(start, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(end, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(step, function_id_map, function_name_map, param_id_map);
-        }
-        Stage::Reduce {
-            source,
-            pattern,
-            init,
-            update,
-        } => {
-            rewrite_stage_symbol_ids(source, function_id_map, function_name_map, param_id_map);
-            rewrite_binding_pattern_symbol_ids(
-                pattern,
-                function_id_map,
-                function_name_map,
-                param_id_map,
-            );
-            rewrite_stage_symbol_ids(init, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(update, function_id_map, function_name_map, param_id_map);
-        }
-        Stage::Foreach {
-            source,
-            pattern,
-            init,
-            update,
-            extract,
-        } => {
-            rewrite_stage_symbol_ids(source, function_id_map, function_name_map, param_id_map);
-            rewrite_binding_pattern_symbol_ids(
-                pattern,
-                function_id_map,
-                function_name_map,
-                param_id_map,
-            );
-            rewrite_stage_symbol_ids(init, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(update, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(extract, function_id_map, function_name_map, param_id_map);
-        }
-        Stage::TryCatch { inner, catcher } => {
-            rewrite_stage_symbol_ids(inner, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(catcher, function_id_map, function_name_map, param_id_map);
-        }
-        Stage::IfElse {
-            cond,
-            then_expr,
-            else_expr,
-        } => {
-            rewrite_stage_symbol_ids(cond, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(then_expr, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(else_expr, function_id_map, function_name_map, param_id_map);
-        }
-        Stage::Binary { lhs, rhs, .. } => {
-            rewrite_stage_symbol_ids(lhs, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(rhs, function_id_map, function_name_map, param_id_map);
-        }
-        Stage::MathBinary { lhs, rhs, .. } => {
-            rewrite_stage_symbol_ids(lhs, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(rhs, function_id_map, function_name_map, param_id_map);
-        }
-        Stage::MathTernary { a, b, c, .. } => {
-            rewrite_stage_symbol_ids(a, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(b, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(c, function_id_map, function_name_map, param_id_map);
-        }
-        Stage::Bind {
-            source,
-            pattern,
-            body,
-        } => {
-            rewrite_stage_symbol_ids(source, function_id_map, function_name_map, param_id_map);
-            rewrite_binding_pattern_symbol_ids(
-                pattern,
-                function_id_map,
-                function_name_map,
-                param_id_map,
-            );
-            rewrite_stage_symbol_ids(body, function_id_map, function_name_map, param_id_map);
-        }
-        _ => {}
+        } = stage
+        else {
+            panic!("expected call stage");
+        };
+        assert_eq!(function_id, Some(11));
+        assert_eq!(param_id, Some(20));
+        assert_eq!(name, "ns::new");
+        assert!(
+            matches!(args.as_slice(), [Stage::Call { function_id: Some(2), name, .. }] if name == "keep")
+        );
     }
-}
 
-fn collect_pattern_bindings(pattern: &BindingPattern, out: &mut Vec<String>) {
-    match pattern {
-        BindingPattern::Var(name) => push_unique_binding(out, name),
-        BindingPattern::Array(items) => {
-            for item in items {
-                collect_pattern_bindings(item, out);
-            }
-        }
-        BindingPattern::Object(entries) => {
-            for entry in entries {
-                if let Some(name) = &entry.store_var {
-                    push_unique_binding(out, name);
-                }
-                collect_pattern_bindings(&entry.pattern, out);
-            }
-        }
-        BindingPattern::Alternatives(items) => {
-            for item in items {
-                collect_pattern_bindings(item, out);
-            }
-        }
-    }
-}
+    #[test]
+    fn rewrite_binding_pattern_and_collect_bindings_contract() {
+        let mut pattern = BindingPattern::Object(vec![ObjectBindingEntry {
+            key: BindingKeySpec::Expr(Box::new(Stage::Call {
+                function_id: Some(1),
+                param_id: Some(7),
+                name: "f".to_string(),
+                args: Vec::new(),
+            })),
+            store_var: Some("captured".to_string()),
+            pattern: BindingPattern::Alternatives(vec![
+                BindingPattern::Var("x".to_string()),
+                BindingPattern::Var("x".to_string()),
+            ]),
+        }]);
 
-fn push_unique_binding(out: &mut Vec<String>, name: &str) {
-    if out.iter().all(|existing| existing != name) {
-        out.push(name.to_string());
+        let function_id_map = BTreeMap::from([(1usize, 42usize)]);
+        let function_name_map = BTreeMap::from([(1usize, "ns::f".to_string())]);
+        let param_id_map = BTreeMap::from([(7usize, 70usize)]);
+        rewrite_binding_pattern_symbol_ids(
+            &mut pattern,
+            &function_id_map,
+            &function_name_map,
+            &param_id_map,
+        );
+
+        let BindingPattern::Object(entries) = &pattern else {
+            panic!("expected object pattern");
+        };
+        let entry = entries.first().expect("entry");
+        let BindingKeySpec::Expr(key_expr) = &entry.key else {
+            panic!("expected expr key");
+        };
+        assert!(
+            matches!(&**key_expr, Stage::Call { function_id: Some(42), param_id: Some(70), name, .. } if name == "ns::f")
+        );
+
+        let mut bindings = Vec::new();
+        collect_pattern_bindings(&pattern, &mut bindings);
+        assert_eq!(bindings, vec!["captured".to_string(), "x".to_string(),]);
     }
 }

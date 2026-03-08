@@ -26,6 +26,17 @@ pub(crate) enum StrptimeError {
     ParseFailed,
 }
 
+fn libc_time_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+fn lock_libc_time() -> std::sync::MutexGuard<'static, ()> {
+    libc_time_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // c-ref: zero-initialized `struct tm` constructor for libc APIs.
 // moved-from: src/native_engine/vm_core/vm.rs::jq_array_to_tm
 pub(crate) fn zeroed_tm() -> libc::tm {
@@ -51,6 +62,7 @@ pub(crate) fn cast_time_t_trunc(value: f64) -> Result<libc::time_t, TimeCastErro
 #[cfg(unix)]
 pub(crate) fn utc_tm_from_seconds(seconds: libc::time_t) -> Option<libc::tm> {
     let mut tm: libc::tm = zeroed_tm();
+    let _guard = lock_libc_time();
     let tm_ptr = unsafe { libc::gmtime_r(&seconds, &mut tm) };
     if tm_ptr.is_null() {
         None
@@ -69,6 +81,7 @@ pub(crate) fn utc_tm_from_seconds(_seconds: libc::time_t) -> Option<libc::tm> {
 #[cfg(unix)]
 pub(crate) fn local_tm_from_seconds(seconds: libc::time_t) -> Option<libc::tm> {
     let mut tm: libc::tm = zeroed_tm();
+    let _guard = lock_libc_time();
     let tm_ptr = unsafe { libc::localtime_r(&seconds, &mut tm) };
     if tm_ptr.is_null() {
         None
@@ -87,10 +100,12 @@ pub(crate) fn local_tm_from_seconds(_seconds: libc::time_t) -> Option<libc::tm> 
 pub(crate) fn timegm_utc(tm: &mut libc::tm) -> Option<libc::time_t> {
     #[cfg(not(target_os = "windows"))]
     {
+        let _guard = lock_libc_time();
         Some(unsafe { libc::timegm(tm) })
     }
     #[cfg(target_os = "windows")]
     {
+        let _guard = lock_libc_time();
         Some(unsafe { windows_crt_timegm_utc(tm) })
     }
 }
@@ -100,12 +115,16 @@ pub(crate) fn timegm_utc(tm: &mut libc::tm) -> Option<libc::time_t> {
 pub(crate) fn normalize_local_tm(tm: &mut libc::tm) {
     tm.tm_isdst = -1;
     #[cfg(not(target_os = "windows"))]
-    unsafe {
-        libc::mktime(tm);
+    {
+        let _guard = lock_libc_time();
+        unsafe { libc::mktime(tm) };
     }
     #[cfg(target_os = "windows")]
-    unsafe {
-        let _ = windows_crt_mktime_local(tm);
+    {
+        let _guard = lock_libc_time();
+        unsafe {
+            let _ = windows_crt_mktime_local(tm);
+        }
     }
 }
 
@@ -134,6 +153,7 @@ pub(crate) fn format_tm_with_strftime(
     local: bool,
 ) -> Result<String, TimeFormatError> {
     ensure_process_locale_initialized();
+    let _guard = lock_libc_time();
     let format_c =
         std::ffi::CString::new(format).map_err(|_| TimeFormatError::FormatContainsNul)?;
     #[cfg(not(target_vendor = "apple"))]
@@ -184,6 +204,7 @@ pub(crate) fn parse_strptime(
     format: &str,
 ) -> Result<(libc::tm, Vec<u8>), StrptimeError> {
     ensure_process_locale_initialized();
+    let _guard = lock_libc_time();
     let input_c = std::ffi::CString::new(input).map_err(|_| StrptimeError::InputContainsNul)?;
     let format_c = std::ffi::CString::new(format).map_err(|_| StrptimeError::FormatContainsNul)?;
     let mut tm: libc::tm = zeroed_tm();

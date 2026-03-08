@@ -9,5 +9,6 @@ rust_out
 
 # OS/editor junk
 .DS_Store
+.idea/
 *.swp
 *.swo

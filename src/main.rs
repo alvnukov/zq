@@ -15,12 +15,14 @@ fn main() {
                 process::exit(code);
             }
             eprintln!("{msg}");
-            let is_compile_error =
-                msg.starts_with("jq: unsupported query:") || msg.contains("jq: 1 compile error");
+            let is_compile_error = msg.starts_with("zq: unsupported query:")
+                || msg.contains("zq: 1 compile error")
+                || msg.starts_with("jq: unsupported query:")
+                || msg.contains("jq: 1 compile error");
             process::exit(if is_compile_error { 3 } else { 5 });
         }
         Err(service::Error::Io(err)) => {
-            eprintln!("jq: error: {err}");
+            eprintln!("zq: error: {err}");
             process::exit(2);
         }
     };

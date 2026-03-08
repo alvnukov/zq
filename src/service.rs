@@ -468,7 +468,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
 
     if cli.debug_dump_disasm {
         let labels = zq::debug_dump_disasm_function_labels(query.as_str(), &cli.library_path)
-            .map_err(|e| Error::Query(render_engine_error("jq", query.as_str(), "", e)))?;
+            .map_err(|e| Error::Query(render_engine_error("zq", query.as_str(), "", e)))?;
         if !labels.is_empty() {
             let stdout = io::stdout();
             let mut writer = io::BufWriter::new(stdout.lock());
@@ -538,7 +538,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                 Ok(())
             },
         )
-        .map_err(|e| Error::Query(render_engine_error("jq", query.as_str(), input, e)))?;
+        .map_err(|e| Error::Query(render_engine_error("zq", query.as_str(), input, e)))?;
 
         if matches!(native_status, zq::NativeStreamStatus::Executed) {
             if wrote_any {
@@ -594,7 +594,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                 }
                 Err(err) => {
                     return Err(Error::Query(render_engine_error(
-                        "jq",
+                        "zq",
                         query.as_str(),
                         input,
                         err,
@@ -603,18 +603,18 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
             }
         } else {
             build_custom_input_stream_native(&cli, input, doc_mode)
-                .map_err(|e| Error::Query(render_engine_error("jq", query.as_str(), input, e)))?
+                .map_err(|e| Error::Query(render_engine_error("zq", query.as_str(), input, e)))?
         };
 
         if cli.seq && cli.null_input && query_uses_inputs_builtin(&query) && !seq_errors.is_empty()
         {
             return Err(Error::Query(format!(
-                "jq: error (at <stdin>:1): {}",
+                "zq: error (at <stdin>:1): {}",
                 seq_errors[0]
             )));
         }
         for err in &seq_errors {
-            eprintln!("jq: ignoring parse error: {err}");
+            eprintln!("zq: ignoring parse error: {err}");
         }
 
         if cli.slurp && !cli.raw_input {
@@ -628,7 +628,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                 null_input: cli.null_input,
             },
         )
-        .map_err(|e| Error::Query(render_engine_error("jq", query.as_str(), input, e)))?;
+        .map_err(|e| Error::Query(render_engine_error("zq", query.as_str(), input, e)))?;
         native_out
     } else {
         let options = zq::QueryOptions {
@@ -636,7 +636,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
             library_path: cli.library_path.clone(),
         };
         let native_out = zq::run_jq_native(query.as_str(), input, options)
-            .map_err(|e| Error::Query(render_engine_error("jq", query.as_str(), input, e)))?;
+            .map_err(|e| Error::Query(render_engine_error("zq", query.as_str(), input, e)))?;
         native_out
     };
     if cli.raw_output0 {
@@ -765,7 +765,7 @@ fn parse_diff_docs(input: &str, path: &str, side: &str) -> Result<Vec<zq::Native
         .map_err(|err| {
             Error::Query(format!(
                 "--diff: cannot parse {side} input `{path}`: {}",
-                zq::format_query_error("jq", input, &err)
+                zq::format_query_error("zq", input, &err)
             ))
         })
 }
@@ -1814,7 +1814,7 @@ fn render_raw_output0(
                 return Ok((
                     out,
                     Some(Error::Query(
-                        "jq: error (at <stdin>:0): Cannot dump a string containing NUL with --raw-output0 option".to_string(),
+                        "zq: error (at <stdin>:0): Cannot dump a string containing NUL with --raw-output0 option".to_string(),
                     )),
                 ));
             }
@@ -2629,7 +2629,7 @@ fn resolve_base_query(cli: &Cli) -> Result<String, Error> {
     }
     if requires_filter_for_interactive_stdin(cli, io::stdin().is_terminal()) {
         return Err(Error::Query(
-            "jq: error: missing FILTER (run with a filter like '.' or pipe input into zq)"
+            "zq: error: missing FILTER (run with a filter like '.' or pipe input into zq)"
                 .to_string(),
         ));
     }
@@ -3289,7 +3289,7 @@ fn render_raw_output0_native(
                 return Ok((
                     out,
                     Some(Error::Query(
-                        "jq: error (at <stdin>:0): Cannot dump a string containing NUL with --raw-output0 option".to_string(),
+                        "zq: error (at <stdin>:0): Cannot dump a string containing NUL with --raw-output0 option".to_string(),
                     )),
                 ));
             }

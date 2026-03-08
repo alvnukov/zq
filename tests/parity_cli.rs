@@ -331,7 +331,7 @@ fn parity_runtime_errors_match_jq_format() {
     assert_exit_code(&out, 5, "runtime error format");
     assert_stderr_trim_eq(
         &out,
-        "jq: error (at <stdin>:1): Cannot index number with string \"a\"",
+        "zq: error (at <stdin>:1): Cannot index number with string \"a\"",
         "runtime error format",
     );
 
@@ -340,7 +340,7 @@ fn parity_runtime_errors_match_jq_format() {
     assert_exit_code(&out, 5, "index runtime error format");
     assert_stderr_trim_eq(
         &out,
-        "jq: error (at <stdin>:1): Cannot index object with number",
+        "zq: error (at <stdin>:1): Cannot index object with number",
         "index runtime error format",
     );
 }
@@ -449,7 +449,7 @@ fn parity_halt_and_compile_error_exit_contract() {
     let out = run_zq(&["if"]);
     assert_fail(&out, "compile error exit");
     assert_exit_code(&out, 3, "compile error exit");
-    assert_stderr_contains(&out, "jq: 1 compile error", "compile error exit");
+    assert_stderr_contains(&out, "zq: 1 compile error", "compile error exit");
 }
 
 #[test]
@@ -474,7 +474,7 @@ fn parity_missing_input_file_exits_with_io_code() {
     let out = run_zq(&[".", &missing_s]);
     assert_fail(&out, "missing input file");
     assert_exit_code(&out, 2, "missing input file");
-    assert_stderr_contains(&out, "jq: error:", "missing input file");
+    assert_stderr_contains(&out, "zq: error:", "missing input file");
 }
 
 #[test]

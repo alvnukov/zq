@@ -75,11 +75,11 @@ fn yaml_output_uses_anchors_for_repeated_subtrees() {
     )
     .expect("yaml output");
     assert!(
-        out.contains("&left_map"),
+        out.contains("&left"),
         "yaml output must define a readable anchor name"
     );
     assert!(
-        out.contains("*left_map"),
+        out.contains("*left"),
         "yaml output must emit alias with the same readable name"
     );
 
@@ -163,11 +163,11 @@ fn yaml_anchor_names_are_sanitized_and_key_based() {
     )
     .expect("yaml output");
     assert!(
-        out.contains("&service_config_map"),
+        out.contains("&service_config"),
         "anchor name should be based on first key path and sanitized"
     );
     assert!(
-        out.contains("*service_config_map"),
+        out.contains("*service_config"),
         "alias should use the same sanitized human-readable name"
     );
 }

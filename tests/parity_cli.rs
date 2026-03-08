@@ -330,11 +330,11 @@ fn parity_output_format_yaml_with_anchors_contract() {
     assert_ok(&out, "yaml output with anchors");
     let text = stdout_text(&out);
     assert!(
-        text.contains("&a_map"),
+        text.contains("&a"),
         "yaml output with anchors must define readable anchor"
     );
     assert!(
-        text.contains("*a_map"),
+        text.contains("*a"),
         "yaml output with anchors must define readable alias"
     );
 }

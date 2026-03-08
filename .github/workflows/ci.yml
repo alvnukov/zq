@@ -119,6 +119,10 @@ jobs:
         run: cargo install cargo-llvm-cov --locked
 
       - name: Generate coverage report
+        env:
+          PAGER: "less"
+          RUST_TEST_THREADS: "1"
+          RUST_MIN_STACK: "33554432"
         run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
 
       - name: Update coverage badge data

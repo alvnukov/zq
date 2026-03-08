@@ -36,12 +36,14 @@ jobs:
 
       - name: Test
         env:
+          PAGER: "less"
           RUST_TEST_THREADS: "1"
           RUST_MIN_STACK: "33554432"
         run: cargo test --all-targets --all-features --locked
 
       - name: Hard Compatibility Tests
         env:
+          PAGER: "less"
           RUST_TEST_THREADS: "1"
           RUST_MIN_STACK: "33554432"
         run: cargo test --locked --test hardcode_guard --test hardcode_guard_clusters --test jq_oracle_baseline

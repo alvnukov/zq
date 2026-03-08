@@ -14,13 +14,13 @@ use std::rc::Rc;
 
 mod module_resolve;
 
+pub(crate) use self::module_resolve::default_module_search_dirs;
 use self::module_resolve::{
     canonicalize_module_candidate, const_stage_value, ensure_const_object_metadata,
     home_dir_like_jq, import_metadata_from_object, jq_origin_dir, module_code_candidates,
     module_data_candidates, module_path_literal, normalize_search_root_like_jq,
     validate_module_relpath,
 };
-pub(crate) use self::module_resolve::default_module_search_dirs;
 
 const MAX_LOCAL_FUNCTION_PARAMETERS_OR_DEFS: usize = 4095;
 

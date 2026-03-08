@@ -11,9 +11,10 @@ fn parse_cli_for_test(args: &[&str]) -> Cli {
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned")
+    match LOCK.get_or_init(|| Mutex::new(())).lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 #[test]
@@ -1737,4 +1738,148 @@ fn spool_manager_drop_cleans_its_run_dir() {
         !run_dir.exists(),
         "run dir should be removed when manager is dropped"
     );
+}
+
+#[test]
+fn run_tests_mode_many_aggregates_statuses_for_multiple_files() {
+    let _guard = env_lock();
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let spool_root = td.path().join("spool-root");
+
+    let prev = std::env::var_os("ZQ_SPOOL_DIR");
+    std::env::set_var("ZQ_SPOOL_DIR", &spool_root);
+
+    let spool = SpoolManager::new().expect("spool manager");
+    let pass = td.path().join("pass.test");
+    let fail = td.path().join("fail.test");
+    std::fs::write(&pass, ".\n1\n1\n\n").expect("write pass suite");
+    std::fs::write(&fail, ".\n1\n2\n\n").expect("write fail suite");
+
+    let cli = parse_cli_for_test(&[
+        "--run-tests",
+        pass.to_str().expect("utf8 path"),
+        "--monochrome-output",
+    ]);
+    let status = run_tests_mode_many(
+        &cli,
+        &[
+            pass.to_string_lossy().to_string(),
+            fail.to_string_lossy().to_string(),
+        ],
+        &spool,
+    )
+    .expect("run-tests mode");
+    assert_eq!(status, 1, "failed suite should dominate final status");
+
+    if let Some(v) = prev {
+        std::env::set_var("ZQ_SPOOL_DIR", v);
+    } else {
+        std::env::remove_var("ZQ_SPOOL_DIR");
+    }
+}
+
+#[test]
+fn run_tests_mode_many_single_file_can_return_skip_overflow_status() {
+    let _guard = env_lock();
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let spool_root = td.path().join("spool-root");
+
+    let prev = std::env::var_os("ZQ_SPOOL_DIR");
+    std::env::set_var("ZQ_SPOOL_DIR", &spool_root);
+
+    let spool = SpoolManager::new().expect("spool manager");
+    let pass = td.path().join("pass.test");
+    std::fs::write(&pass, ".\n1\n1\n\n").expect("write pass suite");
+
+    let cli = parse_cli_for_test(&[
+        "--run-tests",
+        pass.to_str().expect("utf8 path"),
+        "--skip",
+        "10",
+    ]);
+    let status = run_tests_mode_many(&cli, &[pass.to_string_lossy().to_string()], &spool)
+        .expect("run-tests mode");
+    assert_eq!(status, 2, "skip past EOF must return status 2");
+
+    if let Some(v) = prev {
+        std::env::set_var("ZQ_SPOOL_DIR", v);
+    } else {
+        std::env::remove_var("ZQ_SPOOL_DIR");
+    }
+}
+
+#[test]
+fn run_tests_mode_rejects_incompatible_filter_and_file_flags() {
+    let _guard = env_lock();
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let spool_root = td.path().join("spool-root");
+    let prev = std::env::var_os("ZQ_SPOOL_DIR");
+    std::env::set_var("ZQ_SPOOL_DIR", &spool_root);
+
+    let spool = SpoolManager::new().expect("spool manager");
+    let mut cli = parse_cli_for_test(&["--run-tests", "suite.test"]);
+    cli.query = Some(".".to_string());
+    let err = run_tests_mode(&cli, "suite.test", &spool).expect_err("must reject query");
+    assert!(format!("{err}").contains("cannot be combined"));
+
+    if let Some(v) = prev {
+        std::env::set_var("ZQ_SPOOL_DIR", v);
+    } else {
+        std::env::remove_var("ZQ_SPOOL_DIR");
+    }
+}
+
+#[test]
+fn run_tests_helpers_cover_parsing_and_formatting_edges() {
+    assert!(is_skipline("  # comment"));
+    assert!(is_skipline(" \t "));
+    assert!(!is_skipline("x"));
+    assert!(is_fail_marker("%%FAIL"));
+    assert!(is_fail_marker("%%FAIL IGNORE MSG"));
+    assert!(!is_fail_marker("%%FAIL OOPS"));
+    assert!(is_fail_with_message("%%FAIL"));
+    assert!(!is_fail_with_message("%%FAIL IGNORE MSG"));
+    assert!(is_blank("  \t"));
+    assert!(!is_blank("no"));
+
+    let trimmed = strip_bom_prefix("\u{feff}abc");
+    assert_eq!(trimmed, "abc");
+    assert_eq!(strip_bom_prefix("abc"), "abc");
+
+    assert_eq!(
+        format_duration(std::time::Duration::from_millis(15)),
+        "15ms"
+    );
+    assert_eq!(
+        format_duration(std::time::Duration::from_millis(1200)),
+        "1.200s"
+    );
+
+    let long = "x".repeat(500);
+    let short = shorten_for_report(&long);
+    assert!(short.contains("[300 chars omitted]"));
+    assert!(short.starts_with(&"x".repeat(120)));
+}
+
+#[test]
+fn run_tests_number_lexeme_canonicalization_rejects_invalid_forms() {
+    assert_eq!(
+        canonicalize_run_tests_number_lexeme("20e-1"),
+        Some((false, "20".to_string(), -1))
+    );
+    assert_eq!(
+        canonicalize_run_tests_number_lexeme("-001.2300"),
+        Some((true, "12300".to_string(), -4))
+    );
+    assert_eq!(
+        canonicalize_run_tests_number_lexeme("0.000"),
+        Some((false, "0".to_string(), 0))
+    );
+
+    assert_eq!(canonicalize_run_tests_number_lexeme(""), None);
+    assert_eq!(canonicalize_run_tests_number_lexeme("-"), None);
+    assert_eq!(canonicalize_run_tests_number_lexeme("1e"), None);
+    assert_eq!(canonicalize_run_tests_number_lexeme("1e+"), None);
+    assert_eq!(canonicalize_run_tests_number_lexeme("1.2.3"), None);
+    assert_eq!(canonicalize_run_tests_number_lexeme("abc"), None);
 }

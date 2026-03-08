@@ -1,8 +1,11 @@
+#[cfg(test)]
 use serde_json::Value as JsonValue;
 
+#[cfg(test)]
+use super::SeqParseResult;
 use super::{
     index_to_line_col, strip_serde_line_col_suffix, unfinished_abandoned_at_eof_message,
-    SeqParseResult, SeqParseResultNative,
+    SeqParseResultNative,
 };
 
 pub(super) fn parse_json_seq_input_native(input: &str) -> SeqParseResultNative {

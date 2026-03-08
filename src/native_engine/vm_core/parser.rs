@@ -13,6 +13,7 @@ use std::rc::Rc;
 
 mod literal_utils;
 mod module_resolve;
+mod stage_helpers;
 
 use self::literal_utils::{
     const_object_key_error, fold_large_integer_literal_equality, parse_number_literal,
@@ -26,6 +27,10 @@ use self::module_resolve::{
     home_dir_like_jq, import_metadata_from_object, jq_origin_dir, module_code_candidates,
     module_data_candidates, module_path_literal, normalize_search_root_like_jq,
     validate_module_relpath,
+};
+use self::stage_helpers::{
+    abs_stage, append_chain_stage, bracket_bound_to_stage, by_impl_keys_stage, isfinite_stage,
+    loc_stage, select_stage, type_eq_stage, type_ne_stage,
 };
 
 const MAX_LOCAL_FUNCTION_PARAMETERS_OR_DEFS: usize = 4095;
@@ -3687,6 +3692,91 @@ mod tests {
         assert_eq!(zq_type_name(&ZqValue::Bool(true)), "boolean");
         assert_eq!(zq_type_name(&ZqValue::Array(Vec::new())), "array");
     }
+
+    #[test]
+    fn stage_helper_construction_contract() {
+        let pred = Stage::Literal(ZqValue::Bool(true));
+        assert_eq!(
+            select_stage(pred.clone()),
+            Stage::Select(Box::new(pred.clone()))
+        );
+
+        let eq = type_eq_stage("number");
+        match eq {
+            Stage::Binary { op, lhs, rhs } => {
+                assert!(matches!(op, BinaryOp::Eq));
+                assert!(matches!(*lhs, Stage::Builtin(Builtin::Type)));
+                assert_eq!(*rhs, Stage::Literal(ZqValue::String("number".to_string())));
+            }
+            other => panic!("unexpected type_eq shape: {other:?}"),
+        }
+
+        let ne = type_ne_stage("array");
+        match ne {
+            Stage::Binary { op, lhs, rhs } => {
+                assert!(matches!(op, BinaryOp::Ne));
+                assert!(matches!(*lhs, Stage::Builtin(Builtin::Type)));
+                assert_eq!(*rhs, Stage::Literal(ZqValue::String("array".to_string())));
+            }
+            other => panic!("unexpected type_ne shape: {other:?}"),
+        }
+
+        let by_impl = by_impl_keys_stage(Stage::Identity);
+        assert!(matches!(
+            by_impl,
+            Stage::Map(inner) if matches!(inner.as_ref(), Stage::ArrayLiteral(values) if values == &vec![Stage::Identity])
+        ));
+    }
+
+    #[test]
+    fn stage_helper_abs_loc_bracket_and_chain_contract() {
+        let abs = abs_stage();
+        assert!(
+            matches!(abs, Stage::IfElse { .. }),
+            "abs stage shape: {abs:?}"
+        );
+
+        let loc = loc_stage(7);
+        assert_eq!(
+            loc,
+            Stage::Literal(ZqValue::Object(IndexMap::from([
+                (
+                    "file".to_string(),
+                    ZqValue::String("<top-level>".to_string())
+                ),
+                ("line".to_string(), ZqValue::from(7i64)),
+            ])))
+        );
+
+        assert_eq!(
+            bracket_bound_to_stage(BracketBound::Static(3)),
+            Stage::Literal(ZqValue::from(3))
+        );
+        assert_eq!(
+            bracket_bound_to_stage(BracketBound::Dynamic(Stage::Identity)),
+            Stage::Identity
+        );
+
+        let chain = append_chain_stage(Stage::Identity, Stage::Literal(ZqValue::from(1)));
+        assert!(matches!(chain, Stage::Chain(ref values) if values.len() == 2));
+        let chained = append_chain_stage(chain, Stage::Literal(ZqValue::from(2)));
+        assert!(matches!(chained, Stage::Chain(values) if values.len() == 3));
+    }
+
+    #[test]
+    fn isfinite_stage_matches_expected_shape() {
+        let stage = isfinite_stage();
+        assert!(
+            matches!(
+                stage,
+                Stage::Binary {
+                    op: BinaryOp::And,
+                    ..
+                }
+            ),
+            "isfinite stage shape: {stage:?}"
+        );
+    }
 }
 
 fn rewrite_binding_pattern_symbol_ids(
@@ -3976,88 +4066,5 @@ fn collect_pattern_bindings(pattern: &BindingPattern, out: &mut Vec<String>) {
 fn push_unique_binding(out: &mut Vec<String>, name: &str) {
     if out.iter().all(|existing| existing != name) {
         out.push(name.to_string());
-    }
-}
-
-fn select_stage(predicate: Stage) -> Stage {
-    Stage::Select(Box::new(predicate))
-}
-
-fn type_eq_stage(expected: &str) -> Stage {
-    Stage::Binary {
-        op: BinaryOp::Eq,
-        lhs: Box::new(Stage::Builtin(Builtin::Type)),
-        rhs: Box::new(Stage::Literal(ZqValue::String(expected.to_string()))),
-    }
-}
-
-fn type_ne_stage(expected: &str) -> Stage {
-    Stage::Binary {
-        op: BinaryOp::Ne,
-        lhs: Box::new(Stage::Builtin(Builtin::Type)),
-        rhs: Box::new(Stage::Literal(ZqValue::String(expected.to_string()))),
-    }
-}
-
-fn by_impl_keys_stage(filter: Stage) -> Stage {
-    // jq/src/builtin.jq:
-    // map([f]) evaluates `f` for each item and captures its whole output stream as a key tuple.
-    Stage::Map(Box::new(Stage::ArrayLiteral(vec![filter])))
-}
-
-fn abs_stage() -> Stage {
-    // jq builtin.jq:
-    // def abs: if . < 0 then - . else . end;
-    Stage::IfElse {
-        cond: Box::new(Stage::Binary {
-            op: BinaryOp::Lt,
-            lhs: Box::new(Stage::Identity),
-            rhs: Box::new(Stage::Literal(ZqValue::from(0))),
-        }),
-        then_expr: Box::new(Stage::UnaryMinus(Box::new(Stage::Identity))),
-        else_expr: Box::new(Stage::Identity),
-    }
-}
-
-fn loc_stage(line: usize) -> Stage {
-    Stage::Literal(ZqValue::Object(IndexMap::from([
-        (
-            "file".to_string(),
-            ZqValue::String("<top-level>".to_string()),
-        ),
-        ("line".to_string(), ZqValue::from(line as i64)),
-    ])))
-}
-
-fn bracket_bound_to_stage(bound: BracketBound) -> Stage {
-    match bound {
-        BracketBound::Static(v) => Stage::Literal(ZqValue::from(v)),
-        BracketBound::Dynamic(expr) => expr,
-    }
-}
-
-fn append_chain_stage(lhs: Stage, rhs: Stage) -> Stage {
-    match lhs {
-        Stage::Chain(mut stages) => {
-            stages.push(rhs);
-            Stage::Chain(stages)
-        }
-        other => Stage::Chain(vec![other, rhs]),
-    }
-}
-
-fn isfinite_stage() -> Stage {
-    // jq builtin.jq:
-    // def isfinite: type == "number" and (isinfinite | not) and (isnan | not);
-    Stage::Binary {
-        op: BinaryOp::And,
-        lhs: Box::new(type_eq_stage("number")),
-        rhs: Box::new(Stage::Binary {
-            op: BinaryOp::And,
-            lhs: Box::new(Stage::UnaryNot(Box::new(Stage::Builtin(
-                Builtin::IsInfinite,
-            )))),
-            rhs: Box::new(Stage::UnaryNot(Box::new(Stage::Builtin(Builtin::IsNan)))),
-        }),
     }
 }

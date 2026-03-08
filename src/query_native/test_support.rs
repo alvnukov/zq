@@ -7945,7 +7945,12 @@ mod legacy_compat {
                 || source.starts_with("modulemeta")
             {
                 // jq fixtures resolve imports relative to tests/modules.
-                return vec![".tmp/jq/tests/modules".to_string()];
+                let legacy_modules = ".tmp/jq/tests/modules";
+                if std::path::Path::new(legacy_modules).is_dir() {
+                    return vec![legacy_modules.to_string()];
+                }
+                // CI fallback: keep module fixtures in-repo for deterministic runs.
+                return vec!["src/native_engine/vm_core/test_modules".to_string()];
             }
             Vec::new()
         }

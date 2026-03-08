@@ -29,6 +29,7 @@ jobs:
         env:
           ZQ_RUN_JQ_UPSTREAM: "1"
           GIT_TERMINAL_PROMPT: "0"
+          PAGER: "less"
           RUST_TEST_THREADS: "1"
           RUST_MIN_STACK: "33554432"
         shell: bash

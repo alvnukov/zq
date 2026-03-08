@@ -3,7 +3,7 @@ use zq::{
     jsonish_equal, normalize_jsonish_line, parse_doc_mode, prepare_jq_query_with_paths, run_jq,
     run_jq_jsonish_lines, try_run_jq_native_stream_json_text_options,
     try_run_jq_native_stream_with_paths_options, validate_jq_query, validate_jq_query_with_paths,
-    EngineRunOptions, NativeStreamStatus, QueryOptions,
+    EngineRunOptions, NativeStreamStatus, QueryOptions, YamlAnchorNameMode, YamlFormatOptions,
 };
 
 #[test]
@@ -22,6 +22,19 @@ fn readme_public_api_example_contract() {
 
     let yaml_docs = zq::format_output_yaml_documents(&out).expect("format yaml");
     assert!(yaml_docs.contains("prod"), "yaml output must contain value");
+
+    let yaml_docs_anchored = zq::format_output_yaml_documents_with_options(
+        &out,
+        YamlFormatOptions::default()
+            .with_yaml_anchors(true)
+            .with_anchor_name_mode(YamlAnchorNameMode::StrictFriendly)
+            .with_anchor_single_token_enrichment(true),
+    )
+    .expect("format yaml with options");
+    assert!(
+        yaml_docs_anchored.contains("prod"),
+        "yaml output must contain value"
+    );
 }
 
 #[test]

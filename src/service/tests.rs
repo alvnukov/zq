@@ -1,4 +1,5 @@
 use super::*;
+use fs2::FileExt;
 use std::sync::{Mutex, OnceLock};
 
 fn parse_cli_for_test(args: &[&str]) -> Cli {
@@ -1015,6 +1016,39 @@ fn run_with_rejects_yaml_raw_output0_combination() {
 }
 
 #[test]
+fn run_with_rejects_yaml_anchors_for_non_yaml_output() {
+    let cli = parse_cli_for_test(&["--output-format", "json", "--yaml-anchors", "."]);
+    let err = run_with(cli, CliCompatArgs::default()).expect_err("must fail");
+    assert!(format!("{err}").contains("--yaml-anchors is supported only"));
+}
+
+#[test]
+fn run_with_rejects_yaml_anchor_name_mode_without_yaml_output() {
+    let cli = parse_cli_for_test(&[
+        "--output-format",
+        "json",
+        "--yaml-anchor-name-mode",
+        "strict-friendly",
+        ".",
+    ]);
+    let err = run_with(cli, CliCompatArgs::default()).expect_err("must fail");
+    assert!(format!("{err}").contains("--yaml-anchor-name-mode is supported only"));
+}
+
+#[test]
+fn run_with_rejects_yaml_anchor_name_mode_without_yaml_anchors() {
+    let cli = parse_cli_for_test(&[
+        "--output-format",
+        "yaml",
+        "--yaml-anchor-name-mode",
+        "strict-friendly",
+        ".",
+    ]);
+    let err = run_with(cli, CliCompatArgs::default()).expect_err("must fail");
+    assert!(format!("{err}").contains("--yaml-anchor-name-mode requires --yaml-anchors"));
+}
+
+#[test]
 fn run_with_accepts_debug_dump_disasm_compat_flag() {
     let cli = parse_cli_for_test(&["-n", "--debug-dump-disasm", "1+1"]);
     let status = run_with(cli, CliCompatArgs::default()).expect("must run");
@@ -1633,4 +1667,74 @@ fn validate_jq_colors_rejects_invalid_palette() {
     assert!(!validate_jq_colors(
             "0123456789123:0123456789123:0123456789123:0123456789123:0123456789123:0123456789123:0123456789123:0123456789123:"
         ));
+}
+
+#[test]
+fn spool_cleanup_removes_stale_run_dirs_and_keeps_locked_ones() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let root = td.path().join("spool").join("v1");
+    fs::create_dir_all(&root).expect("create spool root");
+
+    let stale_dir = root.join("run-stale");
+    fs::create_dir(&stale_dir).expect("create stale run dir");
+    fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(stale_dir.join("run.lock"))
+        .expect("create stale lock");
+
+    let locked_dir = root.join("run-live");
+    fs::create_dir(&locked_dir).expect("create live run dir");
+    let live_lock = fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(locked_dir.join("run.lock"))
+        .expect("create live lock");
+    live_lock
+        .try_lock_exclusive()
+        .expect("lock live run as active");
+
+    SpoolManager::sweep_stale_runs(&root).expect("sweep stale runs");
+    assert!(
+        !stale_dir.exists(),
+        "stale run dir should be removed by startup cleanup"
+    );
+    assert!(
+        locked_dir.exists(),
+        "locked run dir must not be removed while process is active"
+    );
+    live_lock.unlock().expect("unlock live run");
+}
+
+#[test]
+fn spool_manager_drop_cleans_its_run_dir() {
+    let _guard = env_lock();
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let custom_root = td.path().join("custom-spool-root");
+
+    let prev = std::env::var_os("ZQ_SPOOL_DIR");
+    std::env::set_var("ZQ_SPOOL_DIR", &custom_root);
+
+    let run_dir = {
+        let manager = SpoolManager::new().expect("create spool manager");
+        assert!(manager.run_dir.exists(), "run dir must exist while active");
+        assert!(
+            manager.run_dir.join("run.lock").exists(),
+            "run lock must exist"
+        );
+        manager.run_dir.clone()
+    };
+
+    if let Some(v) = prev {
+        std::env::set_var("ZQ_SPOOL_DIR", v);
+    } else {
+        std::env::remove_var("ZQ_SPOOL_DIR");
+    }
+
+    assert!(
+        !run_dir.exists(),
+        "run dir should be removed when manager is dropped"
+    );
 }

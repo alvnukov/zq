@@ -49,6 +49,9 @@ zq completion <SHELL>
 ### Output
 
 - `--output-format <json|yaml|toml|csv|xml>`: output format (default: `json`).
+- `--yaml-anchors`: enable YAML anchors/aliases for repeated values (`--output-format=yaml` only), primarily for repeated structures and larger strings to avoid noisy output.
+- `--yaml-anchor-name-mode <friendly|strict-friendly>`: anchor naming mode (`strict-friendly` requires `--yaml-anchors`).
+  - naming quality depends on dictionary assets in `assets/yaml_anchor/*.zst`, embedded into the binary at build time.
 - `-c, --compact-output` / `--compact`: compact JSON output.
 - `--indent <0..7>`: pretty JSON indent size.
 - `-r, --raw-output`: print strings without JSON quoting.
@@ -135,6 +138,8 @@ Restrictions:
   - `--join-output`
   - `--raw-output0`
   - `--compact-output`
+- `--yaml-anchors` can be used only with `--output-format=yaml`.
+- `--yaml-anchor-name-mode` can be used only with `--output-format=yaml` and requires `--yaml-anchors`.
 - `--raw-output0` cannot be combined with `--join-output`.
 - `--stream` / `--stream-errors` cannot be combined with `--raw-input`.
 
@@ -154,6 +159,7 @@ Restrictions:
 - `--output-format=csv` is intentionally emitted without ANSI colors to keep CSV valid.
 - `--output-format=xml` is intentionally emitted without ANSI colors to keep XML valid.
 - `ZQ_COLOR_COMPAT=jq171`: enables legacy jq171 compact color behavior.
+- YAML anchor dictionaries are loaded from embedded assets (no runtime directory/env configuration, no temporary files).
 
 ## Hidden Compatibility Flags
 

@@ -1,15 +1,21 @@
 use clap::{error::ErrorKind, CommandFactory, Parser};
 use clap_complete::generate;
+use fs2::FileExt;
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::io::{self, IsTerminal, Read, Write};
-use std::time::{Duration, Instant};
+use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::cli::{Cli, CliCommand, DiffOutputFormat, InputFormat, OutputFormat};
+use crate::cli::{
+    Cli, CliCommand, DiffOutputFormat, InputFormat, OutputFormat,
+    YamlAnchorNameMode as CliYamlAnchorNameMode,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -403,7 +409,160 @@ impl InputData {
     }
 }
 
+struct SpoolManager {
+    root_dir: PathBuf,
+    run_dir: PathBuf,
+    run_lock: Option<fs::File>,
+    next_file_id: AtomicU64,
+}
+
+impl SpoolManager {
+    fn new() -> Result<Self, Error> {
+        let root_dir = resolve_spool_root_dir();
+        fs::create_dir_all(&root_dir)?;
+        Self::sweep_stale_runs(&root_dir)?;
+        let (run_dir, run_lock) = Self::create_run_dir_with_lock(&root_dir)?;
+        Ok(Self {
+            root_dir,
+            run_dir,
+            run_lock: Some(run_lock),
+            next_file_id: AtomicU64::new(0),
+        })
+    }
+
+    fn read_stdin_into_mmap(&self) -> Result<InputData, Error> {
+        let next_id = self.next_file_id.fetch_add(1, Ordering::Relaxed);
+        let stdin_file_path = self.run_dir.join(format!("stdin-{next_id}.bin"));
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&stdin_file_path)?;
+        {
+            let mut stdin = io::stdin().lock();
+            io::copy(&mut stdin, &mut file)?;
+        }
+        let len = file.metadata()?.len();
+        if len == 0 {
+            drop(file);
+            let _ = fs::remove_file(stdin_file_path);
+            return Ok(InputData::Owned(String::new()));
+        }
+        file.flush()?;
+        // SAFETY: the file remains open for the lifetime of this function call; the returned
+        // mapping owns the OS mapping handle and is read-only.
+        let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
+        Ok(InputData::Mapped(mmap))
+    }
+
+    fn sweep_stale_runs(root_dir: &Path) -> Result<(), Error> {
+        let cleanup_lock_path = root_dir.join("cleanup.lock");
+        let cleanup_lock = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(cleanup_lock_path)?;
+        if cleanup_lock.try_lock_exclusive().is_err() {
+            return Ok(());
+        }
+
+        for entry in fs::read_dir(root_dir)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if !file_type.is_dir() || file_type.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name();
+            if !name.to_string_lossy().starts_with("run-") {
+                continue;
+            }
+
+            let run_dir = entry.path();
+            let run_lock_path = run_dir.join("run.lock");
+            let run_lock = match fs::OpenOptions::new()
+                .create(false)
+                .read(true)
+                .write(true)
+                .open(&run_lock_path)
+            {
+                Ok(file) => file,
+                Err(_) => continue,
+            };
+
+            if run_lock.try_lock_exclusive().is_ok() {
+                let _ = run_lock.unlock();
+                let _ = remove_spool_run_dir_if_safe(root_dir, &run_dir);
+            }
+        }
+
+        let _ = cleanup_lock.unlock();
+        Ok(())
+    }
+
+    fn create_run_dir_with_lock(root_dir: &Path) -> Result<(PathBuf, fs::File), Error> {
+        let pid = std::process::id();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        for attempt in 0..64u32 {
+            let run_dir = root_dir.join(format!("run-{pid}-{now}-{attempt}"));
+            match fs::create_dir(&run_dir) {
+                Ok(()) => {
+                    let run_lock_path = run_dir.join("run.lock");
+                    let run_lock = fs::OpenOptions::new()
+                        .create_new(true)
+                        .read(true)
+                        .write(true)
+                        .open(run_lock_path)?;
+                    run_lock.try_lock_exclusive()?;
+                    return Ok((run_dir, run_lock));
+                }
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Err(Error::Query(
+            "failed to allocate run spool directory".to_string(),
+        ))
+    }
+}
+
+impl Drop for SpoolManager {
+    fn drop(&mut self) {
+        if let Some(run_lock) = self.run_lock.take() {
+            let _ = run_lock.unlock();
+            drop(run_lock);
+        }
+        let _ = remove_spool_run_dir_if_safe(&self.root_dir, &self.run_dir);
+    }
+}
+
+fn resolve_spool_root_dir() -> PathBuf {
+    let base = std::env::var("ZQ_SPOOL_DIR")
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("zq-spool"));
+    base.join("v1")
+}
+
+fn remove_spool_run_dir_if_safe(root_dir: &Path, run_dir: &Path) -> io::Result<()> {
+    if !run_dir.exists() {
+        return Ok(());
+    }
+    let canonical_root = root_dir.canonicalize()?;
+    let canonical_run = run_dir.canonicalize()?;
+    if canonical_run.starts_with(&canonical_root) {
+        fs::remove_dir_all(canonical_run)?;
+    }
+    Ok(())
+}
+
 fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
+    let spool = SpoolManager::new()?;
+
     if cli.diff && !cli.run_tests.is_empty() {
         return Err(Error::Query(
             "--diff mode cannot be combined with --run-tests".to_string(),
@@ -420,10 +579,10 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         if paths.is_empty() {
             paths.push("-".to_string());
         }
-        return run_tests_mode_many(&cli, &paths);
+        return run_tests_mode_many(&cli, &paths, &spool);
     }
     if cli.diff {
-        return run_diff_mode(&cli);
+        return run_diff_mode(&cli, &spool);
     }
 
     let positional_input = resolve_positional_input(&cli)?;
@@ -450,6 +609,23 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
     if !matches!(cli.output_format, OutputFormat::Json) && cli.compact {
         return Err(Error::Query(
             "--compact is supported only with --output-format=json".to_string(),
+        ));
+    }
+    if cli.yaml_anchors && !matches!(cli.output_format, OutputFormat::Yaml) {
+        return Err(Error::Query(
+            "--yaml-anchors is supported only with --output-format=yaml".to_string(),
+        ));
+    }
+    if !matches!(cli.output_format, OutputFormat::Yaml)
+        && !matches!(cli.yaml_anchor_name_mode, CliYamlAnchorNameMode::Friendly)
+    {
+        return Err(Error::Query(
+            "--yaml-anchor-name-mode is supported only with --output-format=yaml".to_string(),
+        ));
+    }
+    if !cli.yaml_anchors && !matches!(cli.yaml_anchor_name_mode, CliYamlAnchorNameMode::Friendly) {
+        return Err(Error::Query(
+            "--yaml-anchor-name-mode requires --yaml-anchors".to_string(),
         ));
     }
     if cli.raw_output0 && cli.join_output {
@@ -488,7 +664,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
     let input_data = if skip_input_read {
         InputData::Owned(String::new())
     } else {
-        read_input(&input_path)?
+        read_input(&input_path, &spool)?
     };
     let input_text = input_data.as_str_lossy();
     let input = input_text.as_ref();
@@ -659,8 +835,17 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                 &color_opts,
             )?,
             OutputFormat::Yaml => {
-                let rendered = zq::format_output_yaml_documents_native(&out_native)
-                    .map_err(|e| Error::Query(e.to_string()))?;
+                let rendered = zq::format_output_yaml_documents_native_with_options(
+                    &out_native,
+                    zq::YamlFormatOptions {
+                        use_anchors: cli.yaml_anchors,
+                        anchor_name_mode: cli_yaml_anchor_name_mode_to_native(
+                            cli.yaml_anchor_name_mode,
+                        ),
+                        ..zq::YamlFormatOptions::default()
+                    },
+                )
+                .map_err(|e| Error::Query(e.to_string()))?;
                 if !rendered.is_empty() {
                     let colored = colorize_structured_output(
                         OutputFormat::Yaml,
@@ -730,7 +915,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
     Ok(0)
 }
 
-fn run_diff_mode(cli: &Cli) -> Result<i32, Error> {
+fn run_diff_mode(cli: &Cli, spool: &SpoolManager) -> Result<i32, Error> {
     if cli.from_file.is_some() {
         return Err(Error::Query(
             "--diff mode cannot be combined with -f/--from-file".to_string(),
@@ -745,7 +930,7 @@ fn run_diff_mode(cli: &Cli) -> Result<i32, Error> {
     let left_format = resolve_effective_input_format(cli.input_format, &left_path);
     let right_format = resolve_effective_input_format(cli.input_format, &right_path);
 
-    let left_input = read_input(&left_path)?;
+    let left_input = read_input(&left_path, spool)?;
     let left_text = left_input.as_str_lossy();
     let left_docs = parse_diff_docs(
         left_text.as_ref(),
@@ -755,7 +940,7 @@ fn run_diff_mode(cli: &Cli) -> Result<i32, Error> {
         cli.csv_parse_json_cells,
     )?;
 
-    let right_input = read_input(&right_path)?;
+    let right_input = read_input(&right_path, spool)?;
     let right_text = right_input.as_str_lossy();
     let right_docs = parse_diff_docs(
         right_text.as_ref(),
@@ -3011,18 +3196,18 @@ fn exit_status_from_outputs(outputs: &[JsonValue]) -> i32 {
     }
 }
 
-fn run_tests_mode_many(cli: &Cli, paths: &[String]) -> Result<i32, Error> {
+fn run_tests_mode_many(cli: &Cli, paths: &[String], spool: &SpoolManager) -> Result<i32, Error> {
     if paths.is_empty() {
-        return run_tests_mode(cli, "-");
+        return run_tests_mode(cli, "-", spool);
     }
     if paths.len() == 1 {
-        return run_tests_mode(cli, &paths[0]);
+        return run_tests_mode(cli, &paths[0], spool);
     }
 
     let mut final_code = 0;
     for (idx, path) in paths.iter().enumerate() {
         println!("== run-tests [{}/{}]: {} ==", idx + 1, paths.len(), path);
-        let code = run_tests_mode(cli, path)?;
+        let code = run_tests_mode(cli, path, spool)?;
         final_code = match (final_code, code) {
             (1, _) | (_, 1) => 1,
             (2, _) | (_, 2) => 2,
@@ -3034,7 +3219,7 @@ fn run_tests_mode_many(cli: &Cli, paths: &[String]) -> Result<i32, Error> {
     Ok(final_code)
 }
 
-fn run_tests_mode(cli: &Cli, path: &str) -> Result<i32, Error> {
+fn run_tests_mode(cli: &Cli, path: &str, spool: &SpoolManager) -> Result<i32, Error> {
     if cli.query.is_some()
         || cli.input_file.is_some()
         || cli.input_legacy.is_some()
@@ -3045,7 +3230,7 @@ fn run_tests_mode(cli: &Cli, path: &str) -> Result<i32, Error> {
         ));
     }
 
-    let content = read_input(path)?;
+    let content = read_input(path, spool)?;
     let content_text = content.as_str_lossy();
     let run_tests_library_paths = resolve_run_tests_library_paths(cli, path);
     let mut cursor = TestCursor::new(content_text.as_ref());
@@ -3289,11 +3474,9 @@ fn run_query_case(
     }
 }
 
-fn read_input(path: &str) -> Result<InputData, Error> {
+fn read_input(path: &str, spool: &SpoolManager) -> Result<InputData, Error> {
     if path == "-" {
-        let mut s = String::new();
-        io::stdin().read_to_string(&mut s)?;
-        return Ok(InputData::Owned(s));
+        return spool.read_stdin_into_mmap();
     }
     let file = fs::File::open(path)?;
     // Memory-map regular files to avoid a full read+copy before parsing.
@@ -3316,6 +3499,13 @@ fn cli_input_format_to_native(format: InputFormat) -> zq::NativeInputFormat {
         InputFormat::Toml => zq::NativeInputFormat::Toml,
         InputFormat::Csv => zq::NativeInputFormat::Csv,
         InputFormat::Xml => zq::NativeInputFormat::Xml,
+    }
+}
+
+fn cli_yaml_anchor_name_mode_to_native(mode: CliYamlAnchorNameMode) -> zq::YamlAnchorNameMode {
+    match mode {
+        CliYamlAnchorNameMode::Friendly => zq::YamlAnchorNameMode::Friendly,
+        CliYamlAnchorNameMode::StrictFriendly => zq::YamlAnchorNameMode::StrictFriendly,
     }
 }
 

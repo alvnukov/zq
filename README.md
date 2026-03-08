@@ -98,6 +98,10 @@ Default mode: `zq [OPTIONS] [FILTER] [FILE]`
 - `--csv-parse-json-cells` makes CSV input parser decode JSON literals inside cells.
 - `--doc-mode first|all|index` controls YAML document selection.
 - `--doc-index` is required when `--doc-mode=index`.
+- `--yaml-anchors` enables YAML anchors/aliases for repeated values (only with `--output-format=yaml`), prioritizing repeated structures and larger strings to keep output readable.
+- `--yaml-anchor-name-mode friendly|strict-friendly` controls anchor naming style (strict-friendly requires `--yaml-anchors`).
+  - `friendly` keeps more semantic tokens.
+  - `strict-friendly` applies stronger shortening and dictionary normalization.
 - XML mapping conventions:
   - attributes map to keys with `@` prefix (for example `@id`)
   - element text maps to `#text` when mixed with attributes/children
@@ -174,6 +178,8 @@ zq completion powershell | Out-String | Invoke-Expression
 ## Output and Color Notes
 
 - Non-JSON output formats (`yaml`, `toml`, `csv`, `xml`) are incompatible with `--raw-output`, `--join-output`, `--raw-output0`, and `--compact-output`.
+- `--yaml-anchors` is available only with `--output-format=yaml`.
+- `--yaml-anchor-name-mode` is available only with `--output-format=yaml` and requires `--yaml-anchors`.
 - `--raw-output0` is incompatible with `--join-output`.
 - `--stream` / `--stream-errors` are incompatible with `--raw-input`.
 - Structured color output (JSON/YAML/TOML on TTY) honors:
@@ -239,7 +245,63 @@ let options = zq::QueryOptions {
 
 let out = zq::run_jq(".global.env", input, options)?;
 let text = zq::format_output_json_lines(&out, false, true)?;
+
+let yaml = zq::format_output_yaml_documents_with_options(
+    &out,
+    zq::YamlFormatOptions::default()
+        .with_yaml_anchors(true)
+        .with_anchor_name_mode(zq::YamlAnchorNameMode::StrictFriendly)
+        .with_anchor_single_token_enrichment(true),
+)?;
 ```
+
+### YAML Anchor Dictionaries Asset (API and CLI)
+
+YAML anchor naming (`--yaml-anchors` / `YamlFormatOptions`) uses dictionary assets from
+`assets/yaml_anchor/` at build time:
+
+- `stopwords_common.txt.zst`
+- `stopwords_strict.txt.zst`
+- `canonical_common.tsv.zst`
+- `canonical_strict.tsv.zst`
+
+Recommended asset directory layout:
+
+```text
+<asset-root>/yaml_anchor/
+  stopwords_common.txt.zst
+  stopwords_strict.txt.zst
+  canonical_common.tsv.zst
+  canonical_strict.tsv.zst
+```
+These `.zst` assets are embedded into the binary at build time (`include_bytes!`).
+At runtime they are decompressed in memory and cached (`OnceLock`) with no temp/intermediate files.
+
+If you change dictionary files, rebuild `zq` so updated assets are embedded into the binary.
+
+How to extend dictionaries:
+
+1. Edit source files in `assets/yaml_anchor/`:
+   - `stopwords_*.txt`: one token per line, `#` for comments.
+   - `canonical_*.tsv`: `from<TAB>to` mapping per line.
+2. Rebuild compressed assets:
+
+```bash
+zstd -q -f -22 --ultra assets/yaml_anchor/stopwords_common.txt -o assets/yaml_anchor/stopwords_common.txt.zst
+zstd -q -f -22 --ultra assets/yaml_anchor/stopwords_strict.txt -o assets/yaml_anchor/stopwords_strict.txt.zst
+zstd -q -f -22 --ultra assets/yaml_anchor/canonical_common.tsv -o assets/yaml_anchor/canonical_common.tsv.zst
+zstd -q -f -22 --ultra assets/yaml_anchor/canonical_strict.tsv -o assets/yaml_anchor/canonical_strict.tsv.zst
+```
+
+3. Rebuild binary/tests (`cargo build`, `cargo test`) to embed and validate updates.
+
+Anchor naming logic (high level):
+
+1. Path/key tokenization (supports separators, CamelCase, acronym boundaries, alnum boundaries).
+2. Stopword filtering (`common` for all modes, `strict` additionally for strict-friendly).
+3. Canonical normalization (`common` + strict overrides in strict-friendly).
+4. Token cleanup (dedupe, compacting, length limits, stable uniqueness suffixes).
+5. Optional strict single-token enrichment (`with_anchor_single_token_enrichment(true)`).
 
 Selected public API:
 
@@ -254,6 +316,12 @@ Selected public API:
 - `zq::NativeInputFormat`
 - `zq::format_output_json_lines`
 - `zq::format_output_yaml_documents_native`
+- `zq::format_output_yaml_documents_native_with_options`
+- `zq::YamlFormatOptions`
+- `zq::YamlAnchorNameMode`
+- `zq::YamlFormatOptions::with_yaml_anchors`
+- `zq::YamlFormatOptions::with_anchor_name_mode`
+- `zq::YamlFormatOptions::with_anchor_single_token_enrichment`
 - `zq::format_query_error`
 
 ## Core Migration

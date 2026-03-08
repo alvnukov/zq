@@ -1,8 +1,9 @@
 use zq::{
-    jsonish_equal, parse_native_input_values_auto, parse_native_input_values_with_format, run_jq,
-    run_jq_stream_with_paths_options, run_native_json_query,
-    run_native_query_stream_with_paths_and_options, run_native_yaml_query, EngineRunOptions,
-    NativeInputFormat, NativeInputKind, NativeRunOptions, QueryOptions,
+    format_output_yaml_documents_with_options, jsonish_equal, parse_native_input_values_auto,
+    parse_native_input_values_with_format, run_jq, run_jq_stream_with_paths_options,
+    run_native_json_query, run_native_query_stream_with_paths_and_options, run_native_yaml_query,
+    EngineRunOptions, NativeInputFormat, NativeInputKind, NativeRunOptions, QueryOptions,
+    YamlAnchorNameMode, YamlFormatOptions,
 };
 
 #[test]
@@ -146,4 +147,42 @@ fn library_auto_xml_error_is_explicit_contract() {
         }
         other => panic!("expected xml runtime error, got: {other}"),
     }
+}
+
+#[test]
+fn library_yaml_anchor_options_are_exposed_contract() {
+    let values = vec![serde_json::json!({
+        "metadataName": {"n": 1},
+        "metadataNameBackup": {"n": 1}
+    })];
+
+    let with_enrichment = format_output_yaml_documents_with_options(
+        &values,
+        YamlFormatOptions::default()
+            .with_yaml_anchors(true)
+            .with_anchor_name_mode(YamlAnchorNameMode::StrictFriendly)
+            .with_anchor_single_token_enrichment(true),
+    )
+    .expect("yaml with enrichment");
+    assert!(
+        with_enrichment.contains("&meta_name"),
+        "expected enriched strict anchor name, got:\n{with_enrichment}"
+    );
+
+    let without_enrichment = format_output_yaml_documents_with_options(
+        &values,
+        YamlFormatOptions::default()
+            .with_yaml_anchors(true)
+            .with_anchor_name_mode(YamlAnchorNameMode::StrictFriendly)
+            .with_anchor_single_token_enrichment(false),
+    )
+    .expect("yaml without enrichment");
+    assert!(
+        without_enrichment.contains("&meta"),
+        "expected compact strict anchor name, got:\n{without_enrichment}"
+    );
+    assert!(
+        !without_enrichment.contains("&meta_name"),
+        "enrichment toggle must affect anchor naming"
+    );
 }

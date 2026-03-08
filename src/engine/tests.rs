@@ -62,6 +62,291 @@ fn yaml_output_for_multiple_values_is_multidoc() {
 }
 
 #[test]
+fn yaml_output_uses_anchors_for_repeated_subtrees() {
+    let out = format_output_yaml_documents_with_options(
+        &[serde_json::json!({
+            "left": {"x": [1, 2]},
+            "right": {"x": [1, 2]}
+        })],
+        YamlFormatOptions {
+            use_anchors: true,
+            ..YamlFormatOptions::default()
+        },
+    )
+    .expect("yaml output");
+    assert!(
+        out.contains("&left_map"),
+        "yaml output must define a readable anchor name"
+    );
+    assert!(
+        out.contains("*left_map"),
+        "yaml output must emit alias with the same readable name"
+    );
+
+    let decoded: serde_yaml::Value = serde_yaml::from_str(&out).expect("decode anchored yaml");
+    let expected: serde_yaml::Value =
+        serde_yaml::from_str("left:\n  x:\n    - 1\n    - 2\nright:\n  x:\n    - 1\n    - 2\n")
+            .expect("decode expected yaml");
+    assert_eq!(decoded, expected);
+}
+
+#[test]
+fn yaml_output_uses_anchors_for_repeated_large_scalars() {
+    let out = format_output_yaml_documents_with_options(
+        &[serde_json::json!({
+            "title": "global-shared-configuration",
+            "backup_title": "global-shared-configuration",
+            "fallback_title": "global-shared-configuration"
+        })],
+        YamlFormatOptions {
+            use_anchors: true,
+            ..YamlFormatOptions::default()
+        },
+    )
+    .expect("yaml output");
+    assert!(
+        out.contains("&title"),
+        "yaml output must define readable scalar anchor"
+    );
+    assert!(
+        out.contains("*title"),
+        "yaml output must reuse readable scalar anchor"
+    );
+}
+
+#[test]
+fn yaml_output_does_not_anchor_short_scalars_even_when_enabled() {
+    let out = format_output_yaml_documents_with_options(
+        &[serde_json::json!({
+            "env": "dev",
+            "default_env": "dev",
+            "current_env": "dev"
+        })],
+        YamlFormatOptions {
+            use_anchors: true,
+            ..YamlFormatOptions::default()
+        },
+    )
+    .expect("yaml output");
+    assert!(
+        !out.contains('&'),
+        "short scalar aliases should stay disabled for readability"
+    );
+    assert!(
+        !out.contains('*'),
+        "short scalar aliases should stay disabled for readability"
+    );
+}
+
+#[test]
+fn yaml_output_without_anchor_option_preserves_plain_output() {
+    let out = format_output_yaml_documents(&[serde_json::json!({
+        "env": "dev",
+        "default_env": "dev"
+    })])
+    .expect("yaml output");
+    assert!(!out.contains('&'), "anchors must be opt-in");
+    assert!(!out.contains('*'), "aliases must be opt-in");
+}
+
+#[test]
+fn yaml_anchor_names_are_sanitized_and_key_based() {
+    let out = format_output_yaml_documents_with_options(
+        &[serde_json::json!({
+            "service-config": {"cfg": {"ports": [80, 443]}},
+            "backup-config": {"cfg": {"ports": [80, 443]}}
+        })],
+        YamlFormatOptions {
+            use_anchors: true,
+            ..YamlFormatOptions::default()
+        },
+    )
+    .expect("yaml output");
+    assert!(
+        out.contains("&service_config_map"),
+        "anchor name should be based on first key path and sanitized"
+    );
+    assert!(
+        out.contains("*service_config_map"),
+        "alias should use the same sanitized human-readable name"
+    );
+}
+
+#[test]
+fn yaml_strict_friendly_mode_makes_anchor_names_shorter() {
+    let input = serde_json::json!({
+        "cluster-metrics-apiversion": {"x": [1, 2]},
+        "other-node": {"x": [1, 2]},
+    });
+    let friendly = format_output_yaml_documents_with_options(
+        std::slice::from_ref(&input),
+        YamlFormatOptions {
+            use_anchors: true,
+            anchor_name_mode: YamlAnchorNameMode::Friendly,
+            ..YamlFormatOptions::default()
+        },
+    )
+    .expect("friendly yaml output");
+    let strict = format_output_yaml_documents_with_options(
+        std::slice::from_ref(&input),
+        YamlFormatOptions {
+            use_anchors: true,
+            anchor_name_mode: YamlAnchorNameMode::StrictFriendly,
+            ..YamlFormatOptions::default()
+        },
+    )
+    .expect("strict-friendly yaml output");
+
+    let first_anchor_name = |text: &str| -> Option<String> {
+        text.lines().find_map(|line| {
+            let amp = line.find('&')?;
+            let tail = &line[amp + 1..];
+            Some(
+                tail.split(|c: char| c.is_whitespace())
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+    };
+
+    let friendly_name = first_anchor_name(&friendly).expect("friendly anchor name");
+    let strict_name = first_anchor_name(&strict).expect("strict anchor name");
+
+    assert!(
+        strict_name.len() <= friendly_name.len(),
+        "strict-friendly mode should not generate longer names"
+    );
+}
+
+#[test]
+fn yaml_anchor_name_dictionaries_load_from_assets() {
+    let dicts = anchor_name_dictionaries();
+    assert!(
+        dicts.stopwords_common.contains("default"),
+        "common stopwords dictionary should be loaded from assets"
+    );
+    assert_eq!(
+        dicts
+            .canonical_common
+            .get("configuration")
+            .map(String::as_str),
+        Some("config"),
+        "common canonical dictionary should be loaded from assets"
+    );
+    assert_eq!(
+        dicts.canonical_strict.get("deployment").map(String::as_str),
+        Some("deploy"),
+        "strict canonical dictionary should be loaded from assets"
+    );
+}
+
+#[test]
+fn yaml_anchor_strict_mode_keeps_first_context_token() {
+    assert_eq!(
+        normalize_anchor_component(
+            "default_serviceaccount_map",
+            YamlAnchorNameMode::StrictFriendly
+        ),
+        "default_sa"
+    );
+    assert_eq!(
+        normalize_anchor_component(
+            "common_serviceaccount_map",
+            YamlAnchorNameMode::StrictFriendly
+        ),
+        "common_sa"
+    );
+}
+
+#[test]
+fn yaml_anchor_strict_mode_keeps_default_and_common_distinct() {
+    let default_name = normalize_anchor_component(
+        "default_serviceaccount_map",
+        YamlAnchorNameMode::StrictFriendly,
+    );
+    let common_name = normalize_anchor_component(
+        "common_serviceaccount_map",
+        YamlAnchorNameMode::StrictFriendly,
+    );
+    assert_eq!(default_name, "default_sa");
+    assert_eq!(common_name, "common_sa");
+    assert_ne!(
+        default_name, common_name,
+        "default_* and common_* should stay semantically distinct"
+    );
+}
+
+#[test]
+fn yaml_anchor_strict_dictionary_covers_k8s_openapi_and_ci_terms() {
+    assert_eq!(
+        canonicalize_anchor_token(
+            "customresourcedefinition".to_string(),
+            YamlAnchorNameMode::StrictFriendly
+        ),
+        "crd"
+    );
+    assert_eq!(
+        canonicalize_anchor_token(
+            "requestbody".to_string(),
+            YamlAnchorNameMode::StrictFriendly
+        ),
+        "reqbody"
+    );
+    assert_eq!(
+        canonicalize_anchor_token("workflow".to_string(), YamlAnchorNameMode::StrictFriendly),
+        "wf"
+    );
+    assert_eq!(
+        canonicalize_anchor_token("metadata".to_string(), YamlAnchorNameMode::StrictFriendly),
+        "meta"
+    );
+}
+
+#[test]
+fn yaml_anchor_strict_mode_avoids_single_letter_tokens() {
+    let meta = normalize_anchor_component("metadata_name_map", YamlAnchorNameMode::StrictFriendly);
+    assert_eq!(meta, "meta_name");
+    assert!(
+        meta.split('_').all(|token| token.len() != 1),
+        "strict mode should avoid single-letter tokens"
+    );
+    assert_eq!(
+        normalize_anchor_component(
+            "kind_serviceaccount_map",
+            YamlAnchorNameMode::StrictFriendly
+        ),
+        "kind_sa"
+    );
+    assert_eq!(
+        normalize_anchor_component("f_available_map", YamlAnchorNameMode::StrictFriendly),
+        "available"
+    );
+    assert_eq!(
+        normalize_anchor_component("f", YamlAnchorNameMode::StrictFriendly),
+        "field"
+    );
+    assert_eq!(
+        normalize_anchor_component("source_repourl_map", YamlAnchorNameMode::StrictFriendly),
+        "source_repo_url"
+    );
+}
+
+#[test]
+fn split_anchor_tokens_handles_camel_case_and_acronyms() {
+    assert_eq!(split_anchor_tokens("apiVersion"), vec!["api", "version"]);
+    assert_eq!(
+        split_anchor_tokens("managedFieldsTime"),
+        vec!["managed", "fields", "time"]
+    );
+    assert_eq!(split_anchor_tokens("HTTPRoute"), vec!["http", "route"]);
+    assert_eq!(
+        split_anchor_tokens("ipv6Address"),
+        vec!["ipv", "6", "address"]
+    );
+}
+
+#[test]
 fn format_query_error_control_character_matches_jq_text() {
     let err = serde_json::from_str::<serde_json::Value>("\"\u{1}\"")
         .expect_err("must fail on unescaped control char");

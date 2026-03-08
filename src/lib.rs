@@ -9,7 +9,8 @@ pub mod engine;
 
 pub use engine::{
     debug_dump_disasm_function_labels, format_output_json_lines, format_output_yaml_documents,
-    format_output_yaml_documents_native, format_query_error, format_query_error_with_sources,
+    format_output_yaml_documents_native, format_output_yaml_documents_native_with_options,
+    format_output_yaml_documents_with_options, format_query_error, format_query_error_with_sources,
     jsonish_equal, normalize_jsonish_line, parse_doc_mode, parse_jq_input_values,
     parse_jq_input_values_native, parse_jq_input_values_with_format,
     parse_jq_input_values_with_format_native, parse_jq_json_values_only,
@@ -19,7 +20,7 @@ pub use engine::{
     try_run_jq_native_stream_with_paths_options,
     try_run_jq_native_stream_with_paths_options_native, validate_jq_query,
     validate_jq_query_with_paths, DocMode, Error as EngineError, NativeStreamStatus, PreparedJq,
-    QueryOptions, RunOptions as EngineRunOptions,
+    QueryOptions, RunOptions as EngineRunOptions, YamlAnchorNameMode, YamlFormatOptions,
 };
 pub use query::Error as QueryError;
 pub use query::{

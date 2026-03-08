@@ -315,6 +315,58 @@ fn parity_output_format_yaml_contract() {
 }
 
 #[test]
+fn parity_output_format_yaml_with_anchors_contract() {
+    let out = run_zq_stdin(
+        &[
+            ".",
+            "--input-format",
+            "json",
+            "--output-format",
+            "yaml",
+            "--yaml-anchors",
+        ],
+        "{\"a\":{\"x\":[1,2]},\"b\":{\"x\":[1,2]}}\n",
+    );
+    assert_ok(&out, "yaml output with anchors");
+    let text = stdout_text(&out);
+    assert!(
+        text.contains("&a_map"),
+        "yaml output with anchors must define readable anchor"
+    );
+    assert!(
+        text.contains("*a_map"),
+        "yaml output with anchors must define readable alias"
+    );
+}
+
+#[test]
+fn parity_output_format_yaml_with_strict_friendly_anchor_names_contract() {
+    let out = run_zq_stdin(
+        &[
+            ".",
+            "--input-format",
+            "json",
+            "--output-format",
+            "yaml",
+            "--yaml-anchors",
+            "--yaml-anchor-name-mode",
+            "strict-friendly",
+        ],
+        "{\"cluster-metrics-apiversion\":{\"x\":[1,2]},\"other\":{\"x\":[1,2]}}\n",
+    );
+    assert_ok(&out, "yaml output with strict-friendly anchors");
+    let text = stdout_text(&out);
+    assert!(
+        text.contains('&'),
+        "yaml output with strict-friendly anchors must define anchor"
+    );
+    assert!(
+        text.contains('*'),
+        "yaml output with strict-friendly anchors must define alias"
+    );
+}
+
+#[test]
 fn parity_output_format_xml_contract() {
     let out = run_zq_stdin(
         &["--input-format", "json", "--output-format", "xml", "."],

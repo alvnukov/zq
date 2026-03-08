@@ -244,6 +244,20 @@ pub struct Cli {
         help = "Output format: json, yaml, toml, csv, xml"
     )]
     pub output_format: OutputFormat,
+    #[arg(
+        long = "yaml-anchors",
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        help = "Enable YAML anchors/aliases for repeated values in --output-format=yaml"
+    )]
+    pub yaml_anchors: bool,
+    #[arg(
+        long = "yaml-anchor-name-mode",
+        value_enum,
+        default_value_t = YamlAnchorNameMode::Friendly,
+        help = "Anchor naming mode: friendly or strict-friendly (requires --yaml-anchors)"
+    )]
+    pub yaml_anchor_name_mode: YamlAnchorNameMode,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -280,4 +294,10 @@ pub enum DiffOutputFormat {
     Json,
     Jsonl,
     Summary,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum YamlAnchorNameMode {
+    Friendly,
+    StrictFriendly,
 }

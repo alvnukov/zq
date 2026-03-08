@@ -5,7 +5,8 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 BENCH_DIR="${BENCH_DIR:-$ROOT/.tmp/bench}"
 CASES_FILE="${CASES_FILE:-$ROOT/bench/cases.tsv}"
 DATA="${DATA:-$BENCH_DIR/data_x6.ndjson}"
-ZQ_BIN="${ZQ_BIN:-$ROOT/target/release/zq}"
+DEFAULT_ZQ_BIN="$ROOT/target/release/zq"
+ZQ_BIN="${ZQ_BIN:-$DEFAULT_ZQ_BIN}"
 OUT_DIR="${OUT_DIR:-$BENCH_DIR/profiles}"
 BUILD_RELEASE="${BUILD_RELEASE:-1}"
 SAMPLE_SECONDS="${SAMPLE_SECONDS:-2}"
@@ -26,6 +27,16 @@ fi
 if [[ ! -x "$ZQ_BIN" ]]; then
   echo "missing zq binary: $ZQ_BIN" >&2
   exit 1
+fi
+
+if [[ "$ZQ_BIN" == "$DEFAULT_ZQ_BIN" ]]; then
+  expected="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -n 1)"
+  actual="$("$ZQ_BIN" --version 2>/dev/null | awk '{print $NF}' | head -n 1)"
+  if [[ -n "${expected}" && "${actual}" != "${expected}" ]]; then
+    echo "stale zq binary at $ZQ_BIN: got ${actual:-unknown}, expected $expected" >&2
+    echo "hint: rebuild with BUILD_RELEASE=1 (default) or run cargo build --release" >&2
+    exit 1
+  fi
 fi
 
 mkdir -p "$OUT_DIR"

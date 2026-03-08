@@ -6,7 +6,8 @@ BENCH_DIR="${BENCH_DIR:-$ROOT/.tmp/bench}"
 CASES_FILE="${CASES_FILE:-$ROOT/bench/cases.tsv}"
 DATA="${DATA:-$BENCH_DIR/data.ndjson}"
 RESULTS_FILE="${RESULTS_FILE:-$BENCH_DIR/stdin_results.tsv}"
-ZQ_BIN="${ZQ_BIN:-$ROOT/target/release/zq}"
+DEFAULT_ZQ_BIN="$ROOT/target/release/zq"
+ZQ_BIN="${ZQ_BIN:-$DEFAULT_ZQ_BIN}"
 REPEATS="${REPEATS:-9}"
 BUILD_RELEASE="${BUILD_RELEASE:-1}"
 BENCH_MODE="${BENCH_MODE:-full}" # full|zq-only
@@ -53,6 +54,24 @@ fi
 if ! command -v python3 >/dev/null 2>&1 && ! command -v jq >/dev/null 2>&1; then
   echo "missing canonicalizer: need python3 or jq in PATH" >&2
   exit 1
+fi
+
+crate_version() {
+  sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -n 1
+}
+
+binary_version() {
+  "$1" --version 2>/dev/null | awk '{print $NF}' | head -n 1
+}
+
+if [[ "$ZQ_BIN" == "$DEFAULT_ZQ_BIN" ]]; then
+  expected="$(crate_version)"
+  actual="$(binary_version "$ZQ_BIN")"
+  if [[ -n "${expected}" && "${actual}" != "${expected}" ]]; then
+    echo "stale zq binary at $ZQ_BIN: got ${actual:-unknown}, expected $expected" >&2
+    echo "hint: rebuild with BUILD_RELEASE=1 (default) or run cargo build --release" >&2
+    exit 1
+  fi
 fi
 
 hash_stream() {

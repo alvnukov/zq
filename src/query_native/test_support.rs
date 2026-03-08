@@ -7949,8 +7949,8 @@ mod legacy_compat {
                 if std::path::Path::new(legacy_modules).is_dir() {
                     return vec![legacy_modules.to_string()];
                 }
-                // CI fallback: keep module fixtures in-repo for deterministic runs.
-                return vec!["src/native_engine/vm_core/test_modules".to_string()];
+                // CI fallback: deterministic in-repo jq module fixtures.
+                return vec!["tests/fixtures/modules".to_string()];
             }
             Vec::new()
         }

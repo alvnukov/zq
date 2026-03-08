@@ -10,13 +10,15 @@ pub(crate) fn parse_json_value_for_fromjson(
 ) -> Result<serde_json::Value, serde_json::Error> {
     let mut de = serde_json::Deserializer::from_str(text);
     de.disable_recursion_limit();
-    let value = serde_json::Value::deserialize(&mut de)?;
+    // Enable deep jq-compatible JSON parsing without blowing the thread stack.
+    let stacked = serde_stacker::Deserializer::new(&mut de);
+    let value = serde_json::Value::deserialize(stacked)?;
     de.end()?;
     Ok(value)
 }
 
 pub(crate) fn check_fromjson_depth_limit(text: &str) -> Result<(), String> {
-    // jq parser depth guard: keep 9999-level payloads parseable while rejecting deeper JSON.
+    // jq parser depth guard: keep 10000-level payloads parseable while rejecting deeper JSON.
     const MAX_PARSE_DEPTH: usize = 10_000;
 
     let mut depth = 0usize;
@@ -197,6 +199,18 @@ mod tests {
         }
         let err = check_fromjson_depth_limit(&deep).expect_err("must reject");
         assert_eq!(err, "Exceeds depth limit for parsing");
+    }
+
+    #[test]
+    fn check_fromjson_depth_limit_accepts_10000_level_payloads() {
+        let mut deep = String::new();
+        for _ in 0..10_000 {
+            deep.push('[');
+        }
+        for _ in 0..10_000 {
+            deep.push(']');
+        }
+        check_fromjson_depth_limit(&deep).expect("10000 depth must be accepted");
     }
 
     #[test]

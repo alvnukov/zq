@@ -25,10 +25,17 @@ zq completion <SHELL>
 
 ### Input and Parsing
 
+- `--input-format <auto|json|yaml|toml|csv|xml>`: input parser selection (default: `auto`).
+- `--csv-parse-json-cells`: when CSV is used as input, parse JSON literals in cells (objects/arrays/scalars).
 - `--doc-mode <first|all|index>`: YAML document selection mode (default: `first`).
 - `--doc-index <N>`: required with `--doc-mode=index`.
-- `-R, --raw-input`: read raw text lines instead of JSON/YAML.
-- `-s, --slurp`: slurp all inputs into one array (JSON/YAML mode) or one string (raw mode).
+- XML mapping conventions:
+  - attributes map to keys with `@` prefix
+  - element text maps to `#text` when mixed with attributes/children
+  - repeated sibling tags become arrays
+  - XML text is always parsed as string (no implicit bool/number/null coercion)
+- `-R, --raw-input`: read raw text lines instead of structured parsing.
+- `-s, --slurp`: slurp all inputs into one array (structured mode) or one string (raw mode).
 - `-n, --null-input`: run filter with `null` input.
 - `--seq`: parse JSON text sequence (`application/json-seq`) (partial jq compatibility).
 - `--stream`: emit jq-style stream events (partial jq compatibility).
@@ -41,7 +48,7 @@ zq completion <SHELL>
 
 ### Output
 
-- `--output-format <json|yaml>`: output format (default: `json`).
+- `--output-format <json|yaml|toml|csv|xml>`: output format (default: `json`).
 - `-c, --compact-output` / `--compact`: compact JSON output.
 - `--indent <0..7>`: pretty JSON indent size.
 - `-r, --raw-output`: print strings without JSON quoting.
@@ -92,7 +99,7 @@ cat left.json | zq --diff right.yaml
 
 Behavior:
 
-- Parses both sides as JSON-or-YAML.
+- Parses both sides as JSON/YAML/TOML/CSV/XML (auto by content/path or forced with `--input-format`).
 - Reports semantic differences by path.
 - Exit `0` if equal, `1` if different.
 - Supports output formats:
@@ -123,7 +130,7 @@ Restrictions:
 
 ## Flag Compatibility Rules
 
-- `--output-format=yaml` cannot be used with:
+- Non-JSON output formats (`yaml`, `toml`, `csv`, `xml`) cannot be used with:
   - `--raw-output`
   - `--join-output`
   - `--raw-output0`
@@ -143,7 +150,9 @@ Restrictions:
 ## Environment Variables
 
 - `NO_COLOR`: disables automatic color.
-- `JQ_COLORS`: jq-compatible color palette for JSON color output.
+- `JQ_COLORS`: jq-compatible color palette for structured output highlighting (JSON/YAML/TOML).
+- `--output-format=csv` is intentionally emitted without ANSI colors to keep CSV valid.
+- `--output-format=xml` is intentionally emitted without ANSI colors to keep XML valid.
 - `ZQ_COLOR_COMPAT=jq171`: enables legacy jq171 compact color behavior.
 
 ## Hidden Compatibility Flags

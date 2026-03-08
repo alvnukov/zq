@@ -216,6 +216,89 @@ fn parity_jq_query_on_yaml_input_contract() {
 }
 
 #[test]
+fn parity_jq_query_on_xml_input_contract() {
+    let out = run_zq_stdin(
+        &["--input-format", "xml", "-r", ".catalog.book.title"],
+        "<catalog><book><title>Rust</title></book></catalog>",
+    );
+    assert_ok(&out, "jq query over xml input");
+    assert_stdout_trim_eq(&out, "Rust", "jq query over xml input");
+}
+
+#[test]
+fn parity_xml_scalars_stay_strings_contract() {
+    let out = run_zq_stdin(
+        &[
+            "--input-format",
+            "xml",
+            "-c",
+            "[(.root.n|type),(.root.flag|type),(.root.none|type)]",
+        ],
+        "<root><n>10</n><flag>true</flag><none>null</none></root>",
+    );
+    assert_ok(&out, "xml scalars stay strings");
+    assert_stdout_trim_eq(
+        &out,
+        "[\"string\",\"string\",\"string\"]",
+        "xml scalars stay strings",
+    );
+}
+
+#[test]
+fn parity_small_json_transform_cases_contract() {
+    struct Case {
+        id: &'static str,
+        query: &'static str,
+        input_json: &'static str,
+        expected_lines: &'static [&'static str],
+    }
+
+    let cases = [
+        Case {
+            id: "jq_identity",
+            query: ".",
+            input_json: r#"{"a":1,"b":[1,2,3]}"#,
+            expected_lines: &[r#"{"a":1,"b":[1,2,3]}"#],
+        },
+        Case {
+            id: "jq_field",
+            query: ".a",
+            input_json: r#"{"a":1,"b":2}"#,
+            expected_lines: &["1"],
+        },
+        Case {
+            id: "jq_nested_field",
+            query: ".a.b",
+            input_json: r#"{"a":{"b":3}}"#,
+            expected_lines: &["3"],
+        },
+    ];
+
+    for case in cases {
+        let out = run_zq_stdin(&["-c", case.query], &format!("{}\n", case.input_json));
+        assert_ok(&out, case.id);
+        let actual_lines: Vec<String> = stdout_text(&out)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        let expected_lines: Vec<String> = case
+            .expected_lines
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            actual_lines,
+            expected_lines,
+            "{}\nstdout:\n{}\nstderr:\n{}",
+            case.id,
+            stdout_text(&out),
+            stderr_text(&out)
+        );
+    }
+}
+
+#[test]
 fn parity_output_format_yaml_contract() {
     let out = run_zq(&[
         ".global",
@@ -229,6 +312,73 @@ fn parity_output_format_yaml_contract() {
         text.contains("env: dev"),
         "yaml output must contain env key"
     );
+}
+
+#[test]
+fn parity_output_format_xml_contract() {
+    let out = run_zq_stdin(
+        &["--input-format", "json", "--output-format", "xml", "."],
+        "{\"catalog\":{\"book\":{\"title\":\"Rust\"}}}\n",
+    );
+    assert_ok(&out, "xml output");
+    let text = stdout_text(&out);
+    assert!(
+        text.contains("<catalog><book><title>Rust</title></book></catalog>"),
+        "xml output must contain catalog/book/title\nstdout:\n{text}\nstderr:\n{}",
+        stderr_text(&out)
+    );
+}
+
+#[test]
+fn parity_yaml_to_csv_ragged_arrays_contract() {
+    let input = "- id: a\n  vals: [1, 2]\n- id: b\n  vals: [3]\n";
+    let out = run_zq_stdin(
+        &[
+            "--input-format",
+            "yaml",
+            "--output-format",
+            "csv",
+            ".[] | .vals",
+        ],
+        input,
+    );
+    assert_ok(&out, "yaml to csv with ragged arrays");
+    assert_stdout_trim_eq(&out, "1,2\n3,", "yaml to csv with ragged arrays");
+}
+
+#[test]
+fn parity_forced_csv_stdin_single_column_contract() {
+    let out = run_zq_stdin(
+        &["--input-format", "csv", "--output-format", "yaml"],
+        "cases\nx\n",
+    );
+    assert_ok(&out, "forced csv on stdin (single column)");
+    let text = stdout_text(&out);
+    assert!(
+        text.contains("cases: x"),
+        "forced csv on stdin (single column)\nstdout:\n{text}\nstderr:\n{}",
+        stderr_text(&out)
+    );
+}
+
+#[test]
+fn parity_csv_parse_json_cells_roundtrip_contract() {
+    let input = "cases:\n- id: jq_identity\n  query: .\n  input_json: '{\"a\":1}'\n";
+    let csv_out = run_zq_stdin(&["--input-format", "yaml", "--output-format", "csv"], input);
+    assert_ok(&csv_out, "yaml to csv");
+
+    let recovered = run_zq_stdin(
+        &[
+            "--input-format",
+            "csv",
+            "--csv-parse-json-cells",
+            "-r",
+            ".cases[0].id",
+        ],
+        &stdout_text(&csv_out),
+    );
+    assert_ok(&recovered, "csv json-cell roundtrip");
+    assert_stdout_trim_eq(&recovered, "jq_identity", "csv json-cell roundtrip");
 }
 
 #[test]

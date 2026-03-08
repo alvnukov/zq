@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::time::{Duration, Instant};
 
-use crate::cli::{Cli, CliCommand, DiffOutputFormat, OutputFormat};
+use crate::cli::{Cli, CliCommand, DiffOutputFormat, InputFormat, OutputFormat};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -433,20 +433,21 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
     let effective_raw_output = raw_output || force_stderr_text;
     let query = build_query_with_cli_compat(base_query.as_str(), &compat_args)?;
     let input_path = resolve_input_path(&cli, positional_input.as_deref())?;
+    let effective_input_format = resolve_effective_input_format(cli.input_format, &input_path);
     let doc_mode = zq::parse_doc_mode(&cli.doc_mode, cli.doc_index)
         .map_err(|e| Error::Query(e.to_string()))?;
 
-    if matches!(cli.output_format, OutputFormat::Yaml) && raw_output {
+    if !matches!(cli.output_format, OutputFormat::Json) && raw_output {
         return Err(Error::Query(
             "--raw-output is supported only with --output-format=json".to_string(),
         ));
     }
-    if matches!(cli.output_format, OutputFormat::Yaml) && cli.raw_output0 {
+    if !matches!(cli.output_format, OutputFormat::Json) && cli.raw_output0 {
         return Err(Error::Query(
             "--raw-output0 is supported only with --output-format=json".to_string(),
         ));
     }
-    if matches!(cli.output_format, OutputFormat::Yaml) && cli.compact {
+    if !matches!(cli.output_format, OutputFormat::Json) && cli.compact {
         return Err(Error::Query(
             "--compact is supported only with --output-format=json".to_string(),
         ));
@@ -457,11 +458,8 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         ));
     }
 
-    let color_opts = if matches!(cli.output_format, OutputFormat::Json) && !cli.raw_output0 {
-        resolve_json_color_options(&cli)
-    } else {
-        JsonColorOptions::default()
-    };
+    let color_opts = resolve_json_color_options(&cli);
+    let text_color_enabled = color_opts.enabled;
     if color_opts.warn_invalid {
         eprintln!("Failed to set $JQ_COLORS");
     }
@@ -496,6 +494,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
     let input = input_text.as_ref();
 
     let can_native_stream_direct = matches!(cli.output_format, OutputFormat::Json)
+        && matches!(effective_input_format, zq::NativeInputFormat::Auto)
         && !cli.raw_output0
         && !cli.exit_status
         && !cli.raw_input
@@ -572,6 +571,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         || cli.seq
         || cli.stream
         || cli.stream_errors
+        || !matches!(effective_input_format, zq::NativeInputFormat::Auto)
     {
         if (cli.stream || cli.stream_errors) && cli.raw_input {
             return Err(Error::Query(
@@ -602,7 +602,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                 }
             }
         } else {
-            build_custom_input_stream_native(&cli, input, doc_mode)
+            build_custom_input_stream_native(&cli, input, doc_mode, effective_input_format)
                 .map_err(|e| Error::Query(render_engine_error("zq", query.as_str(), input, e)))?
         };
 
@@ -662,7 +662,49 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                 let rendered = zq::format_output_yaml_documents_native(&out_native)
                     .map_err(|e| Error::Query(e.to_string()))?;
                 if !rendered.is_empty() {
-                    println!("{rendered}");
+                    let colored = colorize_structured_output(
+                        OutputFormat::Yaml,
+                        &rendered,
+                        text_color_enabled,
+                        color_opts.jq_colors.as_deref(),
+                    );
+                    println!("{colored}");
+                }
+            }
+            OutputFormat::Toml => {
+                let rendered = render_toml_output_native(&out_native)?;
+                if !rendered.is_empty() {
+                    let colored = colorize_structured_output(
+                        OutputFormat::Toml,
+                        &rendered,
+                        text_color_enabled,
+                        color_opts.jq_colors.as_deref(),
+                    );
+                    print!("{colored}");
+                }
+            }
+            OutputFormat::Csv => {
+                let rendered = render_csv_output_native(&out_native)?;
+                if !rendered.is_empty() {
+                    let colored = colorize_structured_output(
+                        OutputFormat::Csv,
+                        &rendered,
+                        text_color_enabled,
+                        color_opts.jq_colors.as_deref(),
+                    );
+                    print!("{colored}");
+                }
+            }
+            OutputFormat::Xml => {
+                let rendered = render_xml_output_native(&out_native)?;
+                if !rendered.is_empty() {
+                    let colored = colorize_structured_output(
+                        OutputFormat::Xml,
+                        &rendered,
+                        text_color_enabled,
+                        color_opts.jq_colors.as_deref(),
+                    );
+                    print!("{colored}");
                 }
             }
         }
@@ -700,14 +742,28 @@ fn run_diff_mode(cli: &Cli) -> Result<i32, Error> {
         ));
     }
     let (left_path, right_path) = resolve_diff_paths(cli)?;
+    let left_format = resolve_effective_input_format(cli.input_format, &left_path);
+    let right_format = resolve_effective_input_format(cli.input_format, &right_path);
 
     let left_input = read_input(&left_path)?;
     let left_text = left_input.as_str_lossy();
-    let left_docs = parse_diff_docs(left_text.as_ref(), &left_path, "LEFT")?;
+    let left_docs = parse_diff_docs(
+        left_text.as_ref(),
+        &left_path,
+        "LEFT",
+        left_format,
+        cli.csv_parse_json_cells,
+    )?;
 
     let right_input = read_input(&right_path)?;
     let right_text = right_input.as_str_lossy();
-    let right_docs = parse_diff_docs(right_text.as_ref(), &right_path, "RIGHT")?;
+    let right_docs = parse_diff_docs(
+        right_text.as_ref(),
+        &right_path,
+        "RIGHT",
+        right_format,
+        cli.csv_parse_json_cells,
+    )?;
 
     let diffs = collect_semantic_doc_diffs(&left_docs, &right_docs);
     let summary = SemanticDiffSummary::from_diffs(&diffs);
@@ -759,9 +815,20 @@ fn resolve_diff_paths(cli: &Cli) -> Result<(String, String), Error> {
     }
 }
 
-fn parse_diff_docs(input: &str, path: &str, side: &str) -> Result<Vec<zq::NativeValue>, Error> {
-    zq::parse_native_input_values_auto_native(input)
-        .map(|parsed| parsed.values)
+fn parse_diff_docs(
+    input: &str,
+    path: &str,
+    side: &str,
+    format: zq::NativeInputFormat,
+    csv_parse_json_cells: bool,
+) -> Result<Vec<zq::NativeValue>, Error> {
+    zq::parse_native_input_values_with_format_native(input, format)
+        .map(|mut parsed| {
+            if csv_parse_json_cells && matches!(format, zq::NativeInputFormat::Csv) {
+                decode_csv_json_cells_in_place(&mut parsed.values);
+            }
+            parsed.values
+        })
         .map_err(|err| {
             Error::Query(format!(
                 "--diff: cannot parse {side} input `{path}`: {}",
@@ -1115,7 +1182,8 @@ fn build_custom_input_stream(
     input: &str,
     doc_mode: zq::DocMode,
 ) -> Result<Vec<JsonValue>, zq::EngineError> {
-    build_custom_input_stream_native(cli, input, doc_mode).map(|values| {
+    let format = resolve_effective_input_format(cli.input_format, "-");
+    build_custom_input_stream_native(cli, input, doc_mode, format).map(|values| {
         values
             .into_iter()
             .map(zq::NativeValue::into_json)
@@ -1127,6 +1195,7 @@ fn build_custom_input_stream_native(
     cli: &Cli,
     input: &str,
     doc_mode: zq::DocMode,
+    input_format: zq::NativeInputFormat,
 ) -> Result<Vec<zq::NativeValue>, zq::EngineError> {
     if cli.raw_input {
         if cli.slurp {
@@ -1138,7 +1207,39 @@ fn build_custom_input_stream_native(
             .collect());
     }
 
-    zq::parse_jq_input_values_native(input, doc_mode, "jq")
+    let mut parsed =
+        zq::parse_jq_input_values_with_format_native(input, doc_mode, "zq", input_format)?;
+    if cli.csv_parse_json_cells && matches!(input_format, zq::NativeInputFormat::Csv) {
+        decode_csv_json_cells_in_place(&mut parsed);
+    }
+    Ok(parsed)
+}
+
+fn decode_csv_json_cells_in_place(values: &mut [zq::NativeValue]) {
+    for value in values {
+        decode_csv_json_cells_value_in_place(value);
+    }
+}
+
+fn decode_csv_json_cells_value_in_place(value: &mut zq::NativeValue) {
+    match value {
+        zq::NativeValue::String(cell) => {
+            if let Ok(parsed) = serde_json::from_str::<zq::NativeValue>(cell) {
+                *value = parsed;
+            }
+        }
+        zq::NativeValue::Array(items) => {
+            for item in items {
+                decode_csv_json_cells_value_in_place(item);
+            }
+        }
+        zq::NativeValue::Object(fields) => {
+            for field in fields.values_mut() {
+                decode_csv_json_cells_value_in_place(field);
+            }
+        }
+        zq::NativeValue::Null | zq::NativeValue::Bool(_) | zq::NativeValue::Number(_) => {}
+    }
 }
 
 fn parse_json_seq_input_native(input: &str) -> SeqParseResultNative {
@@ -2217,6 +2318,612 @@ fn render_json_output(
     String::from_utf8(out).map_err(|e| Error::Query(format!("encode json: {e}")))
 }
 
+fn render_toml_output_native(values: &[zq::NativeValue]) -> Result<String, Error> {
+    if values.is_empty() {
+        return Ok(String::new());
+    }
+    let mut docs = Vec::with_capacity(values.len());
+    for value in values {
+        let mut toml_value = native_to_toml_value(value)?;
+        if !matches!(toml_value, toml::Value::Table(_)) {
+            let mut wrapped = toml::map::Map::new();
+            wrapped.insert("value".to_string(), toml_value);
+            toml_value = toml::Value::Table(wrapped);
+        }
+        let rendered = toml::to_string_pretty(&toml_value)
+            .map_err(|e| Error::Query(format!("encode toml: {e}")))?;
+        docs.push(rendered);
+    }
+    Ok(docs.join("\n"))
+}
+
+fn native_to_toml_value(value: &zq::NativeValue) -> Result<toml::Value, Error> {
+    match value {
+        zq::NativeValue::Null => Err(Error::Query(
+            "encode toml: null is not supported in TOML output".to_string(),
+        )),
+        zq::NativeValue::Bool(v) => Ok(toml::Value::Boolean(*v)),
+        zq::NativeValue::Number(v) => {
+            if let Some(i) = v.as_i64() {
+                return Ok(toml::Value::Integer(i));
+            }
+            if let Some(u) = v.as_u64() {
+                if let Ok(i) = i64::try_from(u) {
+                    return Ok(toml::Value::Integer(i));
+                }
+            }
+            if let Some(f) = v.as_f64() {
+                return Ok(toml::Value::Float(f));
+            }
+            Err(Error::Query(format!(
+                "encode toml: unsupported number `{v}`"
+            )))
+        }
+        zq::NativeValue::String(v) => Ok(toml::Value::String(v.clone())),
+        zq::NativeValue::Array(values) => {
+            let converted = values
+                .iter()
+                .map(native_to_toml_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(toml::Value::Array(converted))
+        }
+        zq::NativeValue::Object(fields) => {
+            let mut table = toml::map::Map::new();
+            for (key, value) in fields {
+                table.insert(key.clone(), native_to_toml_value(value)?);
+            }
+            Ok(toml::Value::Table(table))
+        }
+    }
+}
+
+fn render_csv_output_native(values: &[zq::NativeValue]) -> Result<String, Error> {
+    let mut out = Vec::new();
+    {
+        let mut writer = csv::WriterBuilder::new().from_writer(&mut out);
+        if values
+            .iter()
+            .all(|value| matches!(value, zq::NativeValue::Object(_)))
+        {
+            let headers = collect_csv_headers(values);
+            writer
+                .write_record(headers.iter())
+                .map_err(|e| Error::Query(format!("encode csv: {e}")))?;
+            for value in values {
+                let zq::NativeValue::Object(obj) = value else {
+                    continue;
+                };
+                let row = headers
+                    .iter()
+                    .map(|header| {
+                        obj.get(header)
+                            .map(native_to_csv_cell)
+                            .transpose()
+                            .map(|cell| cell.unwrap_or_default())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                writer
+                    .write_record(row.iter())
+                    .map_err(|e| Error::Query(format!("encode csv: {e}")))?;
+            }
+        } else {
+            // RFC-style CSV expects a stable column count for all records.
+            let width = values
+                .iter()
+                .map(|value| match value {
+                    zq::NativeValue::Array(items) => items.len(),
+                    _ => 1,
+                })
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            for value in values {
+                let mut row = match value {
+                    zq::NativeValue::Array(items) => items
+                        .iter()
+                        .map(native_to_csv_cell)
+                        .collect::<Result<Vec<_>, _>>()?,
+                    other => {
+                        let cell = native_to_csv_cell(other)?;
+                        vec![cell]
+                    }
+                };
+                if row.len() < width {
+                    row.resize(width, String::new());
+                }
+                writer
+                    .write_record(row.iter())
+                    .map_err(|e| Error::Query(format!("encode csv: {e}")))?;
+            }
+        }
+        writer
+            .flush()
+            .map_err(|e| Error::Query(format!("encode csv: {e}")))?;
+    }
+    String::from_utf8(out).map_err(|e| Error::Query(format!("encode csv: {e}")))
+}
+
+fn collect_csv_headers(values: &[zq::NativeValue]) -> Vec<String> {
+    let mut headers = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for value in values {
+        let zq::NativeValue::Object(obj) = value else {
+            continue;
+        };
+        for key in obj.keys() {
+            if seen.insert(key.clone()) {
+                headers.push(key.clone());
+            }
+        }
+    }
+    headers
+}
+
+fn native_to_csv_cell(value: &zq::NativeValue) -> Result<String, Error> {
+    match value {
+        zq::NativeValue::Null => Ok(String::new()),
+        zq::NativeValue::Bool(v) => Ok(v.to_string()),
+        zq::NativeValue::Number(v) => Ok(v.to_string()),
+        zq::NativeValue::String(v) => Ok(v.clone()),
+        zq::NativeValue::Array(_) | zq::NativeValue::Object(_) => {
+            serde_json::to_string(value).map_err(|e| Error::Query(format!("encode csv: {e}")))
+        }
+    }
+}
+
+fn render_xml_output_native(values: &[zq::NativeValue]) -> Result<String, Error> {
+    if values.is_empty() {
+        return Ok(String::new());
+    }
+    let mut docs = Vec::with_capacity(values.len());
+    for value in values {
+        docs.push(render_xml_doc_native(value)?);
+    }
+    Ok(docs.join("\n"))
+}
+
+fn render_xml_doc_native(value: &zq::NativeValue) -> Result<String, Error> {
+    let mut out = String::new();
+    match value {
+        zq::NativeValue::Object(map) if map.len() == 1 => {
+            let (root, content) = map
+                .iter()
+                .next()
+                .expect("single-key object must have one entry");
+            if root != "#text" && !root.starts_with('@') && is_valid_xml_name(root) {
+                write_xml_field_native(&mut out, root, content)?;
+            } else {
+                write_xml_field_native(&mut out, "root", value)?;
+            }
+        }
+        _ => write_xml_field_native(&mut out, "root", value)?,
+    }
+    Ok(out)
+}
+
+fn write_xml_field_native(
+    out: &mut String,
+    name: &str,
+    value: &zq::NativeValue,
+) -> Result<(), Error> {
+    match value {
+        zq::NativeValue::Array(items) => {
+            for item in items {
+                write_xml_element_native(out, name, item)?;
+            }
+        }
+        _ => write_xml_element_native(out, name, value)?,
+    }
+    Ok(())
+}
+
+fn write_xml_element_native(
+    out: &mut String,
+    name: &str,
+    value: &zq::NativeValue,
+) -> Result<(), Error> {
+    if !is_valid_xml_name(name) {
+        return Err(Error::Query(format!(
+            "encode xml: invalid element name `{name}`"
+        )));
+    }
+
+    match value {
+        zq::NativeValue::Null => {
+            out.push('<');
+            out.push_str(name);
+            out.push_str("/>");
+            Ok(())
+        }
+        zq::NativeValue::Bool(_) | zq::NativeValue::Number(_) | zq::NativeValue::String(_) => {
+            out.push('<');
+            out.push_str(name);
+            out.push('>');
+            out.push_str(&escape_xml_text(&xml_scalar_text(value)?));
+            out.push_str("</");
+            out.push_str(name);
+            out.push('>');
+            Ok(())
+        }
+        zq::NativeValue::Array(items) => {
+            out.push('<');
+            out.push_str(name);
+            out.push('>');
+            for item in items {
+                write_xml_field_native(out, "item", item)?;
+            }
+            out.push_str("</");
+            out.push_str(name);
+            out.push('>');
+            Ok(())
+        }
+        zq::NativeValue::Object(fields) => {
+            out.push('<');
+            out.push_str(name);
+
+            for (key, attr_value) in fields.iter().filter(|(k, _)| k.starts_with('@')) {
+                let attr_name = &key[1..];
+                if attr_name.is_empty() || !is_valid_xml_name(attr_name) {
+                    return Err(Error::Query(format!(
+                        "encode xml: invalid attribute name `{key}`"
+                    )));
+                }
+                out.push(' ');
+                out.push_str(attr_name);
+                out.push_str("=\"");
+                out.push_str(&escape_xml_attribute(&xml_scalar_text(attr_value)?));
+                out.push('"');
+            }
+
+            let children = fields
+                .iter()
+                .filter(|(k, _)| *k != "#text" && !k.starts_with('@'))
+                .collect::<Vec<_>>();
+            let text = fields.get("#text");
+
+            if children.is_empty() && text.is_none() {
+                out.push_str("/>");
+                return Ok(());
+            }
+
+            out.push('>');
+
+            if let Some(text_value) = text {
+                out.push_str(&escape_xml_text(&xml_scalar_text(text_value)?));
+            }
+
+            for (child_name, child_value) in children {
+                write_xml_field_native(out, child_name, child_value)?;
+            }
+
+            out.push_str("</");
+            out.push_str(name);
+            out.push('>');
+            Ok(())
+        }
+    }
+}
+
+fn xml_scalar_text(value: &zq::NativeValue) -> Result<String, Error> {
+    match value {
+        zq::NativeValue::Null => Ok(String::new()),
+        zq::NativeValue::Bool(v) => Ok(v.to_string()),
+        zq::NativeValue::Number(v) => Ok(v.to_string()),
+        zq::NativeValue::String(v) => Ok(v.clone()),
+        zq::NativeValue::Array(_) | zq::NativeValue::Object(_) => Err(Error::Query(
+            "encode xml: scalar value expected".to_string(),
+        )),
+    }
+}
+
+fn is_valid_xml_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().expect("name is not empty");
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+}
+
+fn escape_xml_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn escape_xml_attribute(value: &str) -> String {
+    escape_xml_text(value)
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn colorize_structured_output(
+    format: OutputFormat,
+    rendered: &str,
+    enabled: bool,
+    jq_colors: Option<&str>,
+) -> String {
+    if !enabled {
+        return rendered.to_string();
+    }
+    let palette = JsonColorPalette::from_jq_colors(jq_colors);
+    match format {
+        OutputFormat::Yaml => colorize_key_value_text(rendered, ':', &palette),
+        OutputFormat::Toml => colorize_key_value_text(rendered, '=', &palette),
+        // Keep CSV machine-valid even on TTY: no ANSI in delimiters/fields.
+        OutputFormat::Csv => rendered.to_string(),
+        // Keep XML machine-valid even on TTY: no ANSI in tags/text.
+        OutputFormat::Xml => rendered.to_string(),
+        OutputFormat::Json => rendered.to_string(),
+    }
+}
+
+fn colorize_key_value_text(rendered: &str, separator: char, palette: &JsonColorPalette) -> String {
+    let mut out = String::with_capacity(rendered.len() + rendered.len() / 8);
+    for part in rendered.split_inclusive('\n') {
+        let (line, newline) = if let Some(prefix) = part.strip_suffix('\n') {
+            (prefix, "\n")
+        } else {
+            (part, "")
+        };
+        if line.trim().is_empty() {
+            out.push_str(line);
+            out.push_str(newline);
+            continue;
+        }
+
+        if line.trim_start().starts_with("---") {
+            out.push_str(&palette.obj);
+            out.push_str(line);
+            out.push_str(&palette.reset);
+            out.push_str(newline);
+            continue;
+        }
+
+        if line.trim_start().starts_with('#') {
+            out.push_str(&palette.null);
+            out.push_str(line);
+            out.push_str(&palette.reset);
+            out.push_str(newline);
+            continue;
+        }
+
+        let (body, comment) = split_unquoted_comment(line);
+        let mut body_out = String::new();
+
+        if separator == '=' && looks_like_toml_section_header(body.trim()) {
+            body_out.push_str(&colorize_toml_section_header(body, palette));
+        } else if let Some(idx) = find_unquoted_separator(body, separator) {
+            let (left, right_with_sep) = body.split_at(idx);
+            let mut key = left;
+            let mut prefix = "";
+            if separator == ':' {
+                let trimmed = left.trim_start();
+                if trimmed.starts_with("- ") {
+                    let leading_ws = left.len() - trimmed.len();
+                    prefix = &left[..leading_ws + 2];
+                    key = &left[leading_ws + 2..];
+                }
+            }
+            if !key.trim().is_empty() {
+                body_out.push_str(prefix);
+                body_out.push_str(&palette.key);
+                body_out.push_str(key);
+                body_out.push_str(&palette.reset);
+                let sep_len = separator.len_utf8();
+                body_out.push_str(&palette.obj);
+                body_out.push_str(&right_with_sep[..sep_len]);
+                body_out.push_str(&palette.reset);
+                body_out.push_str(&colorize_value_tokens(&right_with_sep[sep_len..], palette));
+            } else {
+                body_out.push_str(&colorize_value_tokens(body, palette));
+            }
+        } else {
+            body_out.push_str(&colorize_value_tokens(body, palette));
+        }
+
+        out.push_str(&body_out);
+        if let Some(comment) = comment {
+            out.push_str(&palette.null);
+            out.push_str(comment);
+            out.push_str(&palette.reset);
+        }
+        out.push_str(newline);
+    }
+    out
+}
+
+fn colorize_value_tokens(input: &str, palette: &JsonColorPalette) -> String {
+    let mut out = String::with_capacity(input.len() + input.len() / 8);
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '"' || ch == '\'' {
+            let quote = ch;
+            let start = i;
+            i += 1;
+            let mut escaped = false;
+            while i < chars.len() {
+                let c = chars[i];
+                if quote == '"' {
+                    if escaped {
+                        escaped = false;
+                    } else if c == '\\' {
+                        escaped = true;
+                    } else if c == quote {
+                        i += 1;
+                        break;
+                    }
+                } else if c == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            let token = chars[start..i].iter().collect::<String>();
+            out.push_str(&palette.str);
+            out.push_str(&token);
+            out.push_str(&palette.reset);
+            continue;
+        }
+
+        if ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.' | '_') {
+            let start = i;
+            i += 1;
+            while i < chars.len()
+                && (chars[i].is_ascii_alphanumeric() || matches!(chars[i], '+' | '-' | '.' | '_'))
+            {
+                i += 1;
+            }
+            let token = chars[start..i].iter().collect::<String>();
+            let lower = token.to_ascii_lowercase();
+            if lower == "true" {
+                out.push_str(&palette.r#true);
+                out.push_str(&token);
+                out.push_str(&palette.reset);
+            } else if lower == "false" {
+                out.push_str(&palette.r#false);
+                out.push_str(&token);
+                out.push_str(&palette.reset);
+            } else if lower == "null" || lower == "nil" {
+                out.push_str(&palette.null);
+                out.push_str(&token);
+                out.push_str(&palette.reset);
+            } else if looks_like_number_token(&token) {
+                out.push_str(&palette.num);
+                out.push_str(&token);
+                out.push_str(&palette.reset);
+            } else {
+                out.push_str(&token);
+            }
+            continue;
+        }
+
+        if matches!(ch, '[' | ']' | '{' | '}' | '(' | ')' | ',' | ':' | '=') {
+            out.push_str(&palette.obj);
+            out.push(ch);
+            out.push_str(&palette.reset);
+        } else {
+            out.push(ch);
+        }
+        i += 1;
+    }
+    out
+}
+
+fn find_unquoted_separator(line: &str, separator: char) -> Option<usize> {
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut escaped = false;
+    for (idx, ch) in line.char_indices() {
+        if in_double {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_double = true;
+            continue;
+        }
+        if ch == '\'' {
+            in_single = true;
+            continue;
+        }
+        if ch == separator {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn split_unquoted_comment(line: &str) -> (&str, Option<&str>) {
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut escaped = false;
+    for (idx, ch) in line.char_indices() {
+        if in_double {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_double = true;
+            continue;
+        }
+        if ch == '\'' {
+            in_single = true;
+            continue;
+        }
+        if ch == '#' {
+            return (&line[..idx], Some(&line[idx..]));
+        }
+    }
+    (line, None)
+}
+
+fn looks_like_toml_section_header(line: &str) -> bool {
+    line.starts_with('[') && line.ends_with(']') && line.len() >= 2
+}
+
+fn colorize_toml_section_header(line: &str, palette: &JsonColorPalette) -> String {
+    let leading_ws_len = line.len() - line.trim_start().len();
+    let trailing_ws_len = line.len() - line.trim_end().len();
+    let trimmed = line.trim();
+    let prefix = &line[..leading_ws_len];
+    let suffix = &line[line.len() - trailing_ws_len..];
+    let inner = &trimmed[1..trimmed.len() - 1];
+    let mut out = String::with_capacity(line.len() + 32);
+    out.push_str(prefix);
+    out.push_str(&palette.obj);
+    out.push('[');
+    out.push_str(&palette.reset);
+    out.push_str(&palette.key);
+    out.push_str(inner);
+    out.push_str(&palette.reset);
+    out.push_str(&palette.obj);
+    out.push(']');
+    out.push_str(&palette.reset);
+    out.push_str(suffix);
+    out
+}
+
+fn looks_like_number_token(token: &str) -> bool {
+    if token.is_empty() || token == "+" || token == "-" || token == "." {
+        return false;
+    }
+    let canonical = token.replace('_', "");
+    canonical.parse::<i64>().is_ok()
+        || canonical.parse::<u64>().is_ok()
+        || canonical.parse::<f64>().is_ok()
+}
+
 fn write_jq_style_escaped_del<W: Write>(writer: &mut W, bytes: &[u8]) -> io::Result<()> {
     let mut start = 0usize;
     for (idx, byte) in bytes.iter().enumerate() {
@@ -2592,6 +3299,42 @@ fn read_input(path: &str) -> Result<InputData, Error> {
     // Memory-map regular files to avoid a full read+copy before parsing.
     let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
     Ok(InputData::Mapped(mmap))
+}
+
+fn resolve_effective_input_format(cli_format: InputFormat, path: &str) -> zq::NativeInputFormat {
+    if !matches!(cli_format, InputFormat::Auto) {
+        return cli_input_format_to_native(cli_format);
+    }
+    detect_input_format_from_path(path).unwrap_or(zq::NativeInputFormat::Auto)
+}
+
+fn cli_input_format_to_native(format: InputFormat) -> zq::NativeInputFormat {
+    match format {
+        InputFormat::Auto => zq::NativeInputFormat::Auto,
+        InputFormat::Json => zq::NativeInputFormat::Json,
+        InputFormat::Yaml => zq::NativeInputFormat::Yaml,
+        InputFormat::Toml => zq::NativeInputFormat::Toml,
+        InputFormat::Csv => zq::NativeInputFormat::Csv,
+        InputFormat::Xml => zq::NativeInputFormat::Xml,
+    }
+}
+
+fn detect_input_format_from_path(path: &str) -> Option<zq::NativeInputFormat> {
+    if path == "-" {
+        return None;
+    }
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())?
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "json" | "jsonl" | "ndjson" => Some(zq::NativeInputFormat::Json),
+        "yaml" | "yml" => Some(zq::NativeInputFormat::Yaml),
+        "toml" => Some(zq::NativeInputFormat::Toml),
+        "csv" | "tsv" => Some(zq::NativeInputFormat::Csv),
+        "xml" => Some(zq::NativeInputFormat::Xml),
+        _ => None,
+    }
 }
 
 fn resolve_input_path(cli: &Cli, positional_input: Option<&str>) -> Result<String, Error> {

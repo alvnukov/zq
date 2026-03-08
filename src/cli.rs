@@ -14,7 +14,7 @@ jq compatibility options accepted by zq:
 #[derive(Parser, Debug)]
 #[command(
     name = "zq",
-    about = "zq runs jq queries on JSON or YAML input",
+    about = "zq runs jq queries on structured input (JSON/YAML/TOML/CSV/XML)",
     after_help = JQ_COMPAT_HELP,
     version,
     args_override_self = true
@@ -30,7 +30,7 @@ pub struct Cli {
     pub query: Option<String>,
     #[arg(
         value_name = "FILE",
-        help = "Input file path. If omitted, stdin is used ('-'). Supports JSON and YAML."
+        help = "Input file path. If omitted, stdin is used ('-')."
     )]
     pub input_file: Option<String>,
     #[arg(
@@ -50,6 +50,20 @@ pub struct Cli {
         help = "Zero-based document index when --doc-mode=index"
     )]
     pub doc_index: Option<usize>,
+    #[arg(
+        long = "input-format",
+        value_enum,
+        default_value_t = InputFormat::Auto,
+        help = "Input format: auto, json, yaml, toml, csv, xml"
+    )]
+    pub input_format: InputFormat,
+    #[arg(
+        long = "csv-parse-json-cells",
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        help = "When reading CSV, parse JSON literals in cells (arrays/objects/scalars)"
+    )]
+    pub csv_parse_json_cells: bool,
     #[arg(
         short = 'L',
         long = "library-path",
@@ -227,7 +241,7 @@ pub struct Cli {
         long = "output-format",
         value_enum,
         default_value_t = OutputFormat::Json,
-        help = "Output format: json (jq-like output) or yaml"
+        help = "Output format: json, yaml, toml, csv, xml"
     )]
     pub output_format: OutputFormat,
 }
@@ -245,6 +259,19 @@ pub enum CliCommand {
 pub enum OutputFormat {
     Json,
     Yaml,
+    Toml,
+    Csv,
+    Xml,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum InputFormat {
+    Auto,
+    Json,
+    Yaml,
+    Toml,
+    Csv,
+    Xml,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

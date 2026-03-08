@@ -222,9 +222,18 @@ pub fn parse_jq_input_values(
     doc_mode: DocMode,
     tool: &'static str,
 ) -> Result<Vec<JsonValue>, Error> {
-    Ok(native_values_to_json(parse_jq_input_values_native(
-        input, doc_mode, tool,
-    )?))
+    parse_jq_input_values_with_format(input, doc_mode, tool, crate::query::InputFormat::Auto)
+}
+
+pub fn parse_jq_input_values_with_format(
+    input: &str,
+    doc_mode: DocMode,
+    tool: &'static str,
+    input_format: crate::query::InputFormat,
+) -> Result<Vec<JsonValue>, Error> {
+    Ok(native_values_to_json(
+        parse_jq_input_values_with_format_native(input, doc_mode, tool, input_format)?,
+    ))
 }
 
 fn json_values_to_native(values: Vec<JsonValue>) -> Vec<ZqValue> {
@@ -244,7 +253,16 @@ pub fn parse_jq_input_values_native(
     doc_mode: DocMode,
     tool: &'static str,
 ) -> Result<Vec<ZqValue>, Error> {
-    let parsed = crate::query::parse_input_values_auto_native(input)?;
+    parse_jq_input_values_with_format_native(input, doc_mode, tool, crate::query::InputFormat::Auto)
+}
+
+pub fn parse_jq_input_values_with_format_native(
+    input: &str,
+    doc_mode: DocMode,
+    tool: &'static str,
+    input_format: crate::query::InputFormat,
+) -> Result<Vec<ZqValue>, Error> {
+    let parsed = crate::query::parse_input_values_with_format_native(input, input_format)?;
     match parsed.kind {
         crate::query::InputKind::JsonStream => Ok(parsed.values),
         crate::query::InputKind::YamlDocs => select_docs_native(parsed.values, doc_mode, tool),

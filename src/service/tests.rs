@@ -1340,6 +1340,138 @@ fn custom_input_and_json_color_options_contract() {
 }
 
 #[test]
+fn custom_input_format_contract() {
+    let toml_cli = parse_cli_for_test(&["--input-format", "toml", "."]);
+    let toml =
+        build_custom_input_stream(&toml_cli, "a = 1\n", zq::DocMode::First).expect("toml parse");
+    assert_eq!(toml, vec![serde_json::json!({"a": 1})]);
+
+    let csv_cli = parse_cli_for_test(&["--input-format", "csv", "."]);
+    let csv =
+        build_custom_input_stream(&csv_cli, "k,v\nx,1\n", zq::DocMode::First).expect("csv parse");
+    assert_eq!(csv, vec![serde_json::json!({"k": "x", "v": "1"})]);
+
+    let csv_json_cells_cli =
+        parse_cli_for_test(&["--input-format", "csv", "--csv-parse-json-cells", "."]);
+    let csv_json_cells = build_custom_input_stream(
+        &csv_json_cells_cli,
+        "cases\n\"[{\"\"id\"\":\"\"jq_identity\"\"}]\"\n",
+        zq::DocMode::First,
+    )
+    .expect("csv json-cells parse");
+    assert_eq!(
+        csv_json_cells,
+        vec![serde_json::json!({"cases": [{"id": "jq_identity"}]})]
+    );
+
+    let xml_cli = parse_cli_for_test(&["--input-format", "xml", ".catalog.book.title"]);
+    let xml = build_custom_input_stream(
+        &xml_cli,
+        "<catalog><book><title>Rust</title></book></catalog>",
+        zq::DocMode::First,
+    )
+    .expect("xml parse");
+    assert_eq!(
+        xml,
+        vec![serde_json::json!({"catalog":{"book":{"title":"Rust"}}})]
+    );
+}
+
+#[test]
+fn input_format_resolution_contract() {
+    assert_eq!(
+        resolve_effective_input_format(InputFormat::Auto, "a.yaml"),
+        zq::NativeInputFormat::Yaml
+    );
+    assert_eq!(
+        resolve_effective_input_format(InputFormat::Auto, "a.toml"),
+        zq::NativeInputFormat::Toml
+    );
+    assert_eq!(
+        resolve_effective_input_format(InputFormat::Auto, "a.csv"),
+        zq::NativeInputFormat::Csv
+    );
+    assert_eq!(
+        resolve_effective_input_format(InputFormat::Auto, "a.xml"),
+        zq::NativeInputFormat::Xml
+    );
+    assert_eq!(
+        resolve_effective_input_format(InputFormat::Auto, "-"),
+        zq::NativeInputFormat::Auto
+    );
+    assert_eq!(
+        resolve_effective_input_format(InputFormat::Json, "a.csv"),
+        zq::NativeInputFormat::Json
+    );
+}
+
+#[test]
+fn extra_output_formats_contract() {
+    let toml = render_toml_output_native(&[zq::NativeValue::from_json(serde_json::json!({
+        "svc": "api",
+        "port": 8080
+    }))])
+    .expect("toml render");
+    assert!(toml.contains("svc = \"api\""));
+    assert!(toml.contains("port = 8080"));
+
+    let csv = render_csv_output_native(&[
+        zq::NativeValue::from_json(serde_json::json!({"a": "x", "b": "1"})),
+        zq::NativeValue::from_json(serde_json::json!({"a": "y", "b": "2"})),
+    ])
+    .expect("csv render");
+    assert_eq!(csv, "a,b\nx,1\ny,2\n");
+
+    let ragged_arrays = render_csv_output_native(&[
+        zq::NativeValue::from_json(serde_json::json!([1, 2])),
+        zq::NativeValue::from_json(serde_json::json!([3])),
+    ])
+    .expect("csv render ragged");
+    assert_eq!(ragged_arrays, "1,2\n3,\n");
+
+    let xml = render_xml_output_native(&[zq::NativeValue::from_json(serde_json::json!({
+        "catalog": {"book": {"title": "Rust", "price": 10}}
+    }))])
+    .expect("xml render");
+    assert_eq!(
+        xml,
+        "<catalog><book><title>Rust</title><price>10</price></book></catalog>"
+    );
+}
+
+#[test]
+fn structured_color_output_contract() {
+    let yaml_colored =
+        colorize_structured_output(OutputFormat::Yaml, "name: \"svc\" # note\n", true, None);
+    assert!(
+        yaml_colored.contains("\u{1b}[1;34mname"),
+        "yaml:\n{yaml_colored}"
+    );
+    assert!(
+        yaml_colored.contains("\u{1b}[0;32m\"svc\""),
+        "yaml:\n{yaml_colored}"
+    );
+    assert!(
+        yaml_colored.contains("\u{1b}[0;90m# note"),
+        "yaml:\n{yaml_colored}"
+    );
+
+    let toml_colored =
+        colorize_structured_output(OutputFormat::Toml, "[svc.api]\nport = 8080\n", true, None);
+    assert!(
+        toml_colored.contains("\u{1b}[1;34msvc.api"),
+        "toml:\n{toml_colored}"
+    );
+
+    let csv_colored = colorize_structured_output(OutputFormat::Csv, "a,b\nx,2\n", true, None);
+    assert_eq!(csv_colored, "a,b\nx,2\n");
+
+    let xml_colored =
+        colorize_structured_output(OutputFormat::Xml, "<root><a>1</a></root>\n", true, None);
+    assert_eq!(xml_colored, "<root><a>1</a></root>\n");
+}
+
+#[test]
 fn json_color_defaults_and_pretty_output_contract() {
     let default_cli = parse_cli_for_test(&["."]);
     let default_opts = resolve_json_color_options(&default_cli);

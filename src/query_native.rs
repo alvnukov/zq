@@ -35,6 +35,16 @@ pub enum InputKind {
     YamlDocs,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputFormat {
+    Auto,
+    Json,
+    Yaml,
+    Toml,
+    Csv,
+    Xml,
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedInput {
     pub kind: InputKind,
@@ -243,7 +253,14 @@ pub fn parse_input_docs_prefer_json_native(input: &str) -> Result<Vec<ZqValue>, 
 }
 
 pub fn parse_input_values_auto(input: &str) -> Result<ParsedInput, Error> {
-    let parsed = parse_input_values_auto_native(input)?;
+    parse_input_values_with_format(input, InputFormat::Auto)
+}
+
+pub fn parse_input_values_with_format(
+    input: &str,
+    format: InputFormat,
+) -> Result<ParsedInput, Error> {
+    let parsed = parse_input_values_with_format_native(input, format)?;
     Ok(ParsedInput {
         kind: parsed.kind,
         values: native_values_to_json(parsed.values),
@@ -251,36 +268,41 @@ pub fn parse_input_values_auto(input: &str) -> Result<ParsedInput, Error> {
 }
 
 pub fn parse_input_values_auto_native(input: &str) -> Result<ParsedNativeInput, Error> {
-    match parse_json_value_stream_strict_native(input) {
-        Ok(values) => Ok(ParsedNativeInput {
+    parse_input_values_with_format_native(input, InputFormat::Auto)
+}
+
+pub fn parse_input_values_with_format_native(
+    input: &str,
+    format: InputFormat,
+) -> Result<ParsedNativeInput, Error> {
+    match format {
+        InputFormat::Auto => parse_input_values_auto_native_impl(input),
+        InputFormat::Json => parse_json_value_stream_native(input)
+            .map(|values| ParsedNativeInput {
+                kind: InputKind::JsonStream,
+                values,
+            })
+            .map_err(Error::Json),
+        InputFormat::Yaml => {
+            parse_yaml_native_docs_with_merge(input).map(|values| ParsedNativeInput {
+                kind: InputKind::YamlDocs,
+                values,
+            })
+        }
+        InputFormat::Toml => parse_toml_native_doc(input).map(|value| ParsedNativeInput {
+            kind: InputKind::JsonStream,
+            values: vec![value],
+        }),
+        // Forced CSV must accept valid one-column CSV as well; strict delimiter
+        // probing is reserved for auto-detection to avoid false positives.
+        InputFormat::Csv => parse_csv_native_rows(input, false).map(|values| ParsedNativeInput {
             kind: InputKind::JsonStream,
             values,
         }),
-        Err(strict_json_err) => match parse_yaml_native_docs_with_merge(input) {
-            Ok(values) => {
-                if yaml_native_docs_compatible_with_json_preference(&values) {
-                    return Ok(ParsedNativeInput {
-                        kind: InputKind::YamlDocs,
-                        values,
-                    });
-                }
-                parse_json_value_stream_from_strict_failure(input, strict_json_err)
-                    .map(|values| ParsedNativeInput {
-                        kind: InputKind::JsonStream,
-                        values,
-                    })
-                    .map_err(Error::Json)
-            }
-            Err(Error::Yaml(_)) | Err(Error::Unsupported(_)) => {
-                parse_json_value_stream_from_strict_failure(input, strict_json_err)
-                    .map(|values| ParsedNativeInput {
-                        kind: InputKind::JsonStream,
-                        values,
-                    })
-                    .map_err(Error::Json)
-            }
-            Err(e) => Err(e),
-        },
+        InputFormat::Xml => parse_xml_native_doc(input).map(|value| ParsedNativeInput {
+            kind: InputKind::JsonStream,
+            values: vec![value],
+        }),
     }
 }
 
@@ -342,6 +364,267 @@ fn parse_yaml_native_docs_with_merge(input: &str) -> Result<Vec<ZqValue>, Error>
     docs.into_iter()
         .map(|value| ZqValue::try_from_yaml(value).map_err(yaml_to_native_error))
         .collect()
+}
+
+fn parse_input_values_auto_native_impl(input: &str) -> Result<ParsedNativeInput, Error> {
+    match parse_json_value_stream_strict_native(input) {
+        Ok(values) => Ok(ParsedNativeInput {
+            kind: InputKind::JsonStream,
+            values,
+        }),
+        Err(strict_json_err) => {
+            match parse_yaml_native_docs_with_merge(input) {
+                Ok(values) => {
+                    if yaml_native_docs_compatible_with_json_preference(&values) {
+                        return Ok(ParsedNativeInput {
+                            kind: InputKind::YamlDocs,
+                            values,
+                        });
+                    }
+                }
+                Err(Error::Yaml(_)) | Err(Error::Unsupported(_)) => {}
+                Err(e) => return Err(e),
+            }
+
+            match parse_json_value_stream_from_strict_failure(input, strict_json_err) {
+                Ok(values) => Ok(ParsedNativeInput {
+                    kind: InputKind::JsonStream,
+                    values,
+                }),
+                Err(json_err) => {
+                    if let Ok(value) = parse_toml_native_doc(input) {
+                        return Ok(ParsedNativeInput {
+                            kind: InputKind::JsonStream,
+                            values: vec![value],
+                        });
+                    }
+                    let xml_result = if looks_like_xml_input(input) {
+                        Some(parse_xml_native_doc(input))
+                    } else {
+                        None
+                    };
+                    if let Some(Ok(value)) = xml_result.as_ref() {
+                        return Ok(ParsedNativeInput {
+                            kind: InputKind::JsonStream,
+                            values: vec![value.clone()],
+                        });
+                    }
+                    if let Some(values) = parse_csv_native_rows_auto(input) {
+                        return Ok(ParsedNativeInput {
+                            kind: InputKind::JsonStream,
+                            values,
+                        });
+                    }
+                    if let Some(Err(xml_err)) = xml_result {
+                        return Err(xml_err);
+                    }
+                    Err(Error::Json(json_err))
+                }
+            }
+        }
+    }
+}
+
+fn looks_like_xml_input(input: &str) -> bool {
+    input.trim_start().starts_with('<')
+}
+
+fn parse_toml_native_doc(input: &str) -> Result<ZqValue, Error> {
+    let value: toml::Value =
+        toml::from_str(input).map_err(|e| Error::Runtime(format!("toml: {e}")))?;
+    let json_value =
+        serde_json::to_value(value).map_err(|e| Error::Runtime(format!("toml: {e}")))?;
+    Ok(ZqValue::from_json(json_value))
+}
+
+fn parse_xml_native_doc(input: &str) -> Result<ZqValue, Error> {
+    let document =
+        roxmltree::Document::parse(input).map_err(|e| Error::Runtime(format!("xml: {e}")))?;
+    let root = document.root_element();
+    let mut out = serde_json::Map::new();
+    out.insert(
+        root.tag_name().name().to_string(),
+        xml_element_to_json_value(root),
+    );
+    Ok(ZqValue::from_json(JsonValue::Object(out)))
+}
+
+fn xml_element_to_json_value(node: roxmltree::Node<'_, '_>) -> JsonValue {
+    let mut object = serde_json::Map::new();
+
+    for attr in node.attributes() {
+        object.insert(
+            format!("@{}", attr.name()),
+            JsonValue::String(attr.value().to_string()),
+        );
+    }
+
+    for child in node.children().filter(|child| child.is_element()) {
+        let key = child.tag_name().name().to_string();
+        let child_value = xml_element_to_json_value(child);
+        if let Some(existing) = object.get_mut(&key) {
+            if let JsonValue::Array(items) = existing {
+                items.push(child_value);
+            } else {
+                let previous = std::mem::replace(existing, JsonValue::Null);
+                *existing = JsonValue::Array(vec![previous, child_value]);
+            }
+        } else {
+            object.insert(key, child_value);
+        }
+    }
+
+    if let Some(text) = collect_xml_text_content(node) {
+        if object.is_empty() {
+            return JsonValue::String(text);
+        }
+        object.insert("#text".to_string(), JsonValue::String(text));
+    }
+
+    if object.is_empty() {
+        JsonValue::String(String::new())
+    } else {
+        JsonValue::Object(object)
+    }
+}
+
+fn collect_xml_text_content(node: roxmltree::Node<'_, '_>) -> Option<String> {
+    let parts = node
+        .children()
+        .filter(|child| child.is_text())
+        .filter_map(|child| child.text())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+fn parse_csv_native_rows(
+    input: &str,
+    require_delimited_shape: bool,
+) -> Result<Vec<ZqValue>, Error> {
+    let delimiter = if require_delimited_shape {
+        detect_csv_delimiter(input, true)
+            .ok_or_else(|| Error::Runtime("csv: cannot detect delimiter".to_string()))?
+    } else {
+        detect_csv_delimiter(input, false).unwrap_or(b',')
+    };
+    parse_csv_native_rows_with_delimiter(input, delimiter)
+}
+
+fn parse_csv_native_rows_auto(input: &str) -> Option<Vec<ZqValue>> {
+    parse_csv_native_rows(input, true).ok()
+}
+
+fn parse_csv_native_rows_with_delimiter(input: &str, delimiter: u8) -> Result<Vec<ZqValue>, Error> {
+    let mut probe = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .delimiter(delimiter)
+        .from_reader(input.as_bytes());
+    let mut sample = Vec::with_capacity(2);
+    for next in probe.records().take(2) {
+        sample.push(next.map_err(|e| Error::Runtime(format!("csv: {e}")))?);
+    }
+    let has_headers = csv_rows_look_like_header(&sample);
+
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(has_headers)
+        .delimiter(delimiter)
+        .from_reader(input.as_bytes());
+    let headers = if has_headers {
+        Some(
+            reader
+                .headers()
+                .map_err(|e| Error::Runtime(format!("csv: {e}")))?
+                .clone(),
+        )
+    } else {
+        None
+    };
+
+    let mut out = Vec::new();
+    for next in reader.records() {
+        let record = next.map_err(|e| Error::Runtime(format!("csv: {e}")))?;
+        if let Some(headers) = headers.as_ref() {
+            let mut obj = serde_json::Map::with_capacity(headers.len());
+            for (idx, key) in headers.iter().enumerate() {
+                let value = record.get(idx).unwrap_or_default();
+                obj.insert(key.to_string(), JsonValue::String(value.to_string()));
+            }
+            out.push(ZqValue::from_json(JsonValue::Object(obj)));
+        } else {
+            let arr = record
+                .iter()
+                .map(|value| JsonValue::String(value.to_string()))
+                .collect::<Vec<_>>();
+            out.push(ZqValue::from_json(JsonValue::Array(arr)));
+        }
+    }
+    Ok(out)
+}
+
+fn csv_rows_look_like_header(rows: &[csv::StringRecord]) -> bool {
+    if rows.len() < 2 {
+        return false;
+    }
+    let header = &rows[0];
+    let first_data = &rows[1];
+    if header.is_empty() || header.len() != first_data.len() {
+        return false;
+    }
+    let mut seen = std::collections::HashSet::with_capacity(header.len());
+    for key in header.iter() {
+        let trimmed = key.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            return false;
+        }
+    }
+    header.iter().zip(first_data.iter()).any(|(h, v)| h != v)
+}
+
+fn detect_csv_delimiter(input: &str, require_multiple_lines: bool) -> Option<u8> {
+    let lines = input
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(8)
+        .collect::<Vec<_>>();
+    if lines.is_empty() || (require_multiple_lines && lines.len() < 2) {
+        return None;
+    }
+
+    let candidates = [b',', b';', b'\t'];
+    let mut best: Option<(u8, usize)> = None;
+    for delimiter in candidates {
+        let split_count = |line: &str| line.split(delimiter as char).count();
+        let counts = lines
+            .iter()
+            .map(|line| split_count(line))
+            .collect::<Vec<_>>();
+        let max_fields = counts.iter().copied().max().unwrap_or(1);
+        if max_fields < 2 {
+            continue;
+        }
+        let matching_lines = counts.iter().filter(|&&count| count == max_fields).count();
+        if require_multiple_lines && matching_lines < 2 {
+            continue;
+        }
+        if !require_multiple_lines && matching_lines < 1 {
+            continue;
+        }
+        let score = max_fields * matching_lines;
+        if best
+            .map(|(_, best_score)| score > best_score)
+            .unwrap_or(true)
+        {
+            best = Some((delimiter, score));
+        }
+    }
+    best.map(|(delimiter, _)| delimiter)
 }
 
 fn yaml_to_native_error(err: NativeValueError) -> Error {

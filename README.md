@@ -10,8 +10,9 @@
 
 ## Current Capabilities
 
-- Runs jq filters on JSON and YAML input.
-- Supports JSON and YAML output (`--output-format json|yaml`).
+- Runs jq filters on JSON, YAML, TOML, CSV, and XML input.
+- Supports JSON, YAML, TOML, CSV, and XML output (`--output-format json|yaml|toml|csv|xml`).
+- Supports explicit input selection (`--input-format auto|json|yaml|toml|csv|xml`).
 - Supports jq-style `.test` execution (`--run-tests`).
 - Supports semantic diff mode (`--diff`) with `diff|json|jsonl|summary` formats.
 - Supports shell completion generation (`zq completion <shell>`).
@@ -58,6 +59,15 @@ zq '.apps[] | .name' values.yaml
 # query JSON
 zq '.apps[] | .name' values.json
 
+# query TOML
+zq '.service.port' config.toml
+
+# query CSV
+zq '.name' users.csv
+
+# query XML
+zq '.catalog.book[0].title' books.xml
+
 # stdin + raw strings
 cat values.yaml | zq '.global.env' -r
 
@@ -84,8 +94,15 @@ Default mode: `zq [OPTIONS] [FILTER] [FILE]`
 
 - `[FILTER]` defaults to `.` when omitted.
 - `[FILE]` defaults to stdin (`-`) when omitted.
+- `--input-format auto|json|yaml|toml|csv|xml` controls input parser selection.
+- `--csv-parse-json-cells` makes CSV input parser decode JSON literals inside cells.
 - `--doc-mode first|all|index` controls YAML document selection.
 - `--doc-index` is required when `--doc-mode=index`.
+- XML mapping conventions:
+  - attributes map to keys with `@` prefix (for example `@id`)
+  - element text maps to `#text` when mixed with attributes/children
+  - repeated sibling tags become arrays
+  - XML text is always parsed as string (no implicit bool/number/null coercion)
 
 ### Diff Mode
 
@@ -108,6 +125,7 @@ Diff behavior:
 
 - Exit `0` when inputs are semantically equal.
 - Exit `1` when differences are found.
+- Parses JSON/YAML/TOML/CSV/XML (auto or forced by `--input-format`).
 - `diff` format is human-readable and colorized on TTY.
 - `-C` forces color, `-M` disables color.
 
@@ -155,15 +173,17 @@ zq completion powershell | Out-String | Invoke-Expression
 
 ## Output and Color Notes
 
-- `--output-format yaml` is incompatible with `--raw-output`, `--join-output`, `--raw-output0`, and `--compact-output`.
+- Non-JSON output formats (`yaml`, `toml`, `csv`, `xml`) are incompatible with `--raw-output`, `--join-output`, `--raw-output0`, and `--compact-output`.
 - `--raw-output0` is incompatible with `--join-output`.
 - `--stream` / `--stream-errors` are incompatible with `--raw-input`.
-- JSON color output honors:
+- Structured color output (JSON/YAML/TOML on TTY) honors:
   - `-C` force color
   - `-M` disable color
   - `NO_COLOR` (disables auto-color)
-  - `JQ_COLORS` palette (invalid value prints warning)
-  - `ZQ_COLOR_COMPAT=jq171` for legacy compact color behavior
+- `JQ_COLORS` palette (shared with JSON palette; invalid value prints warning)
+- `ZQ_COLOR_COMPAT=jq171` for legacy compact color behavior
+- `--output-format csv` is kept plain (no ANSI colors) to preserve valid CSV.
+- `--output-format xml` is kept plain (no ANSI colors) to preserve valid XML.
 
 ## Full CLI Reference
 
@@ -230,6 +250,8 @@ Selected public API:
 - `zq::QueryOptions`
 - `zq::DocMode`
 - `zq::parse_doc_mode`
+- `zq::parse_native_input_values_with_format`
+- `zq::NativeInputFormat`
 - `zq::format_output_json_lines`
 - `zq::format_output_yaml_documents_native`
 - `zq::format_query_error`

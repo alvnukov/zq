@@ -520,11 +520,7 @@ fn execute_slice_parallel_inputs(
         if chunk.is_empty() {
             break;
         }
-        let rx = pool.submit(
-            program.clone(),
-            chunk,
-            RunOptions { null_input: false },
-        )?;
+        let rx = pool.submit(program.clone(), chunk, RunOptions { null_input: false })?;
         results.push(rx);
     }
 

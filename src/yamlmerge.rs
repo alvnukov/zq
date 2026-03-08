@@ -1,12 +1,6 @@
-use crate::c_compat::yaml as c_yaml;
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 use std::collections::HashSet;
-use unsafe_libyaml::{
-    yaml_scalar_style_t, YAML_ALIAS_EVENT, YAML_DOCUMENT_END_EVENT, YAML_DOCUMENT_START_EVENT,
-    YAML_MAPPING_END_EVENT, YAML_MAPPING_START_EVENT, YAML_PLAIN_SCALAR_STYLE, YAML_SCALAR_EVENT,
-    YAML_SEQUENCE_END_EVENT, YAML_SEQUENCE_START_EVENT, YAML_STREAM_END_EVENT,
-};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum PathSegment {
@@ -20,18 +14,6 @@ type Path = Vec<PathSegment>;
 struct MergeStyleHints {
     plain_merge_paths: HashSet<Path>,
     nonplain_merge_paths: HashSet<Path>,
-}
-
-enum Frame {
-    Mapping {
-        path: Path,
-        expecting_key: bool,
-        current_key: Option<String>,
-    },
-    Sequence {
-        path: Path,
-        next_index: usize,
-    },
 }
 
 pub fn normalize_value(v: Value) -> Value {
@@ -147,151 +129,112 @@ fn merge_mapping_into(target: &mut Mapping, source: Mapping) {
 }
 
 fn collect_merge_style_hints(input: &str) -> Result<Vec<MergeStyleHints>, String> {
-    let mut parser = c_yaml::Parser::from_str(input)?;
-    let mut all_hints: Vec<MergeStyleHints> = Vec::new();
-    let mut current_doc: Option<usize> = None;
-    let mut stack: Vec<Frame> = Vec::new();
+    let mut all_hints = Vec::new();
+    let mut current = MergeStyleHints::default();
+    let mut key_stack: Vec<(usize, String)> = Vec::new();
+    let mut saw_content = false;
 
-    loop {
-        let event = parser.parse_event()?;
-        let t = event.event_type();
-
-        match t {
-            YAML_DOCUMENT_START_EVENT => {
-                all_hints.push(MergeStyleHints::default());
-                current_doc = Some(all_hints.len() - 1);
-                stack.clear();
-            }
-            YAML_DOCUMENT_END_EVENT => {
-                stack.clear();
-                current_doc = None;
-            }
-            YAML_MAPPING_START_EVENT => {
-                let child_path = begin_container(&mut stack)?;
-                stack.push(Frame::Mapping {
-                    path: child_path,
-                    expecting_key: true,
-                    current_key: None,
-                });
-            }
-            YAML_MAPPING_END_EVENT => {
-                stack.pop();
-            }
-            YAML_SEQUENCE_START_EVENT => {
-                let child_path = begin_container(&mut stack)?;
-                stack.push(Frame::Sequence {
-                    path: child_path,
-                    next_index: 0,
-                });
-            }
-            YAML_SEQUENCE_END_EVENT => {
-                stack.pop();
-            }
-            YAML_SCALAR_EVENT => {
-                if let Some(Frame::Mapping {
-                    path,
-                    expecting_key,
-                    current_key,
-                }) = stack.last_mut()
-                {
-                    if *expecting_key {
-                        let k = event.scalar_string();
-                        if k == "<<" {
-                            let style: yaml_scalar_style_t = event.scalar_style();
-                            if let Some(doc_idx) = current_doc {
-                                if style == YAML_PLAIN_SCALAR_STYLE {
-                                    all_hints[doc_idx].plain_merge_paths.insert(path.clone());
-                                } else {
-                                    all_hints[doc_idx].nonplain_merge_paths.insert(path.clone());
-                                }
-                            }
-                        }
-                        *current_key = Some(k);
-                        *expecting_key = false;
-                        continue;
-                    }
-                }
-                consume_scalar_or_alias_value(&mut stack);
-            }
-            YAML_ALIAS_EVENT => {
-                if let Some(Frame::Mapping {
-                    expecting_key,
-                    current_key,
-                    ..
-                }) = stack.last_mut()
-                {
-                    if *expecting_key {
-                        *expecting_key = false;
-                        *current_key = None;
-                        continue;
-                    }
-                }
-                consume_scalar_or_alias_value(&mut stack);
-            }
-            _ => {}
+    for raw_line in input.lines() {
+        let line = raw_line.trim_end();
+        let mut trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
         }
 
-        if t == YAML_STREAM_END_EVENT {
-            break;
+        if trimmed == "---" {
+            if saw_content {
+                all_hints.push(std::mem::take(&mut current));
+            }
+            key_stack.clear();
+            saw_content = false;
+            continue;
         }
+        if trimmed == "..." {
+            if saw_content {
+                all_hints.push(std::mem::take(&mut current));
+            }
+            key_stack.clear();
+            saw_content = false;
+            continue;
+        }
+        saw_content = true;
+
+        let mut indent = line.len() - trimmed.len();
+        while let Some(rest) = trimmed.strip_prefix("- ") {
+            trimmed = rest.trim_start();
+            indent += 2;
+        }
+
+        while key_stack.last().is_some_and(|(level, _)| *level >= indent) {
+            key_stack.pop();
+        }
+
+        let Some(key_token) = extract_mapping_key_token(trimmed) else {
+            continue;
+        };
+        let path: Path = key_stack
+            .iter()
+            .map(|(_, key)| PathSegment::Key(key.clone()))
+            .collect();
+        if key_token == "<<" {
+            current.plain_merge_paths.insert(path);
+        } else if key_token == "\"<<\"" || key_token == "'<<'" {
+            current.nonplain_merge_paths.insert(path);
+        }
+        key_stack.push((indent, normalize_mapping_key_token(key_token)));
     }
+
+    if saw_content || all_hints.is_empty() {
+        all_hints.push(current);
+    };
     Ok(all_hints)
 }
 
-fn begin_container(stack: &mut [Frame]) -> Result<Path, String> {
-    let Some(parent) = stack.last_mut() else {
-        return Ok(Vec::new());
-    };
-    match parent {
-        Frame::Sequence { path, next_index } => {
-            let idx = *next_index;
-            *next_index += 1;
-            let mut out = path.clone();
-            out.push(PathSegment::Index(idx));
-            Ok(out)
-        }
-        Frame::Mapping {
-            path,
-            expecting_key,
-            current_key,
-        } => {
-            if *expecting_key {
-                *expecting_key = false;
-                *current_key = None;
-                let mut out = path.clone();
-                out.push(PathSegment::Key("<complex-key>".to_string()));
-                return Ok(out);
+fn extract_mapping_key_token(line: &str) -> Option<&str> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for (idx, ch) in line.char_indices() {
+        if in_double {
+            if escaped {
+                escaped = false;
+                continue;
             }
-            let key = current_key
-                .take()
-                .unwrap_or_else(|| "<complex-key>".to_string());
-            *expecting_key = true;
-            let mut out = path.clone();
-            out.push(PathSegment::Key(key));
-            Ok(out)
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            ':' => return Some(line[..idx].trim()),
+            _ => {}
         }
     }
+    None
 }
 
-fn consume_scalar_or_alias_value(stack: &mut [Frame]) {
-    let Some(parent) = stack.last_mut() else {
-        return;
-    };
-    match parent {
-        Frame::Sequence { next_index, .. } => {
-            *next_index += 1;
-        }
-        Frame::Mapping {
-            expecting_key,
-            current_key,
-            ..
-        } => {
-            if !*expecting_key {
-                *expecting_key = true;
-                *current_key = None;
-            }
+fn normalize_mapping_key_token(key: &str) -> String {
+    let trimmed = key.trim();
+    if trimmed.len() >= 2 {
+        let first = trimmed.as_bytes()[0];
+        let last = trimmed.as_bytes()[trimmed.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return trimmed[1..trimmed.len() - 1].to_string();
         }
     }
+    trimmed.to_string()
 }
 
 #[cfg(test)]

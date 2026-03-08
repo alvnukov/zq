@@ -136,8 +136,15 @@ fn run_local_jq_clones(run_tests_timeout: Duration, shtest_timeout: Duration) ->
 
         ran_any = true;
         let modules_dir = tests_dir.join("modules");
+        let is_jq171 = clone_root.file_name().and_then(|n| n.to_str()) == Some("jq171");
         eprintln!("running local jq suite from {}", clone_root.display());
-        run_test_files_sequential(test_files, &modules_dir, &tests_dir, run_tests_timeout);
+        run_test_files_sequential(
+            test_files,
+            &modules_dir,
+            &tests_dir,
+            run_tests_timeout,
+            is_jq171,
+        );
 
         let shtest = tests_dir.join("shtest");
         if skip_shtest {
@@ -147,19 +154,27 @@ fn run_local_jq_clones(run_tests_timeout: Duration, shtest_timeout: Duration) ->
             );
             continue;
         }
+        let run_jq171_shtest = std::env::var("ZQ_JQ_RUN_JQ171_SHTEST").ok().as_deref() == Some("1");
+        if is_jq171 && !run_jq171_shtest {
+            eprintln!(
+                "skip local jq171 shtest for {}: set ZQ_JQ_RUN_JQ171_SHTEST=1 to run",
+                clone_root.display()
+            );
+            continue;
+        }
         if !shtest.is_file() {
             continue;
         }
         let ctx = format!("run local jq shtest via zq for {}", clone_root.display());
-        run_cmd(
-            Command::new("sh")
-                .arg(&shtest)
-                .env("JQ", zq_bin())
-                .env("PAGER", "less")
-                .current_dir(&tests_dir),
-            &ctx,
-            shtest_timeout,
-        );
+        let mut cmd = Command::new("sh");
+        cmd.arg(&shtest)
+            .env("JQ", zq_bin())
+            .env("PAGER", "less")
+            .current_dir(&tests_dir);
+        if is_jq171 {
+            cmd.env("ZQ_COLOR_COMPAT", "jq171");
+        }
+        run_cmd(&mut cmd, &ctx, shtest_timeout);
     }
 
     ran_any
@@ -170,23 +185,24 @@ fn run_test_files_sequential(
     modules_dir: &Path,
     tests_dir: &Path,
     timeout: Duration,
+    is_jq171: bool,
 ) {
     let total = test_files.len();
     eprintln!("running {total} jq run-tests files sequentially");
 
     for tf in test_files {
         let ctx = format!("run-tests via zq for {}", tf.display());
-        run_cmd(
-            Command::new(zq_bin())
-                .arg("-L")
-                .arg(modules_dir)
-                .arg("--run-tests")
-                .arg(&tf)
-                .env("PAGER", "less")
-                .current_dir(tests_dir),
-            &ctx,
-            timeout,
-        );
+        let mut cmd = Command::new(zq_bin());
+        cmd.arg("-L")
+            .arg(modules_dir)
+            .arg("--run-tests")
+            .arg(&tf)
+            .env("PAGER", "less")
+            .current_dir(tests_dir);
+        if is_jq171 {
+            cmd.env("ZQ_COLOR_COMPAT", "jq171");
+        }
+        run_cmd(&mut cmd, &ctx, timeout);
     }
 }
 

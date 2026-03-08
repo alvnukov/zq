@@ -17,7 +17,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             archive_ext: tar.gz
           - os: macos-latest
             target: x86_64-apple-darwin
@@ -42,11 +42,26 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Setup musl toolchain (Linux static build)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      - name: Verify Linux binary is static
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          file "target/${{ matrix.target }}/release/zq" | grep -Eqi "statically linked|static-pie linked"
+
       - name: Install Linux package tooling
-        if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-gnu'
+        if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           cargo install cargo-deb cargo-generate-rpm --locked
 
@@ -71,7 +86,21 @@ jobs:
           $Version = $env:GITHUB_REF_NAME
           $PkgDir = "zq-$Version-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $PkgDir | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/zq.exe" "$PkgDir/zq.exe"
+          $BinaryCandidates = @(
+            "target/${{ matrix.target }}/release/zq.exe",
+            "target/release/zq.exe"
+          )
+          $InputBin = $null
+          foreach ($candidate in $BinaryCandidates) {
+            if (Test-Path $candidate) {
+              $InputBin = (Resolve-Path $candidate).Path
+              break
+            }
+          }
+          if (-not $InputBin) {
+            throw "zq.exe is missing. Checked: $($BinaryCandidates -join ', ')"
+          }
+          Copy-Item $InputBin "$PkgDir/zq.exe"
           Copy-Item "README.md" "$PkgDir/README.md"
           if (Test-Path "LICENSE") { Copy-Item "LICENSE" "$PkgDir/LICENSE" }
           Compress-Archive -Path $PkgDir -DestinationPath "$PkgDir.zip"
@@ -88,7 +117,7 @@ jobs:
           if-no-files-found: error
 
       - name: Build DEB and RPM packages (Linux)
-        if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-gnu'
+        if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-musl'
         shell: bash
         run: |
           set -euo pipefail
@@ -101,7 +130,7 @@ jobs:
           shasum -a 256 "zq-${VERSION}-${{ matrix.target }}.rpm" > "zq-${VERSION}-${{ matrix.target }}.rpm.sha256"
 
       - name: Upload DEB and RPM artifacts (Linux)
-        if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-gnu'
+        if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-musl'
         uses: actions/upload-artifact@v4
         with:
           name: release-linux-packages

@@ -3,7 +3,7 @@
         query: r###"[.[]|try if . == 0 then error("foo") elif . == 1 then .a elif . == 2 then empty else . end catch .]"###,
         input: r###"[0,1,2,3]"###,
         outputs: &[
-            r###"["foo","Cannot index number with string (\"a\")",3]"###,
+            r###"["foo","Cannot index number with string \"a\"",3]"###,
         ],
     },
     FixtureCase {

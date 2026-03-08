@@ -1,14 +1,11 @@
+use crate::c_compat::yaml as c_yaml;
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 use std::collections::HashSet;
-use std::ffi::CStr;
-use std::slice;
 use unsafe_libyaml::{
-    yaml_event_delete, yaml_event_t, yaml_parser_delete, yaml_parser_initialize, yaml_parser_parse,
-    yaml_parser_set_input_string, yaml_parser_t, yaml_scalar_style_t, YAML_ALIAS_EVENT,
-    YAML_DOCUMENT_END_EVENT, YAML_DOCUMENT_START_EVENT, YAML_MAPPING_END_EVENT,
-    YAML_MAPPING_START_EVENT, YAML_PLAIN_SCALAR_STYLE, YAML_SCALAR_EVENT, YAML_SEQUENCE_END_EVENT,
-    YAML_SEQUENCE_START_EVENT, YAML_STREAM_END_EVENT,
+    yaml_scalar_style_t, YAML_ALIAS_EVENT, YAML_DOCUMENT_END_EVENT, YAML_DOCUMENT_START_EVENT,
+    YAML_MAPPING_END_EVENT, YAML_MAPPING_START_EVENT, YAML_PLAIN_SCALAR_STYLE, YAML_SCALAR_EVENT,
+    YAML_SEQUENCE_END_EVENT, YAML_SEQUENCE_START_EVENT, YAML_STREAM_END_EVENT,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -150,120 +147,95 @@ fn merge_mapping_into(target: &mut Mapping, source: Mapping) {
 }
 
 fn collect_merge_style_hints(input: &str) -> Result<Vec<MergeStyleHints>, String> {
-    unsafe {
-        let mut parser = std::mem::MaybeUninit::<yaml_parser_t>::zeroed().assume_init();
-        if !yaml_parser_initialize(&mut parser).ok {
-            return Err("yaml parser init failed".to_string());
-        }
-        yaml_parser_set_input_string(&mut parser, input.as_ptr(), input.len() as u64);
+    let mut parser = c_yaml::Parser::from_str(input)?;
+    let mut all_hints: Vec<MergeStyleHints> = Vec::new();
+    let mut current_doc: Option<usize> = None;
+    let mut stack: Vec<Frame> = Vec::new();
 
-        let mut all_hints: Vec<MergeStyleHints> = Vec::new();
-        let mut current_doc: Option<usize> = None;
-        let mut stack: Vec<Frame> = Vec::new();
+    loop {
+        let event = parser.parse_event()?;
+        let t = event.event_type();
 
-        loop {
-            let mut event = std::mem::MaybeUninit::<yaml_event_t>::zeroed().assume_init();
-            if !yaml_parser_parse(&mut parser, &mut event).ok {
-                let err = parser_error(&parser);
-                yaml_parser_delete(&mut parser);
-                return Err(err);
+        match t {
+            YAML_DOCUMENT_START_EVENT => {
+                all_hints.push(MergeStyleHints::default());
+                current_doc = Some(all_hints.len() - 1);
+                stack.clear();
             }
-            let t = event.type_;
-
-            match t {
-                YAML_DOCUMENT_START_EVENT => {
-                    all_hints.push(MergeStyleHints::default());
-                    current_doc = Some(all_hints.len() - 1);
-                    stack.clear();
-                }
-                YAML_DOCUMENT_END_EVENT => {
-                    stack.clear();
-                    current_doc = None;
-                }
-                YAML_MAPPING_START_EVENT => {
-                    let child_path = begin_container(&mut stack)?;
-                    stack.push(Frame::Mapping {
-                        path: child_path,
-                        expecting_key: true,
-                        current_key: None,
-                    });
-                }
-                YAML_MAPPING_END_EVENT => {
-                    stack.pop();
-                }
-                YAML_SEQUENCE_START_EVENT => {
-                    let child_path = begin_container(&mut stack)?;
-                    stack.push(Frame::Sequence {
-                        path: child_path,
-                        next_index: 0,
-                    });
-                }
-                YAML_SEQUENCE_END_EVENT => {
-                    stack.pop();
-                }
-                YAML_SCALAR_EVENT => {
-                    if let Some(Frame::Mapping {
-                        path,
-                        expecting_key,
-                        current_key,
-                    }) = stack.last_mut()
-                    {
-                        if *expecting_key {
-                            let k = scalar_string(&event);
-                            if k == "<<" {
-                                let style: yaml_scalar_style_t = event.data.scalar.style;
-                                if let Some(doc_idx) = current_doc {
-                                    if style == YAML_PLAIN_SCALAR_STYLE {
-                                        all_hints[doc_idx].plain_merge_paths.insert(path.clone());
-                                    } else {
-                                        all_hints[doc_idx]
-                                            .nonplain_merge_paths
-                                            .insert(path.clone());
-                                    }
+            YAML_DOCUMENT_END_EVENT => {
+                stack.clear();
+                current_doc = None;
+            }
+            YAML_MAPPING_START_EVENT => {
+                let child_path = begin_container(&mut stack)?;
+                stack.push(Frame::Mapping {
+                    path: child_path,
+                    expecting_key: true,
+                    current_key: None,
+                });
+            }
+            YAML_MAPPING_END_EVENT => {
+                stack.pop();
+            }
+            YAML_SEQUENCE_START_EVENT => {
+                let child_path = begin_container(&mut stack)?;
+                stack.push(Frame::Sequence {
+                    path: child_path,
+                    next_index: 0,
+                });
+            }
+            YAML_SEQUENCE_END_EVENT => {
+                stack.pop();
+            }
+            YAML_SCALAR_EVENT => {
+                if let Some(Frame::Mapping {
+                    path,
+                    expecting_key,
+                    current_key,
+                }) = stack.last_mut()
+                {
+                    if *expecting_key {
+                        let k = event.scalar_string();
+                        if k == "<<" {
+                            let style: yaml_scalar_style_t = event.scalar_style();
+                            if let Some(doc_idx) = current_doc {
+                                if style == YAML_PLAIN_SCALAR_STYLE {
+                                    all_hints[doc_idx].plain_merge_paths.insert(path.clone());
+                                } else {
+                                    all_hints[doc_idx].nonplain_merge_paths.insert(path.clone());
                                 }
                             }
-                            *current_key = Some(k);
-                            *expecting_key = false;
-                            yaml_event_delete(&mut event);
-                            if t == YAML_STREAM_END_EVENT {
-                                break;
-                            }
-                            continue;
                         }
+                        *current_key = Some(k);
+                        *expecting_key = false;
+                        continue;
                     }
-                    consume_scalar_or_alias_value(&mut stack);
                 }
-                YAML_ALIAS_EVENT => {
-                    if let Some(Frame::Mapping {
-                        expecting_key,
-                        current_key,
-                        ..
-                    }) = stack.last_mut()
-                    {
-                        if *expecting_key {
-                            *expecting_key = false;
-                            *current_key = None;
-                            yaml_event_delete(&mut event);
-                            if t == YAML_STREAM_END_EVENT {
-                                break;
-                            }
-                            continue;
-                        }
+                consume_scalar_or_alias_value(&mut stack);
+            }
+            YAML_ALIAS_EVENT => {
+                if let Some(Frame::Mapping {
+                    expecting_key,
+                    current_key,
+                    ..
+                }) = stack.last_mut()
+                {
+                    if *expecting_key {
+                        *expecting_key = false;
+                        *current_key = None;
+                        continue;
                     }
-                    consume_scalar_or_alias_value(&mut stack);
                 }
-                _ => {}
+                consume_scalar_or_alias_value(&mut stack);
             }
-
-            yaml_event_delete(&mut event);
-            if t == YAML_STREAM_END_EVENT {
-                break;
-            }
+            _ => {}
         }
 
-        yaml_parser_delete(&mut parser);
-        Ok(all_hints)
+        if t == YAML_STREAM_END_EVENT {
+            break;
+        }
     }
+    Ok(all_hints)
 }
 
 fn begin_container(stack: &mut [Frame]) -> Result<Path, String> {
@@ -320,32 +292,6 @@ fn consume_scalar_or_alias_value(stack: &mut [Frame]) {
             }
         }
     }
-}
-
-unsafe fn scalar_string(event: &yaml_event_t) -> String {
-    let ptr = event.data.scalar.value.cast::<u8>();
-    let len = event.data.scalar.length as usize;
-    if ptr.is_null() || len == 0 {
-        return String::new();
-    }
-    let bytes = slice::from_raw_parts(ptr, len);
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
-unsafe fn parser_error(parser: &yaml_parser_t) -> String {
-    let problem = if parser.problem.is_null() {
-        "yaml parse error".to_string()
-    } else {
-        CStr::from_ptr(parser.problem.cast::<std::ffi::c_char>())
-            .to_string_lossy()
-            .into_owned()
-    };
-    format!(
-        "{} at line {} column {}",
-        problem,
-        parser.problem_mark.line + 1,
-        parser.problem_mark.column + 1
-    )
 }
 
 #[cfg(test)]

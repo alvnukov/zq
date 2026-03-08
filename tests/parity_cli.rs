@@ -151,6 +151,7 @@ fn parity_help_contract() {
         "--stream",
         "--stream-errors",
         "--diff",
+        "--diff-format",
         "completion",
         "--arg name value",
         "--argjson name value",
@@ -160,6 +161,8 @@ fn parity_help_contract() {
         "--jsonargs",
         "json",
         "yaml",
+        "jsonl",
+        "summary",
     ] {
         assert!(text.contains(token), "help must include token: {token}");
     }
@@ -509,6 +512,123 @@ fn parity_diff_mode_reports_structural_changes() {
     assert!(text.contains("~ $.b[1]"), "stdout:\n{text}");
     assert!(text.contains("+ $.add"), "stdout:\n{text}");
     assert!(text.contains("- $.drop"), "stdout:\n{text}");
+}
+
+#[test]
+fn parity_diff_mode_json_format_reports_structured_payload() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let left = td.path().join("left.json");
+    let right = td.path().join("right.json");
+    std::fs::write(&left, "{\"a\":1,\"b\":[1,2],\"drop\":true}\n").expect("write left");
+    std::fs::write(&right, "{\"a\":2,\"b\":[1,3,4],\"add\":\"x\"}\n").expect("write right");
+
+    let left_s = left.to_string_lossy().into_owned();
+    let right_s = right.to_string_lossy().into_owned();
+    let out = run_zq(&["--diff", "--diff-format", "json", &left_s, &right_s]);
+    assert_fail(&out, "--diff --diff-format json");
+    assert_exit_code(&out, 1, "--diff --diff-format json");
+    let payload: serde_json::Value =
+        serde_json::from_str(stdout_text(&out).trim()).expect("valid diff json");
+    assert_eq!(payload.get("equal"), Some(&serde_json::Value::Bool(false)));
+    assert_eq!(
+        payload.pointer("/summary/total"),
+        Some(&serde_json::Value::from(5u64))
+    );
+    assert_eq!(
+        payload.pointer("/summary/changed"),
+        Some(&serde_json::Value::from(2u64))
+    );
+    assert_eq!(
+        payload.pointer("/summary/added"),
+        Some(&serde_json::Value::from(2u64))
+    );
+    assert_eq!(
+        payload.pointer("/summary/removed"),
+        Some(&serde_json::Value::from(1u64))
+    );
+}
+
+#[test]
+fn parity_diff_mode_jsonl_format_emits_summary_for_equal_inputs() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let left = td.path().join("left.yaml");
+    let right = td.path().join("right.json");
+    std::fs::write(&left, "x: [1,2]\n").expect("write left");
+    std::fs::write(&right, "{\"x\":[1,2]}\n").expect("write right");
+
+    let left_s = left.to_string_lossy().into_owned();
+    let right_s = right.to_string_lossy().into_owned();
+    let out = run_zq(&["--diff", "--diff-format", "jsonl", &left_s, &right_s]);
+    assert_ok(&out, "--diff --diff-format jsonl equal");
+    assert_exit_code(&out, 0, "--diff --diff-format jsonl equal");
+    let text = stdout_text(&out);
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "stdout:\n{text}");
+    let summary: serde_json::Value = serde_json::from_str(lines[0]).expect("jsonl summary");
+    assert_eq!(
+        summary.get("type"),
+        Some(&serde_json::Value::String("summary".to_string()))
+    );
+    assert_eq!(summary.get("equal"), Some(&serde_json::Value::Bool(true)));
+}
+
+#[test]
+fn parity_diff_mode_summary_format_is_machine_friendly() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let left = td.path().join("left.json");
+    let right = td.path().join("right.json");
+    std::fs::write(&left, "{\"a\":1}\n").expect("write left");
+    std::fs::write(&right, "{\"a\":2}\n").expect("write right");
+
+    let left_s = left.to_string_lossy().into_owned();
+    let right_s = right.to_string_lossy().into_owned();
+    let out = run_zq(&["--diff", "--diff-format", "summary", &left_s, &right_s]);
+    assert_fail(&out, "--diff --diff-format summary");
+    assert_exit_code(&out, 1, "--diff --diff-format summary");
+    assert_stdout_trim_eq(
+        &out,
+        "equal=false total=1 changed=1 added=0 removed=0",
+        "--diff --diff-format summary",
+    );
+}
+
+#[test]
+fn parity_diff_mode_diff_format_supports_forced_color_and_monochrome_override() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let left = td.path().join("left.json");
+    let right = td.path().join("right.json");
+    std::fs::write(&left, "{\"a\":1,\"drop\":true}\n").expect("write left");
+    std::fs::write(&right, "{\"a\":2,\"add\":1}\n").expect("write right");
+    let left_s = left.to_string_lossy().into_owned();
+    let right_s = right.to_string_lossy().into_owned();
+
+    let forced = run_zq(&["--diff", "--diff-format", "diff", "-C", &left_s, &right_s]);
+    assert_fail(&forced, "--diff color forced");
+    let forced_stdout = stdout_text(&forced);
+    assert!(
+        forced_stdout.contains("\u{1b}[33m~\u{1b}[0m"),
+        "stdout:\n{forced_stdout}"
+    );
+
+    let no_color = run_zq(&[
+        "--diff",
+        "--diff-format",
+        "diff",
+        "-C",
+        "-M",
+        &left_s,
+        &right_s,
+    ]);
+    assert_fail(&no_color, "--diff monochrome override");
+    assert!(
+        !stdout_text(&no_color).contains("\u{1b}["),
+        "stdout:\n{}",
+        stdout_text(&no_color)
+    );
 }
 
 #[test]

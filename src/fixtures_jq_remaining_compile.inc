@@ -462,7 +462,7 @@
         query: r###"try 0[implode] catch ."###,
         input: r###"[]"###,
         outputs: &[
-            r###""Cannot index number with string (\"\")""###,
+            r###""Cannot index number with string \"\"""###,
         ],
     },
     FixtureCase {

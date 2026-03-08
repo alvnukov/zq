@@ -106,6 +106,14 @@ pub struct Cli {
     )]
     pub diff: bool,
     #[arg(
+        long = "diff-format",
+        value_enum,
+        default_value_t = DiffOutputFormat::Diff,
+        requires = "diff",
+        help = "Diff report format: diff, json, jsonl, summary"
+    )]
+    pub diff_format: DiffOutputFormat,
+    #[arg(
         short = 'c',
         long = "compact-output",
         visible_alias = "compact",
@@ -191,7 +199,7 @@ pub struct Cli {
         default_value_t = false,
         action = ArgAction::SetTrue,
         hide = true,
-        help = "Print disassembly (jq compatibility flag, currently no-op)"
+        help = "Print disassembly (accepted for jq compatibility; currently unsupported)"
     )]
     pub debug_dump_disasm: bool,
     #[arg(
@@ -237,4 +245,12 @@ pub enum CliCommand {
 pub enum OutputFormat {
     Json,
     Yaml,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiffOutputFormat {
+    Diff,
+    Json,
+    Jsonl,
+    Summary,
 }

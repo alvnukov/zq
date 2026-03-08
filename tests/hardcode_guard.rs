@@ -3,6 +3,9 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use zq::{run_jq_stream_with_paths_options, EngineRunOptions};
 
+#[path = "common/c_numeric.rs"]
+mod c_numeric;
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_zq")
 }
@@ -154,30 +157,6 @@ impl NumTok {
     }
 }
 
-fn jq_dtoi_compat(v: f64) -> i64 {
-    if v < i64::MIN as f64 {
-        i64::MIN
-    } else if -v < i64::MIN as f64 {
-        i64::MAX
-    } else {
-        v as i64
-    }
-}
-
-fn jq_mod_compat(lhs: f64, rhs: f64) -> Result<f64, &'static str> {
-    if lhs.is_nan() || rhs.is_nan() {
-        return Ok(f64::NAN);
-    }
-    let rhs_int = jq_dtoi_compat(rhs);
-    if rhs_int == 0 {
-        return Err("cannot be divided (remainder) because the divisor is zero");
-    }
-    if rhs_int == -1 {
-        return Ok(0.0);
-    }
-    Ok((jq_dtoi_compat(lhs) % rhs_int) as f64)
-}
-
 fn jq_number_json_compat(v: f64) -> JsonValue {
     if !v.is_finite() {
         return JsonValue::Null;
@@ -199,7 +178,7 @@ fn expected_modulo_array(
     // jq binary op stream order: RHS outer, LHS inner.
     for rhs in rhs_values {
         for lhs in lhs_values {
-            let value = jq_mod_compat(lhs.as_f64(), rhs.as_f64())?;
+            let value = c_numeric::mod_compat(lhs.as_f64(), rhs.as_f64())?;
             if apply_isnan {
                 out.push(JsonValue::Bool(value.is_nan()));
             } else {

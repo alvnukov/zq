@@ -51,7 +51,7 @@
     FixtureCase { query: r#".foo += .foo"#, input: r#"{"foo":2}"#, outputs: &[r#"{"foo":4}"#] },
     FixtureCase { query: r#".[0].a |= {"old":., "new":(.+1)}"#, input: r#"[{"a":1,"b":2}]"#, outputs: &[r#"[{"a":{"old":1, "new":2},"b":2}]"#] },
     FixtureCase { query: r#"def inc(x): x |= .+1; inc(.[].a)"#, input: r#"[{"a":1,"b":2},{"a":2,"b":4},{"a":7,"b":8}]"#, outputs: &[r#"[{"a":2,"b":2},{"a":3,"b":4},{"a":8,"b":8}]"#] },
-    FixtureCase { query: r#".[] | try (getpath(["a",0,"b"]) |= 5) catch ."#, input: r#"[null,{"b":0},{"a":0},{"a":null},{"a":[0,1]},{"a":{"b":1}},{"a":[{}]},{"a":[{"c":3}]}]"#, outputs: &[r#"{"a":[{"b":5}]}"#, r#"{"b":0,"a":[{"b":5}]}"#, r#""Cannot index number with number (0)""#, r#"{"a":[{"b":5}]}"#, r#""Cannot index number with string (\"b\")""#, r#""Cannot index object with number (0)""#, r#"{"a":[{"b":5}]}"#, r#"{"a":[{"c":3,"b":5}]}"#] },
+    FixtureCase { query: r#".[] | try (getpath(["a",0,"b"]) |= 5) catch ."#, input: r#"[null,{"b":0},{"a":0},{"a":null},{"a":[0,1]},{"a":{"b":1}},{"a":[{}]},{"a":[{"c":3}]}]"#, outputs: &[r#"{"a":[{"b":5}]}"#, r#"{"b":0,"a":[{"b":5}]}"#, r#""Cannot index number with number (0)""#, r#"{"a":[{"b":5}]}"#, r#""Cannot index number with string \"b\"""#, r#""Cannot index object with number (0)""#, r#"{"a":[{"b":5}]}"#, r#"{"a":[{"c":3,"b":5}]}"#] },
     FixtureCase { query: r#"(.[] | select(. >= 2)) |= empty"#, input: r#"[1,5,3,0,7]"#, outputs: &[r#"[1,0]"#] },
     FixtureCase { query: r#".[] |= select(. % 2 == 0)"#, input: r#"[0,1,2,3,4,5]"#, outputs: &[r#"[0,2,4]"#] },
     FixtureCase { query: r#".foo[1,4,2,3] |= empty"#, input: r#"{"foo":[0,1,2,3,4,5]}"#, outputs: &[r#"{"foo":[0,5]}"#] },

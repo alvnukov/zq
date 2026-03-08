@@ -3,6 +3,9 @@ use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use zq::{run_jq_stream_with_paths_options, EngineRunOptions};
 
+#[path = "common/c_numeric.rs"]
+mod c_numeric;
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_zq")
 }
@@ -150,30 +153,6 @@ fn stream_expr(tokens: &[NumTok]) -> String {
     format!("({inner})")
 }
 
-fn jq_dtoi_compat(v: f64) -> i64 {
-    if v < i64::MIN as f64 {
-        i64::MIN
-    } else if -v < i64::MIN as f64 {
-        i64::MAX
-    } else {
-        v as i64
-    }
-}
-
-fn jq_mod_compat(lhs: f64, rhs: f64) -> Result<f64, &'static str> {
-    if lhs.is_nan() || rhs.is_nan() {
-        return Ok(f64::NAN);
-    }
-    let rhs_i = jq_dtoi_compat(rhs);
-    if rhs_i == 0 {
-        return Err("divisor is zero");
-    }
-    if rhs_i == -1 {
-        return Ok(0.0);
-    }
-    Ok((jq_dtoi_compat(lhs) % rhs_i) as f64)
-}
-
 fn to_json_number_lossy(v: f64) -> JsonValue {
     if !v.is_finite() {
         return JsonValue::Null;
@@ -195,7 +174,7 @@ fn expected_modulo(
     // jq stream binary op order: RHS outer, LHS inner.
     for r in rhs {
         for l in lhs {
-            let v = jq_mod_compat(l.as_f64(), r.as_f64())?;
+            let v = c_numeric::mod_compat(l.as_f64(), r.as_f64())?;
             if apply_isnan {
                 row.push(JsonValue::Bool(v.is_nan()));
             } else {
@@ -280,8 +259,8 @@ fn substring_positions(haystack: &str, needle: &str) -> Vec<i64> {
     while i + nb.len() <= hb.len() {
         if &hb[i..i + nb.len()] == nb {
             out.push(i as i64);
-            // jq indices() for strings reports non-overlapping matches.
-            i += nb.len();
+            // jq indices() for strings reports overlapping matches.
+            i += 1;
         } else {
             i += 1;
         }

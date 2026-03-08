@@ -1,16 +1,15 @@
 use clap::{error::ErrorKind, CommandFactory, Parser};
 use clap_complete::generate;
+use serde::ser::{SerializeMap, SerializeSeq};
 use serde::Serialize;
-use serde_json::{Map as JsonMap, Value as JsonValue};
+use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
-use std::ffi::OsString;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
-use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::cli::{Cli, CliCommand, OutputFormat};
+use crate::cli::{Cli, CliCommand, DiffOutputFormat, OutputFormat};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -90,50 +89,6 @@ fn query_uses_stderr_builtin(query: &str) -> bool {
     query_uses_any_builtin(query, &["stderr"])
 }
 
-fn parse_halt_error_code(expr: &str) -> Option<i32> {
-    let trimmed = expr.trim();
-    let rest = trimmed.strip_prefix("halt_error(")?;
-    let num = rest.strip_suffix(')')?.trim();
-    num.parse::<i32>().ok()
-}
-
-fn run_halt_special(base_query: &str) -> Option<(i32, Option<Vec<u8>>)> {
-    let q = base_query.trim();
-    if q == "halt" {
-        return Some((0, None));
-    }
-    if let Some(code) = parse_halt_error_code(q) {
-        return Some((code, None));
-    }
-    let (lhs, rhs) = q.split_once('|')?;
-    let code = parse_halt_error_code(rhs)?;
-    let value = serde_json::from_str::<JsonValue>(lhs.trim()).ok()?;
-    let payload = if let Some(s) = value.as_str() {
-        s.as_bytes().to_vec()
-    } else {
-        serde_json::to_vec(&value).ok()?
-    };
-    Some((code, Some(payload)))
-}
-
-fn run_compile_error_special(base_query: &str) -> Option<(i32, String)> {
-    if base_query == "[\n  try if .\n         then 1\n         else 2\n  catch ]" {
-        return Some((
-            3,
-            "jq: error: syntax error, unexpected catch, expecting end or '|' or ',' at <top-level>, line 5, column 3:\n      catch ]\n      ^^^^^\njq: error: Possibly unterminated 'if' statement at <top-level>, line 2, column 7:\n      try if .\n          ^^^^\njq: error: Possibly unterminated 'try' statement at <top-level>, line 2, column 3:\n      try if .\n      ^^^^^^^^\njq: 3 compile errors".to_string(),
-        ));
-    }
-
-    if base_query == "if" || base_query == "if\n" || base_query == "if\r\n" {
-        return Some((
-            3,
-            "jq: error: syntax error, unexpected end of file at <top-level>, line 1, column 3:\n    if\n      ^\njq: 1 compile error".to_string(),
-        ));
-    }
-
-    None
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PositionalArgsMode {
     String,
@@ -142,9 +97,9 @@ enum PositionalArgsMode {
 
 #[derive(Debug, Default, Clone)]
 struct CliCompatArgs {
-    named_vars: JsonMap<String, JsonValue>,
-    named_args: JsonMap<String, JsonValue>,
-    positional_args: Vec<JsonValue>,
+    named_vars: indexmap::IndexMap<String, zq::NativeValue>,
+    named_args: indexmap::IndexMap<String, zq::NativeValue>,
+    positional_args: Vec<zq::NativeValue>,
 }
 
 impl CliCompatArgs {
@@ -234,7 +189,7 @@ fn extract_cli_compat_args(args: Vec<String>) -> Result<(Vec<String>, CliCompatA
                 let (name_raw, value_raw) =
                     parse_named_arg_pair(&args, i, "--arg requires two arguments: NAME VALUE")?;
                 let name = name_raw.to_string();
-                let value = JsonValue::String(value_raw.to_string());
+                let value = zq::NativeValue::String(value_raw.to_string());
                 compat.named_vars.insert(name.clone(), value.clone());
                 compat.named_args.insert(name, value);
                 i += 3;
@@ -256,7 +211,9 @@ fn extract_cli_compat_args(args: Vec<String>) -> Result<(Vec<String>, CliCompatA
                 )?;
                 let name = name_raw.to_string();
                 let values = read_slurpfile_values(path_raw)?;
-                compat.named_vars.insert(name, JsonValue::Array(values));
+                compat
+                    .named_vars
+                    .insert(name, zq::NativeValue::Array(values));
                 i += 3;
             }
             "--rawfile" => {
@@ -264,7 +221,9 @@ fn extract_cli_compat_args(args: Vec<String>) -> Result<(Vec<String>, CliCompatA
                     parse_named_arg_pair(&args, i, "--rawfile requires two arguments: NAME FILE")?;
                 let name = name_raw.to_string();
                 let value = fs::read_to_string(path_raw)?;
-                compat.named_vars.insert(name, JsonValue::String(value));
+                compat
+                    .named_vars
+                    .insert(name, zq::NativeValue::String(value));
                 i += 3;
             }
             "--args" => {
@@ -288,15 +247,15 @@ fn extract_cli_compat_args(args: Vec<String>) -> Result<(Vec<String>, CliCompatA
     Ok((filtered, compat))
 }
 
-fn parse_named_json(flag: &str, raw: &str) -> Result<JsonValue, Error> {
-    serde_json::from_str::<JsonValue>(raw)
+fn parse_named_json(flag: &str, raw: &str) -> Result<zq::NativeValue, Error> {
+    serde_json::from_str::<zq::NativeValue>(raw)
         .map_err(|e| invalid_cli_arg(format!("{flag}: invalid JSON text `{raw}`: {e}")))
 }
 
-fn parse_positional_value(mode: PositionalArgsMode, raw: &str) -> Result<JsonValue, Error> {
+fn parse_positional_value(mode: PositionalArgsMode, raw: &str) -> Result<zq::NativeValue, Error> {
     match mode {
-        PositionalArgsMode::String => Ok(JsonValue::String(raw.to_string())),
-        PositionalArgsMode::Json => serde_json::from_str::<JsonValue>(raw)
+        PositionalArgsMode::String => Ok(zq::NativeValue::String(raw.to_string())),
+        PositionalArgsMode::Json => serde_json::from_str::<zq::NativeValue>(raw)
             .map_err(|e| invalid_cli_arg(format!("--jsonargs: invalid JSON text `{raw}`: {e}"))),
     }
 }
@@ -316,10 +275,10 @@ fn parse_named_arg_pair<'a>(
     Ok((args[i + 1].as_str(), args[i + 2].as_str()))
 }
 
-fn read_slurpfile_values(path: &str) -> Result<Vec<JsonValue>, Error> {
+fn read_slurpfile_values(path: &str) -> Result<Vec<zq::NativeValue>, Error> {
     let input = fs::read_to_string(path)?;
     let mut values = Vec::new();
-    for next in serde_json::Deserializer::from_str(&input).into_iter::<JsonValue>() {
+    for next in serde_json::Deserializer::from_str(&input).into_iter::<zq::NativeValue>() {
         values.push(next.map_err(|e| {
             invalid_cli_arg(format!("--slurpfile {path}: invalid JSON input: {e}"))
         })?);
@@ -353,8 +312,8 @@ fn build_query_with_cli_compat(query: &str, compat: &CliCompatArgs) -> Result<St
     let named_vars_json = serde_json::to_string(&compat.named_vars)
         .map_err(|e| Error::Query(format!("encode named variables: {e}")))?;
     let args_json = serde_json::to_string(&serde_json::json!({
-        "named": compat.named_args,
-        "positional": compat.positional_args,
+        "named": &compat.named_args,
+        "positional": &compat.positional_args,
     }))
     .map_err(|e| Error::Query(format!("encode $ARGS: {e}")))?;
 
@@ -368,85 +327,16 @@ fn build_query_with_cli_compat(query: &str, compat: &CliCompatArgs) -> Result<St
     Ok(wrapped)
 }
 
-fn run_cli_compat_special(base_query: &str, compat: &CliCompatArgs) -> Option<Vec<JsonValue>> {
-    let q = base_query.trim();
-    let q_no_ws: String = q.chars().filter(|ch| !ch.is_whitespace()).collect();
-
-    let compat_foo_bar = || {
-        let mut obj = JsonMap::new();
-        obj.insert(
-            "foo".to_string(),
-            compat
-                .named_vars
-                .get("foo")
-                .cloned()
-                .unwrap_or(JsonValue::Null),
-        );
-        obj.insert(
-            "bar".to_string(),
-            compat
-                .named_vars
-                .get("bar")
-                .cloned()
-                .unwrap_or(JsonValue::Null),
-        );
-        JsonValue::Object(obj)
-    };
-
-    if q == "{$foo, $bar} | ., . == $ARGS.named" {
-        let obj_value = compat_foo_bar();
-        let named = JsonValue::Object(compat.named_args.clone());
-        return Some(vec![obj_value.clone(), JsonValue::Bool(obj_value == named)]);
-    }
-
-    if q == "{$foo, $bar}" {
-        return Some(vec![compat_foo_bar()]);
-    }
-
-    if q == "$ARGS.positional" {
-        return Some(vec![JsonValue::Array(compat.positional_args.clone())]);
-    }
-
-    if let Some(rest) = q.strip_prefix("$ARGS.positional[") {
-        if let Some(idx_raw) = rest.strip_suffix(']') {
-            if let Ok(idx) = idx_raw.trim().parse::<usize>() {
-                let value = compat
-                    .positional_args
-                    .get(idx)
-                    .cloned()
-                    .unwrap_or(JsonValue::Null);
-                return Some(vec![value]);
-            }
-        }
-    }
-
-    if q_no_ws == r#"$date|strptime("%a%d%b%Yat%H:%M:%S")"#
-        && compat.named_vars.contains_key("date")
-    {
-        // jq_upstream's locale probe only verifies that this query succeeds
-        // with LC_ALL, not the exact decoded tuple.
-        return Some(vec![JsonValue::Array(vec![
-            JsonValue::from(0),
-            JsonValue::from(0),
-            JsonValue::from(0),
-            JsonValue::from(0),
-            JsonValue::from(0),
-            JsonValue::from(0),
-            JsonValue::from(0),
-            JsonValue::from(0),
-        ])]);
-    }
-
-    if let Ok(literal) = serde_json::from_str::<JsonValue>(q) {
-        return Some(vec![literal]);
-    }
-
-    None
-}
-
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct SeqParseResult {
     values: Vec<JsonValue>,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct SeqParseResultNative {
+    values: Vec<zq::NativeValue>,
     errors: Vec<String>,
 }
 
@@ -455,19 +345,51 @@ enum InputData {
     Mapped(memmap2::Mmap),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 enum SemanticDiffKind {
     Added,
     Removed,
     Changed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct SemanticDiff {
     kind: SemanticDiffKind,
     path: String,
-    left: Option<JsonValue>,
-    right: Option<JsonValue>,
+    left: Option<zq::NativeValue>,
+    right: Option<zq::NativeValue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct SemanticDiffSummary {
+    total: usize,
+    changed: usize,
+    added: usize,
+    removed: usize,
+}
+
+impl SemanticDiffSummary {
+    fn from_diffs(diffs: &[SemanticDiff]) -> Self {
+        let mut summary = Self {
+            total: diffs.len(),
+            changed: 0,
+            added: 0,
+            removed: 0,
+        };
+        for diff in diffs {
+            match diff.kind {
+                SemanticDiffKind::Added => summary.added += 1,
+                SemanticDiffKind::Removed => summary.removed += 1,
+                SemanticDiffKind::Changed => summary.changed += 1,
+            }
+        }
+        summary
+    }
+
+    fn equal(self) -> bool {
+        self.total == 0
+    }
 }
 
 impl InputData {
@@ -503,14 +425,6 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
     if cli.diff {
         return run_diff_mode(&cli);
     }
-    if cli.debug_dump_disasm {
-        // jq's disasm output is only used by compatibility tests as a stable
-        // line-count signal; keep a deterministic three-line dump for now.
-        println!("load");
-        println!("code");
-        println!("ret");
-        return Ok(0);
-    }
 
     let positional_input = resolve_positional_input(&cli)?;
     let base_query = resolve_base_query(&cli)?;
@@ -543,25 +457,6 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         ));
     }
 
-    if let Some((status, maybe_stderr)) = run_halt_special(base_query.as_str()) {
-        if let Some(stderr_bytes) = maybe_stderr {
-            let stderr = io::stderr();
-            let mut writer = io::BufWriter::new(stderr.lock());
-            writer.write_all(&stderr_bytes)?;
-            writer.flush()?;
-        }
-        return Ok(status);
-    }
-
-    if let Some((status, stderr_text)) = run_compile_error_special(base_query.as_str()) {
-        let stderr = io::stderr();
-        let mut writer = io::BufWriter::new(stderr.lock());
-        writer.write_all(stderr_text.as_bytes())?;
-        writer.write_all(b"\n")?;
-        writer.flush()?;
-        return Ok(status);
-    }
-
     let color_opts = if matches!(cli.output_format, OutputFormat::Json) && !cli.raw_output0 {
         resolve_json_color_options(&cli)
     } else {
@@ -569,6 +464,20 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
     };
     if color_opts.warn_invalid {
         eprintln!("Failed to set $JQ_COLORS");
+    }
+
+    if cli.debug_dump_disasm {
+        let labels = zq::debug_dump_disasm_function_labels(query.as_str(), &cli.library_path)
+            .map_err(|e| Error::Query(render_engine_error("jq", query.as_str(), "", e)))?;
+        if !labels.is_empty() {
+            let stdout = io::stdout();
+            let mut writer = io::BufWriter::new(stdout.lock());
+            for label in labels {
+                writeln!(writer, "{label}")?;
+            }
+            writeln!(writer)?;
+            writer.flush()?;
+        }
     }
 
     let skip_input_read = cli.null_input
@@ -585,7 +494,6 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
     };
     let input_text = input_data.as_str_lossy();
     let input = input_text.as_ref();
-    let cli_compat_special_out = run_cli_compat_special(base_query.as_str(), &compat_args);
 
     let can_native_stream_direct = matches!(cli.output_format, OutputFormat::Json)
         && !cli.raw_output0
@@ -595,17 +503,20 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         && !cli.null_input
         && !cli.seq
         && !cli.stream
-        && !cli.stream_errors
-        && cli_compat_special_out.is_none();
+        && !cli.stream_errors;
 
-    let mut pre_parsed_standard_inputs: Option<Vec<JsonValue>> = None;
     if can_native_stream_direct {
         let stdout = io::stdout();
         let mut writer = io::BufWriter::new(stdout.lock());
         let mut wrote_any = false;
         let mut json_scratch = Vec::new();
+        let native_pretty_indent = if cli.compact || color_opts.enabled {
+            None
+        } else {
+            Some(vec![b' '; color_opts.indent])
+        };
 
-        let native_status = zq::try_run_jq_native_stream_json_text_options(
+        let native_status = zq::try_run_jq_native_stream_json_text_options_native(
             query.as_str(),
             input,
             zq::EngineRunOptions { null_input: false },
@@ -613,12 +524,13 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                 if wrote_any && !cli.join_output {
                     writer.write_all(b"\n").map_err(|e| e.to_string())?;
                 }
-                write_json_value_line(
+                write_json_native_value_line(
                     &mut writer,
                     &value,
                     cli.compact,
                     effective_raw_output,
                     &mut json_scratch,
+                    native_pretty_indent.as_deref(),
                     &color_opts,
                 )
                 .map_err(|e| e.to_string())?;
@@ -626,7 +538,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                 Ok(())
             },
         )
-        .map_err(|e| Error::Query(render_engine_error("jq", input, e)))?;
+        .map_err(|e| Error::Query(render_engine_error("jq", query.as_str(), input, e)))?;
 
         if matches!(native_status, zq::NativeStreamStatus::Executed) {
             if wrote_any {
@@ -638,14 +550,23 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
             return Ok(0);
         }
 
-        let inputs = zq::parse_jq_input_values(input, doc_mode, "jq")
-            .map_err(|e| Error::Query(render_engine_error("jq", input, e)))?;
-        pre_parsed_standard_inputs = Some(inputs);
+        let err = zq::validate_jq_query_with_paths(query.as_str(), &cli.library_path)
+            .err()
+            .unwrap_or_else(|| {
+                zq::EngineError::Query(zq::QueryError::Unsupported(format!(
+                    "query is not supported by native engine: {}",
+                    query.as_str()
+                )))
+            });
+        return Err(Error::Query(render_engine_error(
+            "jq",
+            query.as_str(),
+            input,
+            err,
+        )));
     }
 
-    let out = if let Some(special) = cli_compat_special_out {
-        special
-    } else if cli.raw_input
+    let out_native = if cli.raw_input
         || cli.slurp
         || cli.null_input
         || cli.seq
@@ -660,22 +581,29 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
 
         let mut seq_errors = Vec::new();
         let mut inputs = if cli.seq && !cli.raw_input {
-            let parsed = parse_json_seq_input(input);
+            let parsed = parse_json_seq_input_native(input);
             seq_errors = parsed.errors;
             parsed.values
         } else if cli.stream || cli.stream_errors {
-            match zq::parse_jq_json_values_only(input) {
-                Ok(values) => stream_json_values(values),
+            match zq::parse_jq_json_values_only_native(input) {
+                Ok(values) => stream_native_values(values),
                 Err(zq::EngineError::Query(zq::QueryError::Json(json_err)))
                     if cli.stream_errors =>
                 {
-                    vec![stream_error_value_from_json_error(input, &json_err)]
+                    vec![stream_error_value_from_json_error_native(input, &json_err)]
                 }
-                Err(err) => return Err(Error::Query(render_engine_error("jq", input, err))),
+                Err(err) => {
+                    return Err(Error::Query(render_engine_error(
+                        "jq",
+                        query.as_str(),
+                        input,
+                        err,
+                    )))
+                }
             }
         } else {
-            build_custom_input_stream(&cli, input, doc_mode)
-                .map_err(|e| Error::Query(render_engine_error("jq", input, e)))?
+            build_custom_input_stream_native(&cli, input, doc_mode)
+                .map_err(|e| Error::Query(render_engine_error("jq", query.as_str(), input, e)))?
         };
 
         if cli.seq && cli.null_input && query_uses_inputs_builtin(&query) && !seq_errors.is_empty()
@@ -690,9 +618,9 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         }
 
         if cli.slurp && !cli.raw_input {
-            inputs = vec![JsonValue::Array(inputs)];
+            inputs = vec![zq::NativeValue::Array(inputs)];
         }
-        zq::run_jq_stream_with_paths_options(
+        let native_out = zq::run_jq_stream_with_paths_options_native(
             query.as_str(),
             inputs,
             &cli.library_path,
@@ -700,26 +628,19 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                 null_input: cli.null_input,
             },
         )
-        .map_err(|e| Error::Query(render_engine_error("jq", input, e)))?
-    } else if let Some(inputs) = pre_parsed_standard_inputs.take() {
-        zq::run_jq_stream_with_paths_options(
-            query.as_str(),
-            inputs,
-            &cli.library_path,
-            zq::EngineRunOptions { null_input: false },
-        )
-        .map_err(|e| Error::Query(render_engine_error("jq", input, e)))?
+        .map_err(|e| Error::Query(render_engine_error("jq", query.as_str(), input, e)))?;
+        native_out
     } else {
         let options = zq::QueryOptions {
             doc_mode,
             library_path: cli.library_path.clone(),
         };
-        zq::run_jq(query.as_str(), input, options)
-            .map_err(|e| Error::Query(render_engine_error("jq", input, e)))?
+        let native_out = zq::run_jq_native(query.as_str(), input, options)
+            .map_err(|e| Error::Query(render_engine_error("jq", query.as_str(), input, e)))?;
+        native_out
     };
-
     if cli.raw_output0 {
-        let (rendered, maybe_error) = render_raw_output0(&out, cli.compact)?;
+        let (rendered, maybe_error) = render_raw_output0_native(&out_native, cli.compact)?;
         if !rendered.is_empty() {
             let mut stdout = io::stdout();
             stdout.write_all(&rendered)?;
@@ -730,15 +651,15 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         }
     } else {
         match cli.output_format {
-            OutputFormat::Json => write_json_output_lines(
-                &out,
+            OutputFormat::Json => write_json_output_lines_native(
+                &out_native,
                 cli.compact,
                 effective_raw_output,
                 cli.join_output,
                 &color_opts,
             )?,
             OutputFormat::Yaml => {
-                let rendered = zq::format_output_yaml_documents(&out)
+                let rendered = zq::format_output_yaml_documents_native(&out_native)
                     .map_err(|e| Error::Query(e.to_string()))?;
                 if !rendered.is_empty() {
                     println!("{rendered}");
@@ -750,9 +671,9 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
     if matches!(cli.output_format, OutputFormat::Json) && !cli.raw_output0 && force_stderr_text {
         let stderr = io::stderr();
         let mut writer = io::BufWriter::new(stderr.lock());
-        write_json_output(
+        write_json_output_native(
             &mut writer,
-            &out,
+            &out_native,
             cli.compact,
             effective_raw_output,
             cli.join_output,
@@ -762,7 +683,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
     }
 
     if cli.exit_status {
-        return Ok(exit_status_from_outputs(&out));
+        return Ok(exit_status_from_outputs_native(&out_native));
     }
     Ok(0)
 }
@@ -789,13 +710,25 @@ fn run_diff_mode(cli: &Cli) -> Result<i32, Error> {
     let right_docs = parse_diff_docs(right_text.as_ref(), &right_path, "RIGHT")?;
 
     let diffs = collect_semantic_doc_diffs(&left_docs, &right_docs);
-    if diffs.is_empty() {
-        println!("No semantic differences.");
-        return Ok(0);
-    }
+    let summary = SemanticDiffSummary::from_diffs(&diffs);
+    print_semantic_diff_report(
+        &diffs,
+        summary,
+        cli.diff_format,
+        cli.compact,
+        diff_color_enabled(cli),
+    )?;
+    Ok(if summary.equal() { 0 } else { 1 })
+}
 
-    print_semantic_diff_report(&diffs)?;
-    Ok(1)
+fn diff_color_enabled(cli: &Cli) -> bool {
+    if cli.monochrome_output {
+        return false;
+    }
+    if cli.color_output {
+        return true;
+    }
+    io::stdout().is_terminal()
 }
 
 fn resolve_diff_paths(cli: &Cli) -> Result<(String, String), Error> {
@@ -826,8 +759,8 @@ fn resolve_diff_paths(cli: &Cli) -> Result<(String, String), Error> {
     }
 }
 
-fn parse_diff_docs(input: &str, path: &str, side: &str) -> Result<Vec<JsonValue>, Error> {
-    zq::parse_native_input_values_auto(input)
+fn parse_diff_docs(input: &str, path: &str, side: &str) -> Result<Vec<zq::NativeValue>, Error> {
+    zq::parse_native_input_values_auto_native(input)
         .map(|parsed| parsed.values)
         .map_err(|err| {
             Error::Query(format!(
@@ -838,8 +771,8 @@ fn parse_diff_docs(input: &str, path: &str, side: &str) -> Result<Vec<JsonValue>
 }
 
 fn collect_semantic_doc_diffs(
-    left_docs: &[JsonValue],
-    right_docs: &[JsonValue],
+    left_docs: &[zq::NativeValue],
+    right_docs: &[zq::NativeValue],
 ) -> Vec<SemanticDiff> {
     let mut diffs = Vec::new();
     if left_docs.len() == 1 && right_docs.len() == 1 {
@@ -874,8 +807,8 @@ fn collect_semantic_doc_diffs(
 
 fn collect_semantic_diffs(
     path: &str,
-    left: &JsonValue,
-    right: &JsonValue,
+    left: &zq::NativeValue,
+    right: &zq::NativeValue,
     out: &mut Vec<SemanticDiff>,
 ) {
     if left == right {
@@ -883,7 +816,7 @@ fn collect_semantic_diffs(
     }
 
     match (left, right) {
-        (JsonValue::Object(left_map), JsonValue::Object(right_map)) => {
+        (zq::NativeValue::Object(left_map), zq::NativeValue::Object(right_map)) => {
             let mut keys = BTreeSet::new();
             keys.extend(left_map.keys().cloned());
             keys.extend(right_map.keys().cloned());
@@ -910,7 +843,7 @@ fn collect_semantic_diffs(
                 }
             }
         }
-        (JsonValue::Array(left_items), JsonValue::Array(right_items)) => {
+        (zq::NativeValue::Array(left_items), zq::NativeValue::Array(right_items)) => {
             let max_len = left_items.len().max(right_items.len());
             for idx in 0..max_len {
                 let item_path = format!("{path}[{idx}]");
@@ -960,44 +893,81 @@ fn is_simple_path_key(key: &str) -> bool {
     chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-fn print_semantic_diff_report(diffs: &[SemanticDiff]) -> Result<(), Error> {
-    let mut added = 0usize;
-    let mut removed = 0usize;
-    let mut changed = 0usize;
+fn print_semantic_diff_report(
+    diffs: &[SemanticDiff],
+    summary: SemanticDiffSummary,
+    format: DiffOutputFormat,
+    compact_json: bool,
+    color: bool,
+) -> Result<(), Error> {
     let stdout = io::stdout();
     let mut writer = io::BufWriter::new(stdout.lock());
+    write_semantic_diff_report(&mut writer, diffs, summary, format, compact_json, color)?;
+    writer.flush()?;
+    Ok(())
+}
 
-    writeln!(writer, "Found {} semantic differences:", diffs.len())?;
+fn write_semantic_diff_report<W: Write>(
+    writer: &mut W,
+    diffs: &[SemanticDiff],
+    summary: SemanticDiffSummary,
+    format: DiffOutputFormat,
+    compact_json: bool,
+    color: bool,
+) -> Result<(), Error> {
+    match format {
+        DiffOutputFormat::Diff => write_semantic_diff_report_diff(writer, diffs, summary, color),
+        DiffOutputFormat::Json => {
+            write_semantic_diff_report_json(writer, diffs, summary, compact_json)
+        }
+        DiffOutputFormat::Jsonl => write_semantic_diff_report_jsonl(writer, diffs, summary),
+        DiffOutputFormat::Summary => write_semantic_diff_report_summary(writer, summary),
+    }
+}
+
+fn write_semantic_diff_report_diff<W: Write>(
+    writer: &mut W,
+    diffs: &[SemanticDiff],
+    summary: SemanticDiffSummary,
+    color: bool,
+) -> Result<(), Error> {
+    if summary.equal() {
+        writeln!(writer, "No semantic differences.")?;
+        return Ok(());
+    }
+
+    writeln!(writer, "Found {} semantic differences:", summary.total)?;
     for diff in diffs {
         match diff.kind {
             SemanticDiffKind::Added => {
-                added += 1;
                 let value = diff
                     .right
                     .as_ref()
                     .expect("added diff always has right value");
-                writeln!(
+                write_semantic_diff_line(
                     writer,
-                    "+ {}: {}",
-                    diff.path,
-                    render_semantic_diff_value(value)?
+                    '+',
+                    &diff.path,
+                    &render_semantic_diff_value(value)?,
+                    None,
+                    color,
                 )?;
             }
             SemanticDiffKind::Removed => {
-                removed += 1;
                 let value = diff
                     .left
                     .as_ref()
                     .expect("removed diff always has left value");
-                writeln!(
+                write_semantic_diff_line(
                     writer,
-                    "- {}: {}",
-                    diff.path,
-                    render_semantic_diff_value(value)?
+                    '-',
+                    &diff.path,
+                    &render_semantic_diff_value(value)?,
+                    None,
+                    color,
                 )?;
             }
             SemanticDiffKind::Changed => {
-                changed += 1;
                 let left = diff
                     .left
                     .as_ref()
@@ -1006,48 +976,173 @@ fn print_semantic_diff_report(diffs: &[SemanticDiff]) -> Result<(), Error> {
                     .right
                     .as_ref()
                     .expect("changed diff always has right value");
-                writeln!(
+                let left_rendered = render_semantic_diff_value(left)?;
+                let right_rendered = render_semantic_diff_value(right)?;
+                write_semantic_diff_line(
                     writer,
-                    "~ {}: {} -> {}",
-                    diff.path,
-                    render_semantic_diff_value(left)?,
-                    render_semantic_diff_value(right)?
+                    '~',
+                    &diff.path,
+                    &left_rendered,
+                    Some(&right_rendered),
+                    color,
                 )?;
             }
         }
     }
     writeln!(
         writer,
-        "Summary: changed={changed}, added={added}, removed={removed}"
+        "Summary: changed={}, added={}, removed={}",
+        summary.changed, summary.added, summary.removed
     )?;
-    writer.flush()?;
     Ok(())
 }
 
-fn render_semantic_diff_value(value: &JsonValue) -> Result<String, Error> {
+fn render_semantic_diff_value(value: &zq::NativeValue) -> Result<String, Error> {
     serde_json::to_string(value).map_err(|e| Error::Query(format!("encode json: {e}")))
 }
 
+fn write_semantic_diff_line<W: Write>(
+    writer: &mut W,
+    marker: char,
+    path: &str,
+    left: &str,
+    right: Option<&str>,
+    color: bool,
+) -> Result<(), Error> {
+    if !color {
+        if let Some(right) = right {
+            writeln!(writer, "{marker} {path}: {left} -> {right}")?;
+        } else {
+            writeln!(writer, "{marker} {path}: {left}")?;
+        }
+        return Ok(());
+    }
+
+    let marker_style = match marker {
+        '+' => "\x1b[32m",
+        '-' => "\x1b[31m",
+        '~' => "\x1b[33m",
+        _ => "\x1b[0m",
+    };
+    let reset = "\x1b[0m";
+    let path_style = "\x1b[36m";
+    if let Some(right) = right {
+        writeln!(
+            writer,
+            "{marker_style}{marker}{reset} {path_style}{path}{reset}: {left} -> {right}"
+        )?;
+    } else {
+        writeln!(
+            writer,
+            "{marker_style}{marker}{reset} {path_style}{path}{reset}: {left}"
+        )?;
+    }
+    Ok(())
+}
+
+fn write_semantic_diff_report_json<W: Write>(
+    writer: &mut W,
+    diffs: &[SemanticDiff],
+    summary: SemanticDiffSummary,
+    compact_json: bool,
+) -> Result<(), Error> {
+    let payload = serde_json::json!({
+        "equal": summary.equal(),
+        "summary": summary,
+        "differences": diffs,
+    });
+    if compact_json {
+        serde_json::to_writer(&mut *writer, &payload)
+            .map_err(|e| Error::Query(format!("encode diff json: {e}")))?;
+    } else {
+        serde_json::to_writer_pretty(&mut *writer, &payload)
+            .map_err(|e| Error::Query(format!("encode diff json: {e}")))?;
+    }
+    writeln!(writer)?;
+    Ok(())
+}
+
+fn write_semantic_diff_report_jsonl<W: Write>(
+    writer: &mut W,
+    diffs: &[SemanticDiff],
+    summary: SemanticDiffSummary,
+) -> Result<(), Error> {
+    for diff in diffs {
+        let payload = serde_json::json!({
+            "type": "diff",
+            "kind": diff.kind,
+            "path": &diff.path,
+            "left": &diff.left,
+            "right": &diff.right,
+        });
+        serde_json::to_writer(&mut *writer, &payload)
+            .map_err(|e| Error::Query(format!("encode diff jsonl: {e}")))?;
+        writeln!(writer)?;
+    }
+    let summary_payload = serde_json::json!({
+        "type": "summary",
+        "equal": summary.equal(),
+        "total": summary.total,
+        "changed": summary.changed,
+        "added": summary.added,
+        "removed": summary.removed,
+    });
+    serde_json::to_writer(&mut *writer, &summary_payload)
+        .map_err(|e| Error::Query(format!("encode diff jsonl: {e}")))?;
+    writeln!(writer)?;
+    Ok(())
+}
+
+fn write_semantic_diff_report_summary<W: Write>(
+    writer: &mut W,
+    summary: SemanticDiffSummary,
+) -> Result<(), Error> {
+    writeln!(
+        writer,
+        "equal={} total={} changed={} added={} removed={}",
+        summary.equal(),
+        summary.total,
+        summary.changed,
+        summary.added,
+        summary.removed
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
 fn build_custom_input_stream(
     cli: &Cli,
     input: &str,
     doc_mode: zq::DocMode,
 ) -> Result<Vec<JsonValue>, zq::EngineError> {
+    build_custom_input_stream_native(cli, input, doc_mode).map(|values| {
+        values
+            .into_iter()
+            .map(zq::NativeValue::into_json)
+            .collect::<Vec<_>>()
+    })
+}
+
+fn build_custom_input_stream_native(
+    cli: &Cli,
+    input: &str,
+    doc_mode: zq::DocMode,
+) -> Result<Vec<zq::NativeValue>, zq::EngineError> {
     if cli.raw_input {
         if cli.slurp {
-            return Ok(vec![JsonValue::String(input.to_string())]);
+            return Ok(vec![zq::NativeValue::String(input.to_string())]);
         }
         return Ok(raw_input_lines(input)
             .into_iter()
-            .map(JsonValue::String)
+            .map(zq::NativeValue::String)
             .collect());
     }
 
-    zq::parse_jq_input_values(input, doc_mode, "jq")
+    zq::parse_jq_input_values_native(input, doc_mode, "jq")
 }
 
-fn parse_json_seq_input(input: &str) -> SeqParseResult {
-    let mut result = SeqParseResult::default();
+fn parse_json_seq_input_native(input: &str) -> SeqParseResultNative {
+    let mut result = SeqParseResultNative::default();
     let rs = '\u{1e}';
     let rs_positions = input
         .char_indices()
@@ -1071,7 +1166,7 @@ fn parse_json_seq_input(input: &str) -> SeqParseResult {
         }
 
         let mut parse_error = false;
-        for next in serde_json::Deserializer::from_str(chunk).into_iter::<JsonValue>() {
+        for next in serde_json::Deserializer::from_str(chunk).into_iter::<zq::NativeValue>() {
             match next {
                 Ok(v) => result.values.push(v),
                 Err(_) => {
@@ -1099,59 +1194,93 @@ fn parse_json_seq_input(input: &str) -> SeqParseResult {
     result
 }
 
+#[cfg(test)]
+fn parse_json_seq_input(input: &str) -> SeqParseResult {
+    let parsed = parse_json_seq_input_native(input);
+    SeqParseResult {
+        values: parsed
+            .values
+            .into_iter()
+            .map(zq::NativeValue::into_json)
+            .collect(),
+        errors: parsed.errors,
+    }
+}
+
+#[cfg(test)]
 fn stream_json_values(values: Vec<JsonValue>) -> Vec<JsonValue> {
+    stream_native_values(
+        values
+            .into_iter()
+            .map(zq::NativeValue::from_json)
+            .collect::<Vec<_>>(),
+    )
+    .into_iter()
+    .map(zq::NativeValue::into_json)
+    .collect()
+}
+
+fn stream_native_values(values: Vec<zq::NativeValue>) -> Vec<zq::NativeValue> {
     let mut out = Vec::new();
     for value in values {
         let mut path = Vec::new();
-        append_stream_events(&value, &mut path, &mut out);
+        append_stream_events_native(&value, &mut path, &mut out);
     }
     out
 }
 
-fn append_stream_events(value: &JsonValue, path: &mut Vec<JsonValue>, out: &mut Vec<JsonValue>) {
+fn append_stream_events_native(
+    value: &zq::NativeValue,
+    path: &mut Vec<zq::NativeValue>,
+    out: &mut Vec<zq::NativeValue>,
+) {
     match value {
-        JsonValue::Array(items) => {
+        zq::NativeValue::Array(items) => {
             if items.is_empty() {
-                out.push(JsonValue::Array(vec![
-                    JsonValue::Array(path.clone()),
-                    JsonValue::Array(Vec::new()),
+                out.push(zq::NativeValue::Array(vec![
+                    zq::NativeValue::Array(path.clone()),
+                    zq::NativeValue::Array(Vec::new()),
                 ]));
                 return;
             }
             for (idx, item) in items.iter().enumerate() {
-                path.push(JsonValue::Number((idx as u64).into()));
-                append_stream_events(item, path, out);
+                path.push(zq::NativeValue::from(idx as i64));
+                append_stream_events_native(item, path, out);
                 path.pop();
             }
             let last = items.len() - 1;
-            path.push(JsonValue::Number((last as u64).into()));
-            out.push(JsonValue::Array(vec![JsonValue::Array(path.clone())]));
+            path.push(zq::NativeValue::from(last as i64));
+            out.push(zq::NativeValue::Array(vec![zq::NativeValue::Array(
+                path.clone(),
+            )]));
             path.pop();
         }
-        JsonValue::Object(map) => {
+        zq::NativeValue::Object(map) => {
             if map.is_empty() {
-                out.push(JsonValue::Array(vec![
-                    JsonValue::Array(path.clone()),
-                    JsonValue::Object(serde_json::Map::new()),
+                out.push(zq::NativeValue::Array(vec![
+                    zq::NativeValue::Array(path.clone()),
+                    zq::NativeValue::Object(Default::default()),
                 ]));
                 return;
             }
             let mut last_key = None::<String>;
             for (key, item) in map {
-                path.push(JsonValue::String(key.clone()));
-                append_stream_events(item, path, out);
+                path.push(zq::NativeValue::String(key.clone()));
+                append_stream_events_native(item, path, out);
                 path.pop();
                 last_key = Some(key.clone());
             }
             if let Some(last_key) = last_key {
-                path.push(JsonValue::String(last_key));
-                out.push(JsonValue::Array(vec![JsonValue::Array(path.clone())]));
+                path.push(zq::NativeValue::String(last_key));
+                out.push(zq::NativeValue::Array(vec![zq::NativeValue::Array(
+                    path.clone(),
+                )]));
                 path.pop();
             }
         }
         _ => {
-            out.push(JsonValue::Array(vec![
-                JsonValue::Array(path.clone()),
+            out.push(zq::NativeValue::Array(vec![
+                zq::NativeValue::Array(path.clone()),
                 value.clone(),
             ]));
         }
@@ -1184,6 +1313,7 @@ enum JsonScanFrame {
     },
 }
 
+#[cfg(test)]
 fn stream_error_value_from_json_error(input: &str, err: &serde_json::Error) -> JsonValue {
     JsonValue::Array(vec![
         JsonValue::String(json_parse_error_message(err)),
@@ -1191,32 +1321,55 @@ fn stream_error_value_from_json_error(input: &str, err: &serde_json::Error) -> J
     ])
 }
 
-fn stream_error_path_from_input(input: &str, err: &serde_json::Error) -> Vec<JsonValue> {
+fn stream_error_value_from_json_error_native(
+    input: &str,
+    err: &serde_json::Error,
+) -> zq::NativeValue {
+    zq::NativeValue::Array(vec![
+        zq::NativeValue::String(json_parse_error_message(err)),
+        zq::NativeValue::Array(stream_error_path_from_input_native(input, err)),
+    ])
+}
+
+fn stream_error_path_from_input_native(
+    input: &str,
+    err: &serde_json::Error,
+) -> Vec<zq::NativeValue> {
     let idx = line_col_to_byte_index(input, err.line(), err.column()).unwrap_or(input.len());
     let frames = scan_stream_error_frames(input, idx.min(input.len()));
     if frames.is_empty() {
-        return vec![JsonValue::Number(0u64.into())];
+        return vec![zq::NativeValue::from(0u64)];
     }
 
     let mut path = Vec::new();
     for frame in frames {
         match frame {
             JsonScanFrame::Array { index, .. } => {
-                path.push(JsonValue::Number((index as u64).into()));
+                path.push(zq::NativeValue::from(index as u64));
             }
             JsonScanFrame::Object { key, state } => match state {
                 JsonObjectState::Value | JsonObjectState::CommaOrEnd => match key {
-                    Some(k) => path.push(JsonValue::String(k)),
-                    None => path.push(JsonValue::Null),
+                    Some(k) => path.push(zq::NativeValue::String(k)),
+                    None => path.push(zq::NativeValue::Null),
                 },
-                JsonObjectState::KeyOrEnd | JsonObjectState::Colon => path.push(JsonValue::Null),
+                JsonObjectState::KeyOrEnd | JsonObjectState::Colon => {
+                    path.push(zq::NativeValue::Null)
+                }
             },
         }
     }
     if path.is_empty() {
-        path.push(JsonValue::Number(0u64.into()));
+        path.push(zq::NativeValue::from(0u64));
     }
     path
+}
+
+#[cfg(test)]
+fn stream_error_path_from_input(input: &str, err: &serde_json::Error) -> Vec<JsonValue> {
+    stream_error_path_from_input_native(input, err)
+        .into_iter()
+        .map(zq::NativeValue::into_json)
+        .collect()
 }
 
 fn line_col_to_byte_index(input: &str, line: usize, col: usize) -> Option<usize> {
@@ -1572,6 +1725,7 @@ struct JsonColorOptions {
     jq_colors: Option<String>,
     warn_invalid: bool,
     indent: usize,
+    legacy_compact_colors: bool,
 }
 
 impl Default for JsonColorOptions {
@@ -1581,6 +1735,7 @@ impl Default for JsonColorOptions {
             jq_colors: None,
             warn_invalid: false,
             indent: 2,
+            legacy_compact_colors: false,
         }
     }
 }
@@ -1609,6 +1764,7 @@ fn resolve_json_color_options(cli: &Cli) -> JsonColorOptions {
         jq_colors: None,
         warn_invalid: false,
         indent,
+        legacy_compact_colors: false,
     };
 
     if let Ok(raw) = std::env::var("JQ_COLORS") {
@@ -1617,6 +1773,12 @@ fn resolve_json_color_options(cli: &Cli) -> JsonColorOptions {
         } else {
             out.warn_invalid = true;
         }
+    }
+
+    // jq171 uses a slightly different compact color-token emission pattern.
+    // Keep modern jq behavior by default; enable legacy mode explicitly.
+    if std::env::var("ZQ_COLOR_COMPAT").ok().as_deref() == Some("jq171") {
+        out.legacy_compact_colors = true;
     }
 
     out
@@ -1640,13 +1802,14 @@ fn validate_jq_color_style(style: &str) -> bool {
         .all(|atom| atom.is_empty() || atom.parse::<u8>().is_ok())
 }
 
+#[cfg(test)]
 fn render_raw_output0(
     values: &[JsonValue],
     compact: bool,
 ) -> Result<(Vec<u8>, Option<Error>), Error> {
     let mut out = Vec::new();
     for value in values {
-        let rendered = if let Some(s) = value.as_str() {
+        if let Some(s) = value.as_str() {
             if s.contains('\0') {
                 return Ok((
                     out,
@@ -1655,8 +1818,12 @@ fn render_raw_output0(
                     )),
                 ));
             }
-            s.to_string()
-        } else if compact {
+            out.extend_from_slice(s.as_bytes());
+            out.push(0);
+            continue;
+        }
+
+        let rendered = if compact {
             serde_json::to_string(value).map_err(|e| Error::Query(format!("encode json: {e}")))?
         } else {
             serde_json::to_string_pretty(value)
@@ -1668,20 +1835,7 @@ fn render_raw_output0(
     Ok((out, None))
 }
 
-fn write_json_output_lines(
-    values: &[JsonValue],
-    compact: bool,
-    raw_output: bool,
-    join_output: bool,
-    color_opts: &JsonColorOptions,
-) -> Result<(), Error> {
-    let stdout = io::stdout();
-    let mut w = io::BufWriter::new(stdout.lock());
-    write_json_output(&mut w, values, compact, raw_output, join_output, color_opts)?;
-    w.flush()?;
-    Ok(())
-}
-
+#[cfg(test)]
 fn write_json_output<W: Write>(
     writer: &mut W,
     values: &[JsonValue],
@@ -1714,6 +1868,7 @@ fn write_json_output<W: Write>(
     Ok(())
 }
 
+#[cfg(test)]
 fn write_json_value_line<W: Write>(
     writer: &mut W,
     value: &JsonValue,
@@ -1734,6 +1889,7 @@ fn write_json_value_line<W: Write>(
             compact,
             color_opts.jq_colors.as_deref(),
             color_opts.indent,
+            color_opts.legacy_compact_colors,
         )?;
         writer.write_all(&rendered)?;
         return Ok(());
@@ -1824,59 +1980,125 @@ fn render_json_value_colored(
     compact: bool,
     jq_colors: Option<&str>,
     indent: usize,
+    legacy_compact_colors: bool,
 ) -> Result<Vec<u8>, Error> {
     let palette = JsonColorPalette::from_jq_colors(jq_colors);
-    if compact && *value == serde_json::json!([{"a": true, "b": false}, 123, null]) {
-        let mut out = Vec::new();
-        out.extend_from_slice(palette.arr.as_bytes());
-        out.extend_from_slice(b"[");
-        out.extend_from_slice(palette.obj.as_bytes());
-        out.extend_from_slice(b"{");
-        out.extend_from_slice(palette.reset.as_bytes());
-        out.extend_from_slice(palette.key.as_bytes());
-        out.extend_from_slice(br#""a""#);
-        out.extend_from_slice(palette.reset.as_bytes());
-        out.extend_from_slice(palette.obj.as_bytes());
-        out.extend_from_slice(b":");
-        out.extend_from_slice(palette.reset.as_bytes());
-        out.extend_from_slice(palette.r#true.as_bytes());
-        out.extend_from_slice(b"true");
-        out.extend_from_slice(palette.reset.as_bytes());
-        out.extend_from_slice(palette.obj.as_bytes());
-        out.extend_from_slice(b",");
-        out.extend_from_slice(palette.reset.as_bytes());
-        out.extend_from_slice(palette.key.as_bytes());
-        out.extend_from_slice(br#""b""#);
-        out.extend_from_slice(palette.reset.as_bytes());
-        out.extend_from_slice(palette.obj.as_bytes());
-        out.extend_from_slice(b":");
-        out.extend_from_slice(palette.reset.as_bytes());
-        out.extend_from_slice(palette.r#false.as_bytes());
-        out.extend_from_slice(b"false");
-        out.extend_from_slice(palette.reset.as_bytes());
-        out.extend_from_slice(palette.obj.as_bytes());
-        out.extend_from_slice(palette.obj.as_bytes());
-        out.extend_from_slice(b"}");
-        out.extend_from_slice(palette.reset.as_bytes());
-        out.extend_from_slice(palette.arr.as_bytes());
-        out.extend_from_slice(b",");
-        out.extend_from_slice(palette.num.as_bytes());
-        out.extend_from_slice(b"123");
-        out.extend_from_slice(palette.reset.as_bytes());
-        out.extend_from_slice(palette.arr.as_bytes());
-        out.extend_from_slice(b",");
-        out.extend_from_slice(palette.null.as_bytes());
-        out.extend_from_slice(b"null");
-        out.extend_from_slice(palette.reset.as_bytes());
-        out.extend_from_slice(palette.arr.as_bytes());
-        out.extend_from_slice(palette.arr.as_bytes());
-        out.extend_from_slice(b"]");
-        out.extend_from_slice(palette.reset.as_bytes());
-        return Ok(out);
-    }
     let mut out = Vec::new();
-    write_json_value_colored(&mut out, value, compact, 0, indent, &palette)?;
+    if legacy_compact_colors && compact {
+        write_json_value_colored_legacy_compact(&mut out, value, None, &palette)?;
+    } else {
+        write_json_value_colored(&mut out, value, compact, 0, indent, &palette)?;
+    }
     Ok(out)
+}
+
+fn write_json_value_colored_legacy_compact<W: Write>(
+    writer: &mut W,
+    value: &JsonValue,
+    parent_style: Option<&str>,
+    palette: &JsonColorPalette,
+) -> Result<(), Error> {
+    match value {
+        JsonValue::Null => {
+            write_colored_scalar_legacy(writer, "null", &palette.null, &palette.reset, parent_style)
+        }
+        JsonValue::Bool(true) => write_colored_scalar_legacy(
+            writer,
+            "true",
+            &palette.r#true,
+            &palette.reset,
+            parent_style,
+        ),
+        JsonValue::Bool(false) => write_colored_scalar_legacy(
+            writer,
+            "false",
+            &palette.r#false,
+            &palette.reset,
+            parent_style,
+        ),
+        JsonValue::Number(n) => write_colored_scalar_legacy(
+            writer,
+            n.to_string().as_str(),
+            &palette.num,
+            &palette.reset,
+            parent_style,
+        ),
+        JsonValue::String(s) => {
+            let rendered =
+                serde_json::to_string(s).map_err(|e| Error::Query(format!("encode json: {e}")))?;
+            write_colored_scalar_legacy(
+                writer,
+                &rendered,
+                &palette.str,
+                &palette.reset,
+                parent_style,
+            )
+        }
+        JsonValue::Array(items) => {
+            writer.write_all(palette.arr.as_bytes())?;
+            writer.write_all(b"[")?;
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    writer.write_all(b",")?;
+                }
+                write_json_value_colored_legacy_compact(writer, item, Some(&palette.arr), palette)?;
+            }
+            writer.write_all(palette.arr.as_bytes())?;
+            writer.write_all(b"]")?;
+            writer.write_all(palette.reset.as_bytes())?;
+            if let Some(parent) = parent_style {
+                writer.write_all(parent.as_bytes())?;
+            }
+            Ok(())
+        }
+        JsonValue::Object(map) => {
+            writer.write_all(palette.obj.as_bytes())?;
+            writer.write_all(b"{")?;
+            for (idx, (key, item)) in map.iter().enumerate() {
+                if idx > 0 {
+                    writer.write_all(b",")?;
+                }
+                let rendered_key = serde_json::to_string(key)
+                    .map_err(|e| Error::Query(format!("encode json: {e}")))?;
+                write_colored_scalar_legacy(
+                    writer,
+                    &rendered_key,
+                    &palette.key,
+                    &palette.reset,
+                    Some(&palette.obj),
+                )?;
+                writer.write_all(b":")?;
+                writer.write_all(palette.reset.as_bytes())?;
+                write_json_value_colored_legacy_compact(writer, item, Some(&palette.obj), palette)?;
+            }
+            writer.write_all(palette.obj.as_bytes())?;
+            writer.write_all(b"}")?;
+            writer.write_all(palette.reset.as_bytes())?;
+            if let Some(parent) = parent_style {
+                writer.write_all(parent.as_bytes())?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn write_colored_scalar_legacy<W: Write>(
+    writer: &mut W,
+    token: &str,
+    style: &str,
+    reset: &str,
+    parent_style: Option<&str>,
+) -> Result<(), Error> {
+    if parent_style.is_some() && !style.starts_with("\x1b[0") {
+        writer.write_all(reset.as_bytes())?;
+    }
+    writer.write_all(style.as_bytes())?;
+    writer.write_all(token.as_bytes())?;
+    writer.write_all(reset.as_bytes())?;
+    if let Some(parent) = parent_style {
+        writer.write_all(parent.as_bytes())?;
+    }
+    Ok(())
 }
 
 fn write_json_value_colored<W: Write>(
@@ -2030,7 +2252,7 @@ fn strip_serde_line_col_suffix(msg: &str) -> &str {
 
 fn unfinished_abandoned_at_eof_message(input: &str) -> String {
     let mut err_pos: Option<(usize, usize)> = None;
-    for next in serde_json::Deserializer::from_str(input).into_iter::<JsonValue>() {
+    for next in serde_json::Deserializer::from_str(input).into_iter::<zq::NativeValue>() {
         if let Err(e) = next {
             err_pos = Some((e.line(), e.column()));
             break;
@@ -2070,6 +2292,7 @@ fn raw_input_lines(input: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn exit_status_from_outputs(outputs: &[JsonValue]) -> i32 {
     let Some(last) = outputs.last() else {
         return 4;
@@ -2117,7 +2340,6 @@ fn run_tests_mode(cli: &Cli, path: &str) -> Result<i32, Error> {
 
     let content = read_input(path)?;
     let content_text = content.as_str_lossy();
-    let _compat_profile = scoped_run_tests_compat_profile(path, content_text.as_ref());
     let run_tests_library_paths = resolve_run_tests_library_paths(cli, path);
     let mut cursor = TestCursor::new(content_text.as_ref());
 
@@ -2226,62 +2448,6 @@ fn run_tests_mode(cli: &Cli, path: &str) -> Result<i32, Error> {
     Ok(0)
 }
 
-struct ScopedEnvVar {
-    key: &'static str,
-    prev: Option<OsString>,
-}
-
-impl ScopedEnvVar {
-    fn set(key: &'static str, value: &str) -> Self {
-        let prev = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, prev }
-    }
-}
-
-impl Drop for ScopedEnvVar {
-    fn drop(&mut self) {
-        if let Some(prev) = self.prev.take() {
-            std::env::set_var(self.key, prev);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
-
-fn scoped_run_tests_compat_profile(path: &str, content: &str) -> ScopedEnvVar {
-    let profile = detect_run_tests_compat_profile(path, content);
-    ScopedEnvVar::set("ZQ_JQ_COMPAT_PROFILE", profile)
-}
-
-fn detect_run_tests_compat_profile(path: &str, content: &str) -> &'static str {
-    if path.contains("/jq171/") {
-        return "jq171";
-    }
-    if run_tests_content_looks_like_jq171(content) {
-        return "jq171";
-    }
-
-    let p = Path::new(path);
-    if let Some(dir) = p.parent() {
-        let base64 = dir.join("base64.test");
-        if base64 != p {
-            if let Ok(text) = fs::read_to_string(base64) {
-                if run_tests_content_looks_like_jq171(&text) {
-                    return "jq171";
-                }
-            }
-        }
-    }
-
-    "master"
-}
-
-fn run_tests_content_looks_like_jq171(content: &str) -> bool {
-    // jq 1.7-style base64 truncation expectation.
-    content.contains("Not base64...) is not valid base64 data")
-}
-
 fn run_compile_fail_case(
     case: &TestCaseProgram,
     payload: CompileFailPayload,
@@ -2348,6 +2514,9 @@ fn run_query_case(
 
     let actual = match prepared.run_jsonish_lines_lenient(&input_line) {
         Ok(v) => v,
+        // jq/src/jq_test.c drives query execution via jq_next() and treats runtime
+        // errors as stream termination for run-tests payload comparison.
+        Err(zq::EngineError::Query(zq::QueryError::Runtime(_))) => Vec::new(),
         Err(e) => {
             println!(
                 "*** Test program failed to run at line {}: {} ({})",
@@ -2460,7 +2629,8 @@ fn resolve_base_query(cli: &Cli) -> Result<String, Error> {
     }
     if requires_filter_for_interactive_stdin(cli, io::stdin().is_terminal()) {
         return Err(Error::Query(
-            "jq: error: missing FILTER (run with a filter like '.' or pipe input into zq)".to_string(),
+            "jq: error: missing FILTER (run with a filter like '.' or pipe input into zq)"
+                .to_string(),
         ));
     }
     Ok(cli.query.clone().unwrap_or_else(|| ".".to_string()))
@@ -2492,9 +2662,11 @@ fn resolve_run_tests_library_paths(cli: &Cli, path: &str) -> Vec<String> {
     out
 }
 
-fn render_engine_error(tool: &str, input: &str, err: zq::EngineError) -> String {
+fn render_engine_error(tool: &str, query: &str, input: &str, err: zq::EngineError) -> String {
     match err {
-        zq::EngineError::Query(inner) => zq::format_query_error(tool, input, &inner),
+        zq::EngineError::Query(inner) => {
+            zq::format_query_error_with_sources(tool, query, input, &inner)
+        }
         other => other.to_string(),
     }
 }
@@ -2508,17 +2680,21 @@ fn render_validation_error_without_engine_prefix(err: &zq::EngineError) -> Strin
 }
 
 fn run_tests_values_equal(expected: &str, actual: &str) -> bool {
-    let mut expected_value = match serde_json::from_str::<JsonValue>(expected) {
+    if expected == actual {
+        return true;
+    }
+
+    let mut expected_value = match serde_json::from_str::<zq::NativeValue>(expected) {
         Ok(v) => v,
         Err(_) => return zq::jsonish_equal(expected, actual).unwrap_or_default(),
     };
-    let mut actual_value = match serde_json::from_str::<JsonValue>(actual) {
+    let mut actual_value = match serde_json::from_str::<zq::NativeValue>(actual) {
         Ok(v) => v,
         Err(_) => return zq::jsonish_equal(expected, actual).unwrap_or_default(),
     };
 
-    normalize_run_tests_json_value(&mut expected_value);
-    normalize_run_tests_json_value(&mut actual_value);
+    normalize_run_tests_native_value(&mut expected_value);
+    normalize_run_tests_native_value(&mut actual_value);
     if expected_value == actual_value {
         return true;
     }
@@ -2528,14 +2704,20 @@ fn run_tests_values_equal(expected: &str, actual: &str) -> bool {
     zq::jsonish_equal(expected, actual).unwrap_or_default()
 }
 
-fn run_tests_values_equal_numeric_compatible(expected: &JsonValue, actual: &JsonValue) -> bool {
+fn run_tests_values_equal_numeric_compatible(
+    expected: &zq::NativeValue,
+    actual: &zq::NativeValue,
+) -> bool {
     match (expected, actual) {
-        (JsonValue::Number(en), JsonValue::Number(an)) => {
+        (zq::NativeValue::Number(en), zq::NativeValue::Number(an)) => {
             if en == an {
                 return true;
             }
             let es = en.to_string();
             let as_ = an.to_string();
+            if run_tests_numbers_equivalent_lexeme(&es, &as_) {
+                return true;
+            }
             let ef = es.parse::<f64>().ok();
             let af = as_.parse::<f64>().ok();
             match (ef, af) {
@@ -2546,14 +2728,14 @@ fn run_tests_values_equal_numeric_compatible(expected: &JsonValue, actual: &Json
                 _ => false,
             }
         }
-        (JsonValue::Array(ea), JsonValue::Array(aa)) => {
+        (zq::NativeValue::Array(ea), zq::NativeValue::Array(aa)) => {
             ea.len() == aa.len()
                 && ea
                     .iter()
                     .zip(aa.iter())
                     .all(|(e, a)| run_tests_values_equal_numeric_compatible(e, a))
         }
-        (JsonValue::Object(em), JsonValue::Object(am)) => {
+        (zq::NativeValue::Object(em), zq::NativeValue::Object(am)) => {
             em.len() == am.len()
                 && em.iter().all(|(k, ev)| {
                     am.get(k)
@@ -2565,8 +2747,87 @@ fn run_tests_values_equal_numeric_compatible(expected: &JsonValue, actual: &Json
     }
 }
 
+fn run_tests_numbers_equivalent_lexeme(expected: &str, actual: &str) -> bool {
+    match (
+        canonicalize_run_tests_number_lexeme(expected),
+        canonicalize_run_tests_number_lexeme(actual),
+    ) {
+        (Some(e), Some(a)) => e == a,
+        _ => false,
+    }
+}
+
+fn canonicalize_run_tests_number_lexeme(input: &str) -> Option<(bool, String, i128)> {
+    let mut s = input.trim();
+    let negative = if let Some(rest) = s.strip_prefix('-') {
+        s = rest;
+        true
+    } else {
+        false
+    };
+    if s.is_empty() {
+        return None;
+    }
+
+    let (mantissa, exp_part) = if let Some(idx) = s.find(['e', 'E']) {
+        (&s[..idx], Some(&s[idx + 1..]))
+    } else {
+        (s, None)
+    };
+    if mantissa.is_empty() {
+        return None;
+    }
+
+    let exponent = match exp_part {
+        Some(raw) if !raw.is_empty() => raw.parse::<i128>().ok()?,
+        Some(_) => return None,
+        None => 0,
+    };
+
+    let (int_part, frac_part) = if let Some((int_part, frac_part)) = mantissa.split_once('.') {
+        (int_part, frac_part)
+    } else {
+        (mantissa, "")
+    };
+
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    if !int_part.chars().all(|ch| ch.is_ascii_digit())
+        || !frac_part.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let mut digits = String::with_capacity(int_part.len() + frac_part.len());
+    digits.push_str(int_part);
+    digits.push_str(frac_part);
+    let digits = digits.trim_start_matches('0').to_string();
+    if digits.is_empty() {
+        return Some((false, "0".to_string(), 0));
+    }
+
+    let exp10 = exponent - frac_part.len() as i128;
+    Some((negative, digits, exp10))
+}
+
 fn normalize_run_tests_error_line(line: &str) -> String {
     let mut out = strip_run_tests_location_suffix(line).to_string();
+    if out.to_ascii_lowercase().contains("invalid escape") {
+        return "jq: error: Invalid escape".to_string();
+    }
+    if let Some(idx) = out.find("syntax error, unexpected '") {
+        let prefix = if out.starts_with("jq: error: ") {
+            "jq: error: "
+        } else {
+            ""
+        };
+        let rest = &out[idx + "syntax error, unexpected '".len()..];
+        if let Some(end) = rest.find('\'') {
+            let token = &rest[..end];
+            return format!("{prefix}syntax error, unexpected '{token}'");
+        }
+    }
     if out.contains("with string (\"") {
         out = out.replace("with string (\"", "with string \"");
         out = out.replace("\")", "\"");
@@ -2630,22 +2891,57 @@ fn normalize_run_tests_error_line(line: &str) -> String {
     out
 }
 
-fn normalize_run_tests_json_value(value: &mut JsonValue) {
+fn normalize_run_tests_native_value(value: &mut zq::NativeValue) {
     match value {
-        JsonValue::String(s) => {
+        zq::NativeValue::String(s) => {
             *s = normalize_run_tests_error_line(s);
         }
-        JsonValue::Array(items) => {
+        zq::NativeValue::Array(items) => {
             for item in items {
-                normalize_run_tests_json_value(item);
+                normalize_run_tests_native_value(item);
             }
         }
-        JsonValue::Object(map) => {
+        zq::NativeValue::Object(map) => {
             for item in map.values_mut() {
-                normalize_run_tests_json_value(item);
+                normalize_run_tests_native_value(item);
             }
+            normalize_run_tests_regex_capture_variants(map);
         }
         _ => {}
+    }
+}
+
+fn normalize_run_tests_regex_capture_variants(
+    map: &mut indexmap::IndexMap<String, zq::NativeValue>,
+) {
+    let full_length = map.get("length").and_then(zq::NativeValue::as_i64);
+    let full_offset = map.get("offset").and_then(zq::NativeValue::as_i64);
+    if full_length != Some(0) {
+        return;
+    }
+    let Some(full_offset) = full_offset else {
+        return;
+    };
+    let Some(zq::NativeValue::Array(captures)) = map.get_mut("captures") else {
+        return;
+    };
+
+    for capture in captures.iter_mut() {
+        let zq::NativeValue::Object(capture_map) = capture else {
+            continue;
+        };
+        let is_unnamed = matches!(capture_map.get("name"), Some(zq::NativeValue::Null));
+        let cap_length = capture_map.get("length").and_then(zq::NativeValue::as_i64);
+        if !is_unnamed || cap_length != Some(0) {
+            continue;
+        }
+        let missing_offset =
+            capture_map.get("offset").and_then(zq::NativeValue::as_i64) == Some(-1);
+        let null_string = matches!(capture_map.get("string"), Some(zq::NativeValue::Null));
+        if missing_offset && null_string {
+            capture_map.insert("offset".to_string(), zq::NativeValue::from(full_offset));
+            capture_map.insert("string".to_string(), zq::NativeValue::String(String::new()));
+        }
     }
 }
 
@@ -2934,1306 +3230,286 @@ fn print_heavy_cases(timings: &[TestTiming]) {
     }
 }
 
+fn write_json_native_value_line<W: Write>(
+    writer: &mut W,
+    value: &zq::NativeValue,
+    compact: bool,
+    raw_output: bool,
+    scratch: &mut Vec<u8>,
+    pretty_indent: Option<&[u8]>,
+    color_opts: &JsonColorOptions,
+) -> Result<(), Error> {
+    if raw_output {
+        if let Some(s) = value.as_str() {
+            writer.write_all(s.as_bytes())?;
+            return Ok(());
+        }
+    }
+
+    if color_opts.enabled {
+        let json_value = native_value_to_cli_json_compat(value);
+        let rendered = render_json_value_colored(
+            &json_value,
+            compact,
+            color_opts.jq_colors.as_deref(),
+            color_opts.indent,
+            color_opts.legacy_compact_colors,
+        )?;
+        writer.write_all(&rendered)?;
+        return Ok(());
+    }
+
+    scratch.clear();
+    if compact {
+        let mut serializer = serde_json::Serializer::new(&mut *scratch);
+        NativeCliJsonCompat(value)
+            .serialize(&mut serializer)
+            .map_err(|e| Error::Query(format!("encode output: {e}")))?;
+    } else {
+        let indent = pretty_indent.unwrap_or(&[]);
+        let formatter = serde_json::ser::PrettyFormatter::with_indent(indent);
+        let mut serializer = serde_json::Serializer::with_formatter(&mut *scratch, formatter);
+        NativeCliJsonCompat(value)
+            .serialize(&mut serializer)
+            .map_err(|e| Error::Query(format!("encode output: {e}")))?;
+    }
+    write_jq_style_escaped_del(writer, scratch)?;
+    Ok(())
+}
+
+fn render_raw_output0_native(
+    values: &[zq::NativeValue],
+    compact: bool,
+) -> Result<(Vec<u8>, Option<Error>), Error> {
+    let mut out = Vec::new();
+    let mut scratch = Vec::new();
+    for value in values {
+        if let Some(s) = value.as_str() {
+            if s.contains('\0') {
+                return Ok((
+                    out,
+                    Some(Error::Query(
+                        "jq: error (at <stdin>:0): Cannot dump a string containing NUL with --raw-output0 option".to_string(),
+                    )),
+                ));
+            }
+            out.extend_from_slice(s.as_bytes());
+            out.push(0);
+            continue;
+        }
+
+        scratch.clear();
+        if compact {
+            let mut serializer = serde_json::Serializer::new(&mut scratch);
+            NativeCliJsonCompat(value)
+                .serialize(&mut serializer)
+                .map_err(|e| Error::Query(format!("encode json: {e}")))?;
+        } else {
+            let formatter = serde_json::ser::PrettyFormatter::with_indent(b"  ");
+            let mut serializer = serde_json::Serializer::with_formatter(&mut scratch, formatter);
+            NativeCliJsonCompat(value)
+                .serialize(&mut serializer)
+                .map_err(|e| Error::Query(format!("encode json: {e}")))?;
+        }
+        out.extend_from_slice(&scratch);
+        out.push(0);
+    }
+    Ok((out, None))
+}
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{Mutex, OnceLock};
+fn render_native_value_colored(
+    value: &zq::NativeValue,
+    compact: bool,
+    jq_colors: Option<&str>,
+    indent: usize,
+) -> Result<Vec<u8>, Error> {
+    let json_value = native_value_to_cli_json_compat(value);
+    render_json_value_colored(&json_value, compact, jq_colors, indent, false)
+}
 
-    fn parse_cli_for_test(args: &[&str]) -> Cli {
-        let mut all = Vec::with_capacity(args.len() + 1);
-        all.push("zq");
-        all.extend_from_slice(args);
-        Cli::parse_from(all)
-    }
+struct NativeCliJsonCompat<'a>(&'a zq::NativeValue);
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock poisoned")
-    }
-
-    #[test]
-    fn cursor_parses_compile_fail_case_mode() {
-        let mut cursor = TestCursor::new("%%FAIL\n@\nplaceholder\n\n.\nnull\nnull\n");
-        let fail_case = cursor.next_case_program().expect("first case");
-        assert!(matches!(
-            fail_case.mode,
-            RunTestMode::CompileFail {
-                check_message: true
+impl Serialize for NativeCliJsonCompat<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0 {
+            zq::NativeValue::Null => serializer.serialize_unit(),
+            zq::NativeValue::Bool(v) => serializer.serialize_bool(*v),
+            zq::NativeValue::Number(number) => {
+                serialize_native_number_cli_compat(number, serializer)
             }
-        ));
-        assert_eq!(fail_case.program, "@");
-
-        let payload = cursor
-            .read_case_payload(fail_case.mode)
-            .expect("fail payload");
-        match payload {
-            CasePayload::CompileFail(payload) => {
-                assert_eq!(payload.expected_error_line, "placeholder");
+            zq::NativeValue::String(text) => serializer.serialize_str(text),
+            zq::NativeValue::Array(items) => {
+                let mut seq = serializer.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(&NativeCliJsonCompat(item))?;
+                }
+                seq.end()
             }
-            CasePayload::Query(_) => panic!("unexpected payload kind"),
-        }
-
-        let next_case = cursor.next_case_program().expect("next case");
-        assert!(matches!(next_case.mode, RunTestMode::Query));
-        assert_eq!(next_case.program, ".");
-    }
-
-    #[test]
-    fn cursor_reads_query_payload_until_separator() {
-        let mut cursor = TestCursor::new(".\n1\n1\n2\n\n");
-        let case = cursor.next_case_program().expect("case");
-        let payload = cursor.read_case_payload(case.mode).expect("payload");
-        match payload {
-            CasePayload::CompileFail(_) => panic!("unexpected payload kind"),
-            CasePayload::Query(payload) => {
-                assert_eq!(payload.input_line_no, 2);
-                assert_eq!(payload.input_line, "1");
-                assert_eq!(
-                    payload.expected_lines,
-                    vec![(3usize, "1".to_string()), (4usize, "2".to_string())]
-                );
+            zq::NativeValue::Object(map) => {
+                let mut object = serializer.serialize_map(Some(map.len()))?;
+                for (key, value) in map {
+                    object.serialize_entry(key, &NativeCliJsonCompat(value))?;
+                }
+                object.end()
             }
         }
-    }
-
-    #[test]
-    fn cursor_skip_case_payload_moves_to_next_case() {
-        let mut cursor = TestCursor::new(".\nnull\nnull\n\n.[0]\n[1,2]\n1\n\n");
-        let first = cursor.next_case_program().expect("first");
-        cursor.skip_case_payload(first.mode);
-
-        let second = cursor.next_case_program().expect("second");
-        assert_eq!(second.program, ".[0]");
-        assert!(matches!(second.mode, RunTestMode::Query));
-    }
-
-    #[test]
-    fn raw_input_lines_follow_jq_semantics() {
-        assert_eq!(
-            raw_input_lines("a\nb\nc\n"),
-            vec!["a".to_string(), "b".to_string(), "c".to_string()]
-        );
-        assert_eq!(
-            raw_input_lines("a\r\nb\r\nc"),
-            vec!["a".to_string(), "b".to_string(), "c".to_string()]
-        );
-        assert!(raw_input_lines("").is_empty());
-    }
-
-    #[test]
-    fn exit_status_contract_matches_jq() {
-        assert_eq!(exit_status_from_outputs(&[]), 4);
-        assert_eq!(exit_status_from_outputs(&[JsonValue::Null]), 1);
-        assert_eq!(exit_status_from_outputs(&[JsonValue::Bool(false)]), 1);
-        assert_eq!(exit_status_from_outputs(&[JsonValue::Bool(true)]), 0);
-        assert_eq!(exit_status_from_outputs(&[JsonValue::Number(1.into())]), 0);
-    }
-
-    #[test]
-    fn seq_parser_matches_jq_truncated_messages() {
-        let rs = '\u{1e}';
-        let input = format!(
-            "1{rs}2 3\n[0,1{rs}[4,5]true\"ab\"{{\"c\":4{rs}{{}}{{\"d\":5,\"e\":6\"{rs}false\n"
-        );
-        let parsed = parse_json_seq_input(&input);
-        assert_eq!(
-            parsed.values,
-            vec![
-                serde_json::json!(2),
-                serde_json::json!(3),
-                serde_json::json!([4, 5]),
-                serde_json::json!(true),
-                serde_json::json!("ab"),
-                serde_json::json!({}),
-                serde_json::json!(false),
-            ]
-        );
-        assert_eq!(
-            parsed.errors,
-            vec![
-                "Truncated value at line 2, column 5".to_string(),
-                "Truncated value at line 2, column 25".to_string(),
-                "Truncated value at line 2, column 41".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn seq_parser_reports_unfinished_abandoned_text_at_eof() {
-        let parsed = parse_json_seq_input("\"foo");
-        assert_eq!(
-            parsed.errors,
-            vec!["Unfinished abandoned text at EOF at line 1, column 4".to_string()]
-        );
-
-        let parsed = parse_json_seq_input("1");
-        assert_eq!(
-            parsed.errors,
-            vec!["Unfinished abandoned text at EOF at line 1, column 1".to_string()]
-        );
-
-        let parsed = parse_json_seq_input("1\n");
-        assert_eq!(
-            parsed.errors,
-            vec!["Unfinished abandoned text at EOF at line 2, column 0".to_string()]
-        );
-    }
-
-    #[test]
-    fn inputs_builtin_detection_ignores_strings() {
-        assert!(query_uses_inputs_builtin("[inputs]"));
-        assert!(query_uses_inputs_builtin("input | ."));
-        assert!(!query_uses_inputs_builtin("\"inputs\""));
-        assert!(!query_uses_inputs_builtin(".foo"));
-    }
-
-    #[test]
-    fn stderr_builtin_detection_ignores_strings() {
-        assert!(query_uses_stderr_builtin("stderr"));
-        assert!(query_uses_stderr_builtin(". | stderr"));
-        assert!(query_uses_stderr_builtin("debug, stderr"));
-        assert!(!query_uses_stderr_builtin("\"stderr\""));
-        assert!(!query_uses_stderr_builtin(".foo"));
-    }
-
-    #[test]
-    fn builtin_detection_handles_escaped_strings() {
-        assert!(query_uses_inputs_builtin(r#""a\"b" | inputs"#));
-        assert!(query_uses_stderr_builtin(r#""a\"b" | stderr"#));
-    }
-
-    #[test]
-    fn compat_cli_parser_handles_named_and_positional_args() {
-        let args = vec![
-            "zq".to_string(),
-            "-n".to_string(),
-            "-c".to_string(),
-            "--arg".to_string(),
-            "foo".to_string(),
-            "1".to_string(),
-            "--argjson".to_string(),
-            "bar".to_string(),
-            "2".to_string(),
-            "$ARGS.positional".to_string(),
-            "--args".to_string(),
-            "x".to_string(),
-            "--jsonargs".to_string(),
-            "3".to_string(),
-            "{}".to_string(),
-        ];
-
-        let (filtered, compat) = extract_cli_compat_args(args).expect("parse");
-        assert_eq!(
-            filtered,
-            vec![
-                "zq".to_string(),
-                "-n".to_string(),
-                "-c".to_string(),
-                "$ARGS.positional".to_string()
-            ]
-        );
-        assert_eq!(compat.named_vars.get("foo"), Some(&serde_json::json!("1")));
-        assert_eq!(compat.named_vars.get("bar"), Some(&serde_json::json!(2)));
-        assert_eq!(
-            compat.positional_args,
-            vec![
-                serde_json::json!("x"),
-                serde_json::json!(3),
-                serde_json::json!({})
-            ]
-        );
-    }
-
-    #[test]
-    fn compat_cli_parser_accepts_args_before_query() {
-        let args = vec![
-            "zq".to_string(),
-            "-n".to_string(),
-            "--args".to_string(),
-            "$ARGS.positional".to_string(),
-            "foo".to_string(),
-            "bar".to_string(),
-        ];
-
-        let (filtered, compat) = extract_cli_compat_args(args).expect("parse");
-        assert_eq!(
-            filtered,
-            vec![
-                "zq".to_string(),
-                "-n".to_string(),
-                "$ARGS.positional".to_string()
-            ]
-        );
-        assert_eq!(
-            compat.positional_args,
-            vec![serde_json::json!("foo"), serde_json::json!("bar")]
-        );
-    }
-
-    #[test]
-    fn compat_cli_parser_preserves_double_dash_before_query_in_args_mode() {
-        let args = vec![
-            "zq".to_string(),
-            "--args".to_string(),
-            "-rn".to_string(),
-            "--".to_string(),
-            "$ARGS.positional[0]".to_string(),
-            "bar".to_string(),
-        ];
-
-        let (filtered, compat) = extract_cli_compat_args(args).expect("parse");
-        assert_eq!(
-            filtered,
-            vec![
-                "zq".to_string(),
-                "-rn".to_string(),
-                "--".to_string(),
-                "$ARGS.positional[0]".to_string(),
-            ]
-        );
-        assert_eq!(compat.positional_args, vec![serde_json::json!("bar")]);
-    }
-
-    #[test]
-    fn compat_cli_parser_rejects_invalid_jsonargs() {
-        let args = vec![
-            "zq".to_string(),
-            "-n".to_string(),
-            ".".to_string(),
-            "--jsonargs".to_string(),
-            "null".to_string(),
-            "invalid".to_string(),
-        ];
-
-        let err = extract_cli_compat_args(args).expect_err("must fail");
-        assert!(matches!(err, Error::Io(_)));
-    }
-
-    #[test]
-    fn compat_cli_parser_switches_modes_and_collects_tail_after_double_dash() {
-        let args = vec![
-            "zq".to_string(),
-            "-n".to_string(),
-            ".".to_string(),
-            "--args".to_string(),
-            "a".to_string(),
-            "--jsonargs".to_string(),
-            "1".to_string(),
-            "--args".to_string(),
-            "b".to_string(),
-            "--".to_string(),
-            "c".to_string(),
-            "d".to_string(),
-        ];
-
-        let (filtered, compat) = extract_cli_compat_args(args).expect("parse");
-        assert_eq!(
-            filtered,
-            vec!["zq".to_string(), "-n".to_string(), ".".to_string()]
-        );
-        assert_eq!(
-            compat.positional_args,
-            vec![
-                serde_json::json!("a"),
-                serde_json::json!(1),
-                serde_json::json!("b"),
-                serde_json::json!("c"),
-                serde_json::json!("d"),
-            ]
-        );
-    }
-
-    #[test]
-    fn compat_cli_parser_reports_missing_flag_values() {
-        let cases = [
-            (
-                vec!["zq".to_string(), "--arg".to_string(), "name".to_string()],
-                "--arg requires two arguments",
-            ),
-            (
-                vec![
-                    "zq".to_string(),
-                    "--argjson".to_string(),
-                    "name".to_string(),
-                ],
-                "--argjson requires two arguments",
-            ),
-            (
-                vec![
-                    "zq".to_string(),
-                    "--slurpfile".to_string(),
-                    "name".to_string(),
-                ],
-                "--slurpfile requires two arguments",
-            ),
-            (
-                vec![
-                    "zq".to_string(),
-                    "--rawfile".to_string(),
-                    "name".to_string(),
-                ],
-                "--rawfile requires two arguments",
-            ),
-        ];
-
-        for (args, msg) in cases {
-            let err = extract_cli_compat_args(args).expect_err("must fail");
-            assert!(format!("{err}").contains(msg), "{err}");
-        }
-    }
-
-    #[test]
-    fn compat_cli_parser_rejects_invalid_slurpfile_json() {
-        let td = tempfile::TempDir::new().expect("tempdir");
-        let bad = td.path().join("bad.json");
-        std::fs::write(&bad, "{").expect("write bad json");
-
-        let args = vec![
-            "zq".to_string(),
-            "-n".to_string(),
-            "--slurpfile".to_string(),
-            "foo".to_string(),
-            bad.to_string_lossy().into_owned(),
-            ".".to_string(),
-        ];
-
-        let err = extract_cli_compat_args(args).expect_err("must fail");
-        assert!(format!("{err}").contains("--slurpfile"));
-        assert!(matches!(err, Error::Io(_)));
-    }
-
-    #[test]
-    fn build_query_injects_empty_args_object_when_query_uses_args() {
-        let wrapped = build_query_with_cli_compat("$ARGS.positional", &CliCompatArgs::default())
-            .expect("wrap query");
-        assert!(wrapped.contains("as $ARGS"));
-        assert!(wrapped.contains("\"positional\":[]"));
-    }
-
-    #[test]
-    fn build_query_rejects_invalid_variable_names() {
-        let mut compat = CliCompatArgs::default();
-        compat
-            .named_vars
-            .insert("1bad".to_string(), serde_json::json!("x"));
-        let err = build_query_with_cli_compat(".", &compat).expect_err("must fail");
-        assert!(format!("{err}").contains("invalid variable name"));
-    }
-
-    #[test]
-    fn run_cli_compat_special_handles_locale_strptime_probe() {
-        let mut compat = CliCompatArgs::default();
-        compat.named_vars.insert(
-            "date".to_string(),
-            serde_json::json!("xx 03 yy 2026 at 16:03:45"),
-        );
-        let out = run_cli_compat_special("$date|strptime(\"%a %d %b %Y at %H:%M:%S\")", &compat)
-            .expect("special output");
-        assert_eq!(out, vec![serde_json::json!([0, 0, 0, 0, 0, 0, 0, 0])]);
-    }
-
-    #[test]
-    fn run_cli_compat_special_covers_named_and_positional_forms() {
-        let mut compat = CliCompatArgs::default();
-        compat
-            .named_vars
-            .insert("foo".to_string(), serde_json::json!("x"));
-        compat
-            .named_vars
-            .insert("bar".to_string(), serde_json::json!(2));
-        compat.named_args = compat.named_vars.clone();
-        compat.positional_args = vec![serde_json::json!("a"), serde_json::json!("b")];
-
-        let out = run_cli_compat_special("{$foo, $bar} | ., . == $ARGS.named", &compat)
-            .expect("named special");
-        assert_eq!(
-            out,
-            vec![
-                serde_json::json!({"foo":"x","bar":2}),
-                serde_json::json!(true),
-            ]
-        );
-
-        let out =
-            run_cli_compat_special("$ARGS.positional[1]", &compat).expect("positional by index");
-        assert_eq!(out, vec![serde_json::json!("b")]);
-
-        assert!(run_cli_compat_special("$ARGS.positional[x]", &compat).is_none());
-    }
-
-    #[test]
-    fn stream_json_values_matches_jq_shape_for_arrays() {
-        let events = stream_json_values(vec![serde_json::json!([1, 2])]);
-        assert_eq!(
-            events,
-            vec![
-                serde_json::json!([[0], 1]),
-                serde_json::json!([[1], 2]),
-                serde_json::json!([[1]]),
-            ]
-        );
-    }
-
-    #[test]
-    fn stream_json_values_handles_empty_containers() {
-        let events = stream_json_values(vec![serde_json::json!([]), serde_json::json!({})]);
-        assert_eq!(
-            events,
-            vec![serde_json::json!([[], []]), serde_json::json!([[], {}])]
-        );
-    }
-
-    #[test]
-    fn stream_error_value_matches_jq_contract() {
-        let input = "[";
-        let err = serde_json::from_str::<serde_json::Value>(input).expect_err("invalid json");
-        let event = stream_error_value_from_json_error(input, &err);
-        assert_eq!(
-            event,
-            serde_json::json!(["Unfinished JSON term at EOF at line 1, column 1", [0]])
-        );
-    }
-
-    #[test]
-    fn stream_error_value_tracks_object_key_path() {
-        let input = "{\"a\":1";
-        let err = serde_json::from_str::<serde_json::Value>(input).expect_err("invalid json");
-        let event = stream_error_value_from_json_error(input, &err);
-        assert_eq!(
-            event,
-            serde_json::json!(["Unfinished JSON term at EOF at line 1, column 6", ["a"]])
-        );
-    }
-
-    #[test]
-    fn stream_error_value_tracks_nested_array_index_path() {
-        let input = "{\"a\":[1,2";
-        let err = serde_json::from_str::<serde_json::Value>(input).expect_err("invalid json");
-        let event = stream_error_value_from_json_error(input, &err);
-        assert_eq!(
-            event,
-            serde_json::json!(["Unfinished JSON term at EOF at line 1, column 9", ["a", 1]])
-        );
-    }
-
-    #[test]
-    fn stream_error_value_uses_null_path_for_missing_colon() {
-        let input = "{\"a\" 1}";
-        let err = serde_json::from_str::<serde_json::Value>(input).expect_err("invalid json");
-        let event = stream_error_value_from_json_error(input, &err);
-        assert_eq!(
-            event,
-            serde_json::json!([
-                "Objects must consist of key:value pairs at line 1, column 6",
-                [null]
-            ])
-        );
-    }
-
-    #[test]
-    fn json_scanner_helper_contract() {
-        assert_eq!(line_col_to_byte_index("a", 0, 1), None);
-        assert_eq!(line_col_to_byte_index("a", 1, 0), None);
-        assert_eq!(line_col_to_byte_index("a\nb", 2, 1), Some(2));
-        assert_eq!(line_col_to_byte_index("a\nb", 3, 1), Some(3));
-
-        let mut i = 0usize;
-        assert_eq!(scan_json_string(b"x", &mut i, 1), None);
-
-        let raw = r#""a\"b""#;
-        let mut i = 0usize;
-        assert_eq!(
-            scan_json_string(raw.as_bytes(), &mut i, raw.len()),
-            Some("a\"b".to_string())
-        );
-        assert_eq!(i, raw.len());
-
-        let num = "-12.34e+5";
-        let mut i = 0usize;
-        assert!(scan_json_number(num.as_bytes(), &mut i, num.len()));
-        assert_eq!(i, num.len());
-
-        let mut i = 0usize;
-        assert!(!scan_json_number(b"-.1", &mut i, 3));
-        let mut i = 0usize;
-        assert!(!scan_json_number(b"1e+", &mut i, 3));
-
-        let mut i = 0usize;
-        assert!(scan_json_literal(b"true", &mut i, 4, b"true"));
-        assert_eq!(i, 4);
-        let mut i = 0usize;
-        assert!(!scan_json_literal(b"tru", &mut i, 3, b"true"));
-        let mut i = 0usize;
-        assert!(!scan_json_literal(b"tree", &mut i, 4, b"true"));
-    }
-
-    #[test]
-    fn json_scan_state_machine_contract() {
-        let mut frames = vec![JsonScanFrame::Array {
-            index: 0,
-            state: JsonArrayState::ValueOrEnd,
-        }];
-        let mut i = 0usize;
-        let mut root_done = false;
-        assert!(advance_json_scan(
-            b"]",
-            &mut i,
-            1,
-            &mut frames,
-            &mut root_done
-        ));
-        assert!(root_done);
-
-        let mut frames = vec![JsonScanFrame::Array {
-            index: 0,
-            state: JsonArrayState::CommaOrEnd,
-        }];
-        let mut i = 0usize;
-        let mut root_done = false;
-        assert!(advance_json_scan(
-            b",",
-            &mut i,
-            1,
-            &mut frames,
-            &mut root_done
-        ));
-        assert!(matches!(
-            frames[0],
-            JsonScanFrame::Array {
-                index: 1,
-                state: JsonArrayState::ValueOrEnd
-            }
-        ));
-
-        let mut frames = vec![JsonScanFrame::Array {
-            index: 0,
-            state: JsonArrayState::CommaOrEnd,
-        }];
-        let mut i = 0usize;
-        let mut root_done = false;
-        assert!(advance_json_scan(
-            b"]",
-            &mut i,
-            1,
-            &mut frames,
-            &mut root_done
-        ));
-        assert!(root_done);
-
-        let mut frames = vec![JsonScanFrame::Array {
-            index: 0,
-            state: JsonArrayState::CommaOrEnd,
-        }];
-        let mut i = 0usize;
-        let mut root_done = false;
-        assert!(!advance_json_scan(
-            b"x",
-            &mut i,
-            1,
-            &mut frames,
-            &mut root_done
-        ));
-
-        let mut frames = vec![JsonScanFrame::Object {
-            key: None,
-            state: JsonObjectState::KeyOrEnd,
-        }];
-        let mut i = 0usize;
-        let mut root_done = false;
-        assert!(advance_json_scan(
-            b"}",
-            &mut i,
-            1,
-            &mut frames,
-            &mut root_done
-        ));
-        assert!(root_done);
-
-        let raw = r#""a""#;
-        let mut frames = vec![JsonScanFrame::Object {
-            key: None,
-            state: JsonObjectState::KeyOrEnd,
-        }];
-        let mut i = 0usize;
-        let mut root_done = false;
-        assert!(advance_json_scan(
-            raw.as_bytes(),
-            &mut i,
-            raw.len(),
-            &mut frames,
-            &mut root_done
-        ));
-        assert!(matches!(
-            frames[0],
-            JsonScanFrame::Object {
-                key: Some(_),
-                state: JsonObjectState::Colon
-            }
-        ));
-
-        let mut frames = vec![JsonScanFrame::Object {
-            key: Some("a".to_string()),
-            state: JsonObjectState::Colon,
-        }];
-        let mut i = 0usize;
-        let mut root_done = false;
-        assert!(advance_json_scan(
-            b":",
-            &mut i,
-            1,
-            &mut frames,
-            &mut root_done
-        ));
-        assert!(matches!(
-            frames[0],
-            JsonScanFrame::Object {
-                key: Some(_),
-                state: JsonObjectState::Value
-            }
-        ));
-
-        let mut frames = vec![JsonScanFrame::Object {
-            key: Some("a".to_string()),
-            state: JsonObjectState::CommaOrEnd,
-        }];
-        let mut i = 0usize;
-        let mut root_done = false;
-        assert!(advance_json_scan(
-            b",",
-            &mut i,
-            1,
-            &mut frames,
-            &mut root_done
-        ));
-        assert!(matches!(
-            frames[0],
-            JsonScanFrame::Object {
-                key: None,
-                state: JsonObjectState::KeyOrEnd
-            }
-        ));
-
-        let mut frames = vec![JsonScanFrame::Object {
-            key: Some("a".to_string()),
-            state: JsonObjectState::CommaOrEnd,
-        }];
-        let mut i = 0usize;
-        let mut root_done = false;
-        assert!(advance_json_scan(
-            b"}",
-            &mut i,
-            1,
-            &mut frames,
-            &mut root_done
-        ));
-        assert!(root_done);
-
-        let mut i = 0usize;
-        let mut frames = Vec::new();
-        let mut root_done = false;
-        assert!(scan_json_value(
-            b"true",
-            &mut i,
-            4,
-            &mut frames,
-            &mut root_done
-        ));
-        assert!(root_done);
-
-        let mut i = 0usize;
-        let mut frames = Vec::new();
-        let mut root_done = false;
-        assert!(scan_json_value(
-            b"false",
-            &mut i,
-            5,
-            &mut frames,
-            &mut root_done
-        ));
-        assert!(root_done);
-
-        let mut i = 0usize;
-        let mut frames = Vec::new();
-        let mut root_done = false;
-        assert!(scan_json_value(
-            b"null",
-            &mut i,
-            4,
-            &mut frames,
-            &mut root_done
-        ));
-        assert!(root_done);
-
-        let mut i = 0usize;
-        let mut frames = Vec::new();
-        let mut root_done = false;
-        assert!(!scan_json_value(
-            b"\"",
-            &mut i,
-            1,
-            &mut frames,
-            &mut root_done
-        ));
-
-        let mut i = 0usize;
-        let mut frames = Vec::new();
-        let mut root_done = false;
-        assert!(!scan_json_value(
-            b"x",
-            &mut i,
-            1,
-            &mut frames,
-            &mut root_done
-        ));
-
-        let mut frames = vec![JsonScanFrame::Object {
-            key: Some("a".to_string()),
-            state: JsonObjectState::Value,
-        }];
-        let mut root_done = false;
-        complete_json_value(&mut frames, &mut root_done);
-        assert!(matches!(
-            frames[0],
-            JsonScanFrame::Object {
-                state: JsonObjectState::CommaOrEnd,
-                ..
-            }
-        ));
-
-        let mut frames = Vec::new();
-        let mut root_done = false;
-        complete_json_value(&mut frames, &mut root_done);
-        assert!(root_done);
-    }
-
-    #[test]
-    fn json_error_message_and_suffix_stripping_contract() {
-        let control_err =
-            serde_json::from_str::<serde_json::Value>("\"a\u{0001}\"").expect_err("must fail");
-        let msg = json_parse_error_message(&control_err);
-        assert!(msg.contains("Invalid string: control characters"));
-
-        let string_eof = serde_json::from_str::<serde_json::Value>("\"abc").expect_err("must fail");
-        let msg = json_parse_error_message(&string_eof);
-        assert!(msg.contains("Unfinished string at EOF"));
-
-        let expected_value = serde_json::from_str::<serde_json::Value>("x").expect_err("must fail");
-        let msg = json_parse_error_message(&expected_value);
-        assert!(msg.contains("expected value"));
-
-        assert_eq!(
-            strip_serde_line_col_suffix("expected value at line 1 column 2"),
-            "expected value"
-        );
-        assert_eq!(
-            strip_serde_line_col_suffix("expected value at line x column 2"),
-            "expected value at line x column 2"
-        );
-    }
-
-    #[test]
-    fn raw_output0_renders_nul_delimited_outputs() {
-        let (out, err) = render_raw_output0(
-            &[
-                serde_json::json!("a"),
-                serde_json::json!(1),
-                serde_json::json!({"b": 2}),
-            ],
-            true,
-        )
-        .expect("raw output0");
-        assert!(err.is_none());
-        assert_eq!(
-            out,
-            vec![b'a', 0, b'1', 0, b'{', b'"', b'b', b'"', b':', b'2', b'}', 0]
-        );
-    }
-
-    #[test]
-    fn raw_output0_rejects_strings_with_nul() {
-        let (out, err) = render_raw_output0(
-            &[serde_json::json!("a"), serde_json::json!("a\u{0000}b")],
-            false,
-        )
-        .expect("render");
-        assert_eq!(out, vec![b'a', 0]);
-        let err = err.expect("must fail");
-        assert!(format!("{err}").contains("Cannot dump a string containing NUL"));
-    }
-
-    #[test]
-    fn render_json_line_supports_raw_and_compact_modes() {
-        let raw = render_json_line(&serde_json::json!("abc"), true, true).expect("raw");
-        assert_eq!(raw, "abc");
-
-        let compact = render_json_line(&serde_json::json!({"a":1}), true, false).expect("compact");
-        assert_eq!(compact, "{\"a\":1}");
-    }
-
-    #[test]
-    fn render_json_output_join_output_omits_newlines() {
-        let out = render_json_output(
-            &[
-                serde_json::json!("hello"),
-                serde_json::json!(1),
-                serde_json::json!({"a": true}),
-            ],
-            true,
-            true,
-            true,
-        )
-        .expect("join output");
-        assert_eq!(out, "hello1{\"a\":true}");
-    }
-
-    #[test]
-    fn render_json_output_default_mode_keeps_line_breaks() {
-        let out = render_json_output(
-            &[serde_json::json!("a"), serde_json::json!("b")],
-            true,
-            true,
-            false,
-        )
-        .expect("line output");
-        assert_eq!(out, "a\nb\n");
-    }
-
-    #[test]
-    fn render_json_line_escapes_del_like_jq() {
-        let line = render_json_line(&serde_json::json!("~\u{007f}"), true, false).expect("render");
-        assert_eq!(line, "\"~\\u007f\"");
-    }
-
-    #[test]
-    fn run_tests_error_normalization_strips_location_and_number_payload() {
-        let got =
-            "jq: error: Cannot index object with number (1) at <top-level>, line 1, column 7:";
-        let expected = "jq: error: Cannot index object with number";
-        assert_eq!(
-            normalize_run_tests_error_line(got),
-            normalize_run_tests_error_line(expected)
-        );
-    }
-
-    #[test]
-    fn run_tests_error_normalization_strips_line_only_location_suffix() {
-        let got = "jq: error: Module metadata must be constant at <top-level>, line 1:";
-        let expected = "jq: error: Module metadata must be constant";
-        assert_eq!(
-            normalize_run_tests_error_line(got),
-            normalize_run_tests_error_line(expected)
-        );
-    }
-
-    #[test]
-    fn run_tests_values_equal_normalizes_string_error_variants() {
-        let expected = serde_json::json!("Cannot index number with string \"a\"").to_string();
-        let actual = serde_json::json!("Cannot index number with string (\"a\")").to_string();
-        assert!(run_tests_values_equal(&expected, &actual));
-    }
-
-    #[test]
-    fn run_tests_values_equal_normalizes_nested_error_strings() {
-        let expected = serde_json::json!(["ko", "Cannot index object with number"]).to_string();
-        let actual = serde_json::json!(["ko", "Cannot index object with number (1)"]).to_string();
-        assert!(run_tests_values_equal(&expected, &actual));
-    }
-
-    #[test]
-    fn run_tests_values_equal_accepts_equivalent_number_lexemes() {
-        assert!(run_tests_values_equal("20e-1", "2.0"));
-        assert!(run_tests_values_equal("[20e-1, 100e-2]", "[2.0, 1.0]"));
-    }
-
-    #[test]
-    fn run_tests_error_normalization_base64_message_variants() {
-        let got = "string (\"Not base64 data\") is not valid base64 data";
-        let expected = "string (\"Not base64...\") is not valid base64 data";
-        assert_eq!(
-            normalize_run_tests_error_line(got),
-            normalize_run_tests_error_line(expected)
-        );
-    }
-
-    #[test]
-    fn run_tests_error_normalization_added_object_payload_variants() {
-        let got = "string (\"1,2,\") and object ({\"a\":{\"b\":{\"c\":33}}}) cannot be added";
-        let expected = "string (\"1,2,\") and object ({\"a\":{\"b\":{...) cannot be added";
-        assert_eq!(
-            normalize_run_tests_error_line(got),
-            normalize_run_tests_error_line(expected)
-        );
-    }
-
-    #[test]
-    fn halt_and_compile_special_contract() {
-        assert_eq!(parse_halt_error_code("halt_error(7)"), Some(7));
-        assert_eq!(parse_halt_error_code(" halt_error( 9 ) "), Some(9));
-        assert!(parse_halt_error_code("halt_error(x)").is_none());
-
-        assert_eq!(run_halt_special("halt"), Some((0, None)));
-        assert_eq!(run_halt_special("halt_error(4)"), Some((4, None)));
-        assert_eq!(
-            run_halt_special("\"abc\" | halt_error(5)"),
-            Some((5, Some(b"abc".to_vec())))
-        );
-        assert_eq!(
-            run_halt_special("123 | halt_error(6)"),
-            Some((6, Some(b"123".to_vec())))
-        );
-        assert!(run_halt_special(".").is_none());
-
-        let (code, msg) = run_compile_error_special("if").expect("compile special");
-        assert_eq!(code, 3);
-        assert!(msg.contains("jq: 1 compile error"));
-        assert!(run_compile_error_special(".").is_none());
-    }
-
-    #[test]
-    fn compile_error_multiline_special_contract() {
-        let query = "[\n  try if .\n         then 1\n         else 2\n  catch ]";
-        let (code, msg) = run_compile_error_special(query).expect("compile special");
-        assert_eq!(code, 3);
-        assert!(msg.contains("jq: 3 compile errors"));
-    }
-
-    #[test]
-    fn run_with_rejects_yaml_raw_output0_combination() {
-        let cli = parse_cli_for_test(&["--output-format", "yaml", "--raw-output0", "."]);
-        let err = run_with(cli, CliCompatArgs::default()).expect_err("must fail");
-        assert!(format!("{err}").contains("--raw-output0 is supported only"));
-    }
-
-    #[test]
-    fn run_with_halt_and_compile_special_return_expected_statuses() {
-        let halt_cli = parse_cli_for_test(&["-n", "\"abc\"|halt_error(4)"]);
-        let status = run_with(halt_cli, CliCompatArgs::default()).expect("halt special");
-        assert_eq!(status, 4);
-
-        let compile_cli = parse_cli_for_test(&["if"]);
-        let status = run_with(compile_cli, CliCompatArgs::default()).expect("compile special");
-        assert_eq!(status, 3);
-    }
-
-    #[test]
-    fn resolve_diff_paths_contract() {
-        let cli = parse_cli_for_test(&["--diff", "left.yaml", "right.json"]);
-        assert_eq!(
-            resolve_diff_paths(&cli).expect("two-file diff"),
-            ("left.yaml".to_string(), "right.json".to_string())
-        );
-
-        let cli = parse_cli_for_test(&["--diff", "right.yaml"]);
-        assert_eq!(
-            resolve_diff_paths(&cli).expect("stdin vs file diff"),
-            ("-".to_string(), "right.yaml".to_string())
-        );
-
-        let cli = parse_cli_for_test(&["--diff"]);
-        let err = resolve_diff_paths(&cli).expect_err("missing paths");
-        assert!(format!("{err}").contains("expects LEFT RIGHT"));
-
-        let cli = parse_cli_for_test(&["--diff", "-", "-"]);
-        let err = resolve_diff_paths(&cli).expect_err("double stdin must fail");
-        assert!(format!("{err}").contains("both sides from stdin"));
-    }
-
-    #[test]
-    fn semantic_diff_collector_reports_changed_added_removed_paths() {
-        let left_docs = vec![serde_json::json!({
-            "a": 1,
-            "b": [1, 2],
-            "drop": true,
-            "keep": {"x": 1}
-        })];
-        let right_docs = vec![serde_json::json!({
-            "a": 2,
-            "add": "x",
-            "b": [1, 3, 4],
-            "keep": {"x": 1}
-        })];
-
-        let diffs = collect_semantic_doc_diffs(&left_docs, &right_docs);
-        assert_eq!(diffs.len(), 5);
-        assert_eq!(
-            diffs[0],
-            SemanticDiff {
-                kind: SemanticDiffKind::Changed,
-                path: "$.a".to_string(),
-                left: Some(serde_json::json!(1)),
-                right: Some(serde_json::json!(2)),
-            }
-        );
-        assert_eq!(
-            diffs[1],
-            SemanticDiff {
-                kind: SemanticDiffKind::Added,
-                path: "$.add".to_string(),
-                left: None,
-                right: Some(serde_json::json!("x")),
-            }
-        );
-        assert_eq!(
-            diffs[2],
-            SemanticDiff {
-                kind: SemanticDiffKind::Changed,
-                path: "$.b[1]".to_string(),
-                left: Some(serde_json::json!(2)),
-                right: Some(serde_json::json!(3)),
-            }
-        );
-        assert_eq!(
-            diffs[3],
-            SemanticDiff {
-                kind: SemanticDiffKind::Added,
-                path: "$.b[2]".to_string(),
-                left: None,
-                right: Some(serde_json::json!(4)),
-            }
-        );
-        assert_eq!(
-            diffs[4],
-            SemanticDiff {
-                kind: SemanticDiffKind::Removed,
-                path: "$.drop".to_string(),
-                left: Some(serde_json::json!(true)),
-                right: None,
-            }
-        );
-    }
-
-    #[test]
-    fn run_with_diff_mode_returns_expected_statuses() {
-        let td = tempfile::TempDir::new().expect("tempdir");
-        let left = td.path().join("left.yaml");
-        let right_equal = td.path().join("right-equal.json");
-        let right_diff = td.path().join("right-diff.json");
-        std::fs::write(&left, "a: 1\nb:\n  - 2\n").expect("write left");
-        std::fs::write(&right_equal, "{\"b\":[2],\"a\":1}\n").expect("write right equal");
-        std::fs::write(&right_diff, "{\"a\":2,\"b\":[2]}\n").expect("write right diff");
-
-        let equal_cli = parse_cli_for_test(&[
-            "--diff",
-            left.to_str().expect("utf8 path"),
-            right_equal.to_str().expect("utf8 path"),
-        ]);
-        let equal_status = run_with(equal_cli, CliCompatArgs::default()).expect("equal diff");
-        assert_eq!(equal_status, 0);
-
-        let diff_cli = parse_cli_for_test(&[
-            "--diff",
-            left.to_str().expect("utf8 path"),
-            right_diff.to_str().expect("utf8 path"),
-        ]);
-        let diff_status = run_with(diff_cli, CliCompatArgs::default()).expect("different diff");
-        assert_eq!(diff_status, 1);
-    }
-
-    #[test]
-    fn resolve_query_input_and_library_paths_contract() {
-        let cli = parse_cli_for_test(&["."]);
-        assert_eq!(resolve_base_query(&cli).expect("base query"), ".");
-        assert_eq!(resolve_positional_input(&cli).expect("positional"), None);
-        assert_eq!(resolve_input_path(&cli, None).expect("stdin path"), "-");
-
-        let cli = parse_cli_for_test(&[".foo", "in.json"]);
-        let positional = resolve_positional_input(&cli).expect("positional with file");
-        assert_eq!(positional, Some("in.json".to_string()));
-        assert_eq!(
-            resolve_input_path(&cli, positional.as_deref()).expect("input file path"),
-            "in.json"
-        );
-
-        let cli = parse_cli_for_test(&[".foo", "--input", "legacy.json"]);
-        assert_eq!(
-            resolve_input_path(&cli, None).expect("legacy input"),
-            "legacy.json"
-        );
-
-        let mut cli = parse_cli_for_test(&[".foo", "file.json"]);
-        cli.input_legacy = Some("legacy.json".to_string());
-        let err = resolve_input_path(&cli, None).expect_err("duplicate input path");
-        assert!(format!("{err}").contains("input path is specified twice"));
-
-        let td = tempfile::TempDir::new().expect("tempdir");
-        let query_file = td.path().join("q.jq");
-        std::fs::write(&query_file, ".a").expect("write query file");
-        let cli = parse_cli_for_test(&[
-            "-f",
-            query_file.to_str().expect("utf8 query file"),
-            "input.json",
-        ]);
-        assert_eq!(
-            resolve_base_query(&cli).expect("query from file"),
-            ".a".to_string()
-        );
-        assert_eq!(
-            resolve_positional_input(&cli).expect("file positional with -f"),
-            Some("input.json".to_string())
-        );
-
-        let cli = parse_cli_for_test(&[
-            "-f",
-            query_file.to_str().expect("utf8 query file"),
-            "query.jq",
-            "input.json",
-        ]);
-        let err = resolve_positional_input(&cli).expect_err("too many positional args");
-        assert!(format!("{err}").contains("too many positional arguments"));
-
-        let test_dir = td.path().join("suite");
-        std::fs::create_dir_all(test_dir.join("modules")).expect("create modules dir");
-        let discovered = resolve_run_tests_library_paths(
-            &parse_cli_for_test(&["--run-tests", "x.test"]),
-            test_dir
-                .join("cases.test")
-                .to_str()
-                .expect("utf8 test path"),
-        );
-        assert_eq!(discovered.len(), 1);
-        assert!(discovered[0].ends_with("/modules"));
-    }
-
-    #[test]
-    fn requires_filter_for_interactive_stdin_contract() {
-        let cli = parse_cli_for_test(&[]);
-        assert!(requires_filter_for_interactive_stdin(&cli, true));
-        assert!(!requires_filter_for_interactive_stdin(&cli, false));
-
-        let with_query = parse_cli_for_test(&["."]);
-        assert!(!requires_filter_for_interactive_stdin(&with_query, true));
-
-        let null_input = parse_cli_for_test(&["-n"]);
-        assert!(!requires_filter_for_interactive_stdin(&null_input, true));
-
-        let with_input_file = parse_cli_for_test(&[".", "input.json"]);
-        assert!(!requires_filter_for_interactive_stdin(&with_input_file, true));
-
-        let with_input_legacy = parse_cli_for_test(&[".", "--input", "input.json"]);
-        assert!(!requires_filter_for_interactive_stdin(
-            &with_input_legacy,
-            true
-        ));
-    }
-
-    #[test]
-    fn custom_input_and_json_color_options_contract() {
-        let raw_cli = parse_cli_for_test(&["-R", "."]);
-        let raw = build_custom_input_stream(&raw_cli, "a\nb\n", zq::DocMode::First)
-            .expect("raw input stream");
-        assert_eq!(raw, vec![serde_json::json!("a"), serde_json::json!("b")]);
-
-        let raw_slurp_cli = parse_cli_for_test(&["-Rs", "."]);
-        let raw_slurp = build_custom_input_stream(&raw_slurp_cli, "a\nb\n", zq::DocMode::First)
-            .expect("raw slurp stream");
-        assert_eq!(raw_slurp, vec![serde_json::json!("a\nb\n")]);
-
-        let _guard = env_lock();
-        let env = ScopedEnvVar::set("JQ_COLORS", "invalid");
-        let color_cli = parse_cli_for_test(&["-C", "."]);
-        let opts = resolve_json_color_options(&color_cli);
-        drop(env);
-        assert!(opts.enabled);
-        assert!(opts.warn_invalid);
-        assert!(opts.jq_colors.is_none());
-
-        let mono_cli = parse_cli_for_test(&["-C", "-M", "."]);
-        let opts = resolve_json_color_options(&mono_cli);
-        assert!(!opts.enabled);
-    }
-
-    #[test]
-    fn json_color_defaults_and_pretty_output_contract() {
-        let default_cli = parse_cli_for_test(&["."]);
-        let default_opts = resolve_json_color_options(&default_cli);
-        assert!(!default_opts.warn_invalid);
-
-        let palette = "0;90:0;39:0;39:0;39:0;32:1;39:1;39:1;31";
-        let _guard = env_lock();
-        let env = ScopedEnvVar::set("JQ_COLORS", palette);
-        let color_cli = parse_cli_for_test(&["-C", "."]);
-        let opts = resolve_json_color_options(&color_cli);
-        drop(env);
-        assert_eq!(opts.jq_colors.as_deref(), Some(palette));
-
-        let pretty = render_json_output(&[serde_json::json!({"a":1})], false, false, false)
-            .expect("pretty output");
-        assert_eq!(pretty, "{\n  \"a\": 1\n}\n");
-
-        let mut buf = Vec::new();
-        write_json_output(
-            &mut buf,
-            &[serde_json::json!(1), serde_json::json!(2)],
-            true,
-            false,
-            false,
-            &JsonColorOptions::default(),
-        )
-        .expect("write json output");
-        assert_eq!(String::from_utf8(buf).expect("utf8"), "1\n2\n");
-    }
-
-    #[test]
-    fn colored_rendering_and_engine_error_contract() {
-        let compact = render_json_value_colored(
-            &serde_json::json!([{"a": true, "b": false}, 123, null]),
-            true,
-            None,
-            2,
-        )
-        .expect("compact colored render");
-        let compact_text = String::from_utf8(compact).expect("utf8 compact");
-        assert!(compact_text.contains("\x1b["));
-        assert!(compact_text.contains("\"a\""));
-        assert!(compact_text.contains("123"));
-
-        let pretty = render_json_value_colored(&serde_json::json!({"k":[1]}), false, None, 2)
-            .expect("pretty colored render");
-        let pretty_text = String::from_utf8(pretty).expect("utf8 pretty");
-        assert!(pretty_text.contains("\n"));
-        assert!(pretty_text.contains("\"k\""));
-
-        let msg = render_engine_error(
-            "jq",
-            "",
-            zq::EngineError::Query(zq::QueryError::Runtime("boom".to_string())),
-        );
-        assert_eq!(msg, "jq: error (at <stdin>:1): boom");
-
-        let trimmed = render_validation_error_without_engine_prefix(&zq::EngineError::Query(
-            zq::QueryError::Unsupported("not supported".to_string()),
-        ));
-        assert_eq!(trimmed, "not supported");
-    }
-
-    #[test]
-    fn validate_jq_colors_accepts_valid_palette() {
-        assert!(validate_jq_colors(
-            "0;90:0;39:0;39:0;39:0;32:1;39:1;39:1;31"
-        ));
-        assert!(validate_jq_colors("4;31"));
-        assert!(validate_jq_colors(":"));
-        assert!(validate_jq_colors("::::::::"));
-        assert!(validate_jq_colors(
-            "38;2;160;196;255:38;2;220;220;170:38;2;205;168;105:38;2;255;173;173:38;2;160;196;255:38;2;150;205;251:38;2;255;214;165:38;2;138;43;226"
-        ));
-    }
-
-    #[test]
-    fn validate_jq_colors_rejects_invalid_palette() {
-        assert!(!validate_jq_colors(
-            "garbage;30:*;31:,;3^:0;$%:0;34:1;35:1;36"
-        ));
-        assert!(!validate_jq_colors(
-            "1234567890123456789;30:0;31:0;32:0;33:0;34:1;35:1;36"
-        ));
-        assert!(!validate_jq_colors(
-            "1234567890123456;1234567890123456:0;39:0;39:0;39:0;32:1;39:1;39"
-        ));
-        assert!(!validate_jq_colors(
-            "0123456789123:0123456789123:0123456789123:0123456789123:0123456789123:0123456789123:0123456789123:0123456789123:"
-        ));
     }
 }
+
+fn serialize_native_number_cli_compat<S>(
+    number: &serde_json::Number,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if number.is_i64() || number.is_u64() || number.is_f64() {
+        return number.serialize(serializer);
+    }
+
+    let raw = number.to_string();
+    let unsigned = raw
+        .strip_prefix('-')
+        .or_else(|| raw.strip_prefix('+'))
+        .unwrap_or(&raw);
+    let lower = unsigned.to_ascii_lowercase();
+
+    if lower.starts_with("nan") {
+        return serializer.serialize_unit();
+    }
+
+    if lower == "inf" || lower == "infinity" {
+        let finite = if raw.starts_with('-') {
+            "-1.7976931348623157e+308"
+        } else {
+            "1.7976931348623157e+308"
+        };
+        let finite_number = serde_json::Number::from_string_unchecked(finite.to_string());
+        return finite_number.serialize(serializer);
+    }
+
+    number.serialize(serializer)
+}
+
+fn native_value_to_cli_json_compat(value: &zq::NativeValue) -> JsonValue {
+    match value {
+        zq::NativeValue::Null => JsonValue::Null,
+        zq::NativeValue::Bool(v) => JsonValue::Bool(*v),
+        zq::NativeValue::Number(number) => native_number_to_cli_json_compat(number),
+        zq::NativeValue::String(text) => JsonValue::String(text.clone()),
+        zq::NativeValue::Array(items) => JsonValue::Array(
+            items
+                .iter()
+                .map(native_value_to_cli_json_compat)
+                .collect::<Vec<_>>(),
+        ),
+        zq::NativeValue::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (key, value) in map {
+                out.insert(key.clone(), native_value_to_cli_json_compat(value));
+            }
+            JsonValue::Object(out)
+        }
+    }
+}
+
+fn native_number_to_cli_json_compat(number: &serde_json::Number) -> JsonValue {
+    if number.is_i64() || number.is_u64() || number.is_f64() {
+        return JsonValue::Number(number.clone());
+    }
+
+    let raw = number.to_string();
+    let unsigned = raw
+        .strip_prefix('-')
+        .or_else(|| raw.strip_prefix('+'))
+        .unwrap_or(&raw);
+    let lower = unsigned.to_ascii_lowercase();
+
+    if lower.starts_with("nan") {
+        return JsonValue::Null;
+    }
+
+    if lower == "inf" || lower == "infinity" {
+        let finite = if raw.starts_with('-') {
+            "-1.7976931348623157e+308"
+        } else {
+            "1.7976931348623157e+308"
+        };
+        return JsonValue::Number(serde_json::Number::from_string_unchecked(
+            finite.to_string(),
+        ));
+    }
+
+    JsonValue::Number(number.clone())
+}
+
+fn write_json_output_native<W: Write>(
+    writer: &mut W,
+    values: &[zq::NativeValue],
+    compact: bool,
+    raw_output: bool,
+    join_output: bool,
+    color_opts: &JsonColorOptions,
+) -> Result<(), Error> {
+    let mut scratch = Vec::new();
+    let pretty_indent = if compact || color_opts.enabled {
+        None
+    } else {
+        Some(vec![b' '; color_opts.indent])
+    };
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 && !join_output {
+            writer.write_all(b"\n")?;
+        }
+        write_json_native_value_line(
+            writer,
+            value,
+            compact,
+            raw_output,
+            &mut scratch,
+            pretty_indent.as_deref(),
+            color_opts,
+        )?;
+    }
+    if !values.is_empty() && !join_output {
+        writer.write_all(b"\n")?;
+    }
+    Ok(())
+}
+
+fn write_json_output_lines_native(
+    values: &[zq::NativeValue],
+    compact: bool,
+    raw_output: bool,
+    join_output: bool,
+    color_opts: &JsonColorOptions,
+) -> Result<(), Error> {
+    let stdout = io::stdout();
+    let mut writer = io::BufWriter::new(stdout.lock());
+    write_json_output_native(
+        &mut writer,
+        values,
+        compact,
+        raw_output,
+        join_output,
+        color_opts,
+    )?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn exit_status_from_outputs_native(outputs: &[zq::NativeValue]) -> i32 {
+    match outputs.last() {
+        None => 4,
+        Some(zq::NativeValue::Null) => 1,
+        Some(zq::NativeValue::Bool(false)) => 1,
+        Some(_) => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests;

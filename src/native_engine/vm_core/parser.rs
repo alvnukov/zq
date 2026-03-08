@@ -15,9 +15,11 @@ mod literal_utils;
 mod module_resolve;
 
 use self::literal_utils::{
-    const_object_key_error, fold_large_integer_literal_equality, normalize_jq_float_text,
-    parse_number_literal, special_number_literal, zq_type_name,
+    const_object_key_error, fold_large_integer_literal_equality, parse_number_literal,
+    special_number_literal,
 };
+#[cfg(test)]
+use self::literal_utils::{normalize_jq_float_text, zq_type_name};
 pub(crate) use self::module_resolve::default_module_search_dirs;
 use self::module_resolve::{
     canonicalize_module_candidate, const_stage_value, ensure_const_object_metadata,

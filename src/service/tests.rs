@@ -1438,6 +1438,14 @@ fn input_format_resolution_contract() {
         resolve_effective_input_format(InputFormat::Json, "a.csv"),
         zq::NativeInputFormat::Json
     );
+    assert_eq!(
+        resolve_effective_input_format(InputFormat::Auto, "A.YML"),
+        zq::NativeInputFormat::Yaml
+    );
+    assert_eq!(
+        resolve_effective_input_format(InputFormat::Auto, "a.unknown-ext"),
+        zq::NativeInputFormat::Auto
+    );
 }
 
 #[test]

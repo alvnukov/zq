@@ -1,6 +1,6 @@
 use crate::cli::OutputFormat;
 
-use super::{Error, JsonColorPalette};
+use super::{json_color::JsonColorPalette, Error};
 
 pub(super) fn render_toml_output_native(values: &[zq::NativeValue]) -> Result<String, Error> {
     if values.is_empty() {

@@ -1718,6 +1718,28 @@ fn spool_cleanup_removes_stale_run_dirs_and_keeps_locked_ones() {
 }
 
 #[test]
+fn spool_cleanup_keeps_current_pid_run_dir_even_without_lock() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let root = td.path().join("spool").join("v1");
+    fs::create_dir_all(&root).expect("create spool root");
+
+    let run_dir = root.join(format!("run-{}-manual-0", std::process::id()));
+    fs::create_dir(&run_dir).expect("create current pid run dir");
+    fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(run_dir.join("run.lock"))
+        .expect("create run lock");
+
+    SpoolManager::sweep_stale_runs(&root).expect("sweep stale runs");
+    assert!(
+        run_dir.exists(),
+        "current process run dir must not be swept even without advisory lock"
+    );
+}
+
+#[test]
 fn spool_manager_drop_cleans_its_run_dir() {
     let _guard = env_lock();
     let td = tempfile::TempDir::new().expect("tempdir");

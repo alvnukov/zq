@@ -75,6 +75,9 @@ impl SpoolManager {
             }
 
             let run_dir = entry.path();
+            if parse_run_dir_pid(&run_dir).is_some_and(process_is_alive) {
+                continue;
+            }
             let run_lock_path = run_dir.join("run.lock");
             let run_lock = match fs::OpenOptions::new()
                 .create(false)
@@ -141,13 +144,54 @@ impl Drop for SpoolManager {
 }
 
 fn is_nonfatal_lock_error(err: &io::Error) -> bool {
-    matches!(
+    if matches!(
         err.kind(),
         io::ErrorKind::InvalidInput
             | io::ErrorKind::PermissionDenied
             | io::ErrorKind::Unsupported
             | io::ErrorKind::WouldBlock
+    ) {
+        return true;
+    }
+
+    match err.raw_os_error() {
+        Some(code) => is_nonfatal_lock_errno(code),
+        None => false,
+    }
+}
+
+#[cfg(unix)]
+fn is_nonfatal_lock_errno(code: i32) -> bool {
+    matches!(
+        code,
+        libc::EINVAL | libc::ENOTSUP | libc::EOPNOTSUPP | libc::EACCES | libc::EAGAIN
     )
+}
+
+#[cfg(not(unix))]
+fn is_nonfatal_lock_errno(_code: i32) -> bool {
+    false
+}
+
+fn parse_run_dir_pid(run_dir: &Path) -> Option<u32> {
+    let name = run_dir.file_name()?.to_str()?;
+    let suffix = name.strip_prefix("run-")?;
+    suffix.split('-').next()?.parse::<u32>().ok()
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    // SAFETY: kill with signal 0 performs permission/liveness probe only.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    matches!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM))
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    false
 }
 
 pub(super) fn resolve_spool_root_dir() -> PathBuf {
@@ -183,6 +227,28 @@ mod tests {
             let err = io::Error::new(kind, "fatal");
             assert!(!is_nonfatal_lock_error(&err), "{kind:?} must remain fatal");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_error_classification_accepts_common_errno_forms() {
+        for code in [
+            libc::EINVAL,
+            libc::ENOTSUP,
+            libc::EOPNOTSUPP,
+            libc::EACCES,
+            libc::EAGAIN,
+        ] {
+            let err = io::Error::from_raw_os_error(code);
+            assert!(is_nonfatal_lock_error(&err), "errno={code} must be nonfatal");
+        }
+    }
+
+    #[test]
+    fn parse_run_dir_pid_extracts_expected_prefix() {
+        let path = PathBuf::from(format!("run-{}-123-0", std::process::id()));
+        assert_eq!(parse_run_dir_pid(&path), Some(std::process::id()));
+        assert_eq!(parse_run_dir_pid(Path::new("run-stale")), None);
     }
 }
 

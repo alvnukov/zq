@@ -33,9 +33,11 @@ use self::stage_helpers::{
     abs_stage, append_chain_stage, bracket_bound_to_stage, by_impl_keys_stage, isfinite_stage,
     loc_stage, select_stage, type_eq_stage, type_ne_stage,
 };
+#[cfg(test)]
+use self::symbol_rewrite::rewrite_binding_pattern_symbol_ids;
 use self::symbol_rewrite::{
-    collect_pattern_bindings, push_unique_binding, rewrite_binding_pattern_symbol_ids,
-    rewrite_stage_symbol_ids, wrap_with_import_bindings,
+    collect_pattern_bindings, push_unique_binding, rewrite_stage_symbol_ids,
+    wrap_with_import_bindings,
 };
 
 const MAX_LOCAL_FUNCTION_PARAMETERS_OR_DEFS: usize = 4095;

@@ -1749,6 +1749,45 @@ fn spool_manager_drop_cleans_its_run_dir() {
 }
 
 #[test]
+fn resolve_spool_root_dir_uses_trimmed_env_or_temp_default() {
+    let _guard = env_lock();
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let custom = td.path().join("custom-root");
+    let prev = std::env::var_os("ZQ_SPOOL_DIR");
+
+    std::env::set_var("ZQ_SPOOL_DIR", format!("  {}  ", custom.display()));
+    assert_eq!(resolve_spool_root_dir(), custom.join("v1"));
+
+    std::env::set_var("ZQ_SPOOL_DIR", "   ");
+    assert_eq!(
+        resolve_spool_root_dir(),
+        std::env::temp_dir().join("zq-spool/v1")
+    );
+
+    if let Some(v) = prev {
+        std::env::set_var("ZQ_SPOOL_DIR", v);
+    } else {
+        std::env::remove_var("ZQ_SPOOL_DIR");
+    }
+}
+
+#[test]
+fn remove_spool_run_dir_if_safe_does_not_remove_outside_root() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let root = td.path().join("spool-root");
+    let inside = root.join("run-inside");
+    let outside = td.path().join("outside-run");
+    std::fs::create_dir_all(&inside).expect("create inside");
+    std::fs::create_dir_all(&outside).expect("create outside");
+
+    remove_spool_run_dir_if_safe(&root, &inside).expect("remove inside");
+    assert!(!inside.exists(), "inside run dir must be removed");
+
+    remove_spool_run_dir_if_safe(&root, &outside).expect("keep outside");
+    assert!(outside.exists(), "outside dir must not be removed");
+}
+
+#[test]
 fn run_tests_mode_many_aggregates_statuses_for_multiple_files() {
     let _guard = env_lock();
     let td = tempfile::TempDir::new().expect("tempdir");

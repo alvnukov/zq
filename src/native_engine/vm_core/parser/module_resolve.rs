@@ -1,3 +1,4 @@
+use super::module_directives::ImportMetadata;
 use super::*;
 
 pub(crate) fn default_module_search_dirs() -> Vec<PathBuf> {

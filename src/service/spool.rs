@@ -143,7 +143,10 @@ impl Drop for SpoolManager {
 fn is_nonfatal_lock_error(err: &io::Error) -> bool {
     matches!(
         err.kind(),
-        io::ErrorKind::InvalidInput | io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
+        io::ErrorKind::InvalidInput
+            | io::ErrorKind::PermissionDenied
+            | io::ErrorKind::Unsupported
+            | io::ErrorKind::WouldBlock
     )
 }
 
@@ -167,6 +170,7 @@ mod tests {
             io::ErrorKind::InvalidInput,
             io::ErrorKind::PermissionDenied,
             io::ErrorKind::Unsupported,
+            io::ErrorKind::WouldBlock,
         ] {
             let err = io::Error::new(kind, "nonfatal");
             assert!(is_nonfatal_lock_error(&err), "{kind:?} must be nonfatal");
@@ -175,11 +179,7 @@ mod tests {
 
     #[test]
     fn lock_error_classification_keeps_unrelated_kinds_fatal() {
-        for kind in [
-            io::ErrorKind::NotFound,
-            io::ErrorKind::AlreadyExists,
-            io::ErrorKind::WouldBlock,
-        ] {
+        for kind in [io::ErrorKind::NotFound, io::ErrorKind::AlreadyExists] {
             let err = io::Error::new(kind, "fatal");
             assert!(!is_nonfatal_lock_error(&err), "{kind:?} must remain fatal");
         }

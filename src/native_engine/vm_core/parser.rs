@@ -18,6 +18,7 @@ mod module_loading;
 mod module_resolve;
 mod stage_helpers;
 mod symbol_rewrite;
+mod symbol_table;
 
 use self::literal_utils::{
     const_object_key_error, fold_large_integer_literal_equality, parse_number_literal,
@@ -314,33 +315,6 @@ impl Parser {
         Ok(())
     }
 
-    fn pop_def_scope(&mut self) {
-        let Some(bindings) = self.def_scope_stack.pop() else {
-            return;
-        };
-        for signature in bindings.into_iter().rev() {
-            let remove_key = if let Some(stack) = self.function_bindings.get_mut(&signature) {
-                let _ = stack.pop();
-                stack.is_empty()
-            } else {
-                false
-            };
-            if remove_key {
-                self.function_bindings.remove(&signature);
-            }
-        }
-    }
-
-    fn push_function_binding(&mut self, signature: (String, usize), function_id: usize) {
-        self.function_bindings
-            .entry(signature.clone())
-            .or_default()
-            .push(function_id);
-        if let Some(scope) = self.def_scope_stack.last_mut() {
-            scope.push(signature);
-        }
-    }
-
     fn parse_function_def(&mut self) -> Result<FunctionDef, String> {
         self.expect(Token::DefKw)?;
         let name = match self.peek() {
@@ -446,23 +420,6 @@ impl Parser {
             param_ids: param_ids_in_order,
             body,
         })
-    }
-
-    fn resolve_param_call(&self, name: &str, arity: usize) -> Option<usize> {
-        if arity != 0 {
-            return None;
-        }
-        let signature = (name.to_string(), arity);
-        self.local_param_scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(&signature).copied())
-    }
-
-    fn resolve_user_function(&self, name: &str, arity: usize) -> Option<usize> {
-        self.function_bindings
-            .get(&(name.to_string(), arity))
-            .and_then(|stack| stack.last().copied())
     }
 
     fn parse_defined_or_expr(&mut self) -> Result<Stage, String> {
@@ -3512,5 +3469,38 @@ mod tests {
         let mut bindings = Vec::new();
         collect_pattern_bindings(&pattern, &mut bindings);
         assert_eq!(bindings, vec!["captured".to_string(), "x".to_string(),]);
+    }
+
+    #[test]
+    fn function_binding_scope_pop_restores_previous_definition() {
+        let mut parser = Parser::new(vec![Token::End]);
+        parser.def_scope_stack.push(Vec::new());
+        parser.push_function_binding(("f".to_string(), 0), 10);
+        assert_eq!(parser.resolve_user_function("f", 0), Some(10));
+
+        parser.def_scope_stack.push(Vec::new());
+        parser.push_function_binding(("f".to_string(), 0), 11);
+        assert_eq!(parser.resolve_user_function("f", 0), Some(11));
+
+        parser.pop_def_scope();
+        assert_eq!(parser.resolve_user_function("f", 0), Some(10));
+
+        parser.pop_def_scope();
+        assert_eq!(parser.resolve_user_function("f", 0), None);
+    }
+
+    #[test]
+    fn resolve_param_call_prefers_innermost_scope() {
+        let mut parser = Parser::new(vec![Token::End]);
+        parser
+            .local_param_scopes
+            .push(BTreeMap::from([(("x".to_string(), 0), 1)]));
+        parser
+            .local_param_scopes
+            .push(BTreeMap::from([(("x".to_string(), 0), 2)]));
+
+        assert_eq!(parser.resolve_param_call("x", 0), Some(2));
+        assert_eq!(parser.resolve_param_call("x", 1), None);
+        assert_eq!(parser.resolve_param_call("missing", 0), None);
     }
 }

@@ -21,6 +21,7 @@ mod json_color;
 mod json_stream;
 mod native_json_output;
 mod output_formats;
+mod output_xml;
 mod run_tests;
 mod semantic_diff;
 mod spool;
@@ -64,8 +65,8 @@ use self::native_json_output::{
 };
 use self::output_formats::{
     colorize_structured_output, render_csv_output_native, render_toml_output_native,
-    render_xml_output_native,
 };
+use self::output_xml::render_xml_output_native;
 use self::run_tests::run_tests_mode_many;
 #[cfg(test)]
 use self::run_tests::{

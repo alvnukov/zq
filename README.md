@@ -14,7 +14,7 @@
 - Supports JSON, YAML, TOML, CSV, and XML output (`--output-format json|yaml|toml|csv|xml`).
 - Supports explicit input selection (`--input-format auto|json|yaml|toml|csv|xml`).
 - Supports jq-style `.test` execution (`--run-tests`).
-- Supports semantic diff mode (`--diff`) with `diff|json|jsonl|summary` formats.
+- Supports semantic diff mode (`--diff`) with `diff|patch|json|jsonl|summary` formats.
 - Supports shell completion generation (`zq completion <shell>`).
 - Supports jq compatibility args: `--arg`, `--argjson`, `--slurpfile`, `--rawfile`, `--args`, `--jsonargs`.
 
@@ -120,6 +120,7 @@ zq --diff left.yaml right.json
 cat left.json | zq --diff right.yaml
 
 # machine formats
+zq --diff --diff-format patch left.yaml right.yaml
 zq --diff --diff-format json left.yaml right.yaml
 zq --diff --diff-format jsonl left.yaml right.yaml
 zq --diff --diff-format summary left.yaml right.yaml
@@ -131,6 +132,7 @@ Diff behavior:
 - Exit `1` when differences are found.
 - Parses JSON/YAML/TOML/CSV/XML (auto or forced by `--input-format`).
 - `diff` format is human-readable and colorized on TTY.
+- `patch` format is unified patch-style by semantic path.
 - `-C` forces color, `-M` disables color.
 
 ### Run-Tests Mode

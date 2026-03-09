@@ -64,7 +64,7 @@ zq completion <SHELL>
 ### Other Modes
 
 - `--diff`: semantic diff mode (compare JSON/YAML structures).
-- `--diff-format <diff|json|jsonl|summary>`: diff output format.
+- `--diff-format <diff|patch|json|jsonl|summary>`: diff output format.
 - `--run-tests [FILE ...]`: run jq `.test` files.
 - `--skip <N>`: skip first `N` tests in run-tests mode.
 - `--take <N>`: run only `N` tests in run-tests mode.
@@ -107,6 +107,7 @@ Behavior:
 - Exit `0` if equal, `1` if different.
 - Supports output formats:
   - `diff`: human-readable (`+` added, `-` removed, `~` changed)
+  - `patch`: unified patch-style (`---/+++`, `@@ path @@`, `-` removed, `+` added)
   - `json`: single JSON payload (`equal`, `summary`, `differences`)
   - `jsonl`: stream of diff events + final summary event
   - `summary`: single line `equal=... total=... changed=... added=... removed=...`

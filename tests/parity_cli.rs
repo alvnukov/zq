@@ -799,6 +799,29 @@ fn parity_diff_mode_summary_format_is_machine_friendly() {
 }
 
 #[test]
+fn parity_diff_mode_patch_format_is_unified_style() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let left = td.path().join("left.json");
+    let right = td.path().join("right.json");
+    std::fs::write(&left, "{\"a\":1,\"drop\":true}\n").expect("write left");
+    std::fs::write(&right, "{\"a\":2,\"add\":[1,2]}\n").expect("write right");
+
+    let left_s = left.to_string_lossy().into_owned();
+    let right_s = right.to_string_lossy().into_owned();
+    let out = run_zq(&["--diff", "--diff-format", "patch", &left_s, &right_s]);
+    assert_fail(&out, "--diff --diff-format patch");
+    assert_exit_code(&out, 1, "--diff --diff-format patch");
+    let text = stdout_text(&out);
+    assert!(text.contains("--- left"), "stdout:\n{text}");
+    assert!(text.contains("+++ right"), "stdout:\n{text}");
+    assert!(text.contains("@@ $.a @@"), "stdout:\n{text}");
+    assert!(text.contains("-1"), "stdout:\n{text}");
+    assert!(text.contains("+2"), "stdout:\n{text}");
+    assert!(text.contains("@@ $.add @@"), "stdout:\n{text}");
+    assert!(text.contains("+[1,2]"), "stdout:\n{text}");
+}
+
+#[test]
 fn parity_diff_mode_diff_format_supports_forced_color_and_monochrome_override() {
     let td = tempfile::TempDir::new().expect("tempdir");
     let left = td.path().join("left.json");

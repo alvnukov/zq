@@ -124,7 +124,7 @@ pub struct Cli {
         value_enum,
         default_value_t = DiffOutputFormat::Diff,
         requires = "diff",
-        help = "Diff report format: diff, json, jsonl, summary"
+        help = "Diff report format: diff, patch, json, jsonl, summary"
     )]
     pub diff_format: DiffOutputFormat,
     #[arg(
@@ -291,6 +291,7 @@ pub enum InputFormat {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum DiffOutputFormat {
     Diff,
+    Patch,
     Json,
     Jsonl,
     Summary,

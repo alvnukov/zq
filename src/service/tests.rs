@@ -1227,6 +1227,74 @@ fn semantic_diff_report_diff_uses_color_codes_when_enabled() {
 }
 
 #[test]
+fn semantic_diff_report_patch_writes_unified_hunks() {
+    let diffs = vec![
+        SemanticDiff {
+            kind: SemanticDiffKind::Changed,
+            path: "$.a".to_string(),
+            left: Some(zq::NativeValue::from(1)),
+            right: Some(zq::NativeValue::from(2)),
+        },
+        SemanticDiff {
+            kind: SemanticDiffKind::Added,
+            path: "$.b".to_string(),
+            left: None,
+            right: Some(zq::NativeValue::from_json(serde_json::json!([1, 2]))),
+        },
+    ];
+    let summary = SemanticDiffSummary::from_diffs(&diffs);
+    let mut out = Vec::new();
+    write_semantic_diff_report(
+        &mut out,
+        &diffs,
+        summary,
+        DiffOutputFormat::Patch,
+        false,
+        false,
+    )
+    .expect("patch report");
+    let text = String::from_utf8(out).expect("utf8 report");
+    assert!(text.contains("--- left"), "report:\n{text}");
+    assert!(text.contains("+++ right"), "report:\n{text}");
+    assert!(text.contains("@@ $.a @@"), "report:\n{text}");
+    assert!(text.contains("-1"), "report:\n{text}");
+    assert!(text.contains("+2"), "report:\n{text}");
+    assert!(text.contains("@@ $.b @@"), "report:\n{text}");
+    assert!(text.contains("+[1,2]"), "report:\n{text}");
+}
+
+#[test]
+fn semantic_diff_report_patch_uses_color_codes_when_enabled() {
+    let diffs = vec![SemanticDiff {
+        kind: SemanticDiffKind::Changed,
+        path: "$.a".to_string(),
+        left: Some(zq::NativeValue::from(1)),
+        right: Some(zq::NativeValue::from(2)),
+    }];
+    let summary = SemanticDiffSummary::from_diffs(&diffs);
+    let mut out = Vec::new();
+    write_semantic_diff_report(
+        &mut out,
+        &diffs,
+        summary,
+        DiffOutputFormat::Patch,
+        false,
+        true,
+    )
+    .expect("patch report");
+    let text = String::from_utf8(out).expect("utf8 report");
+    assert!(
+        text.contains("\u{1b}[31m--- left\u{1b}[0m"),
+        "report:\n{text}"
+    );
+    assert!(
+        text.contains("\u{1b}[36m@@ $.a @@\u{1b}[0m"),
+        "report:\n{text}"
+    );
+    assert!(text.contains("\u{1b}[32m+2\u{1b}[0m"), "report:\n{text}");
+}
+
+#[test]
 fn run_with_diff_mode_returns_expected_statuses() {
     let td = tempfile::TempDir::new().expect("tempdir");
     let left = td.path().join("left.yaml");

@@ -200,6 +200,7 @@ pub(super) fn write_semantic_diff_report<W: Write>(
 ) -> Result<(), Error> {
     match format {
         DiffOutputFormat::Diff => write_semantic_diff_report_diff(writer, diffs, summary, color),
+        DiffOutputFormat::Patch => write_semantic_diff_report_patch(writer, diffs, summary, color),
         DiffOutputFormat::Json => {
             write_semantic_diff_report_json(writer, diffs, summary, compact_json)
         }
@@ -277,6 +278,102 @@ fn write_semantic_diff_report_diff<W: Write>(
         "Summary: changed={}, added={}, removed={}",
         summary.changed, summary.added, summary.removed
     )?;
+    Ok(())
+}
+
+fn write_semantic_diff_report_patch<W: Write>(
+    writer: &mut W,
+    diffs: &[SemanticDiff],
+    summary: SemanticDiffSummary,
+    color: bool,
+) -> Result<(), Error> {
+    if summary.equal() {
+        writeln!(writer, "No semantic differences.")?;
+        return Ok(());
+    }
+
+    write_patch_file_headers(writer, color)?;
+
+    for (idx, diff) in diffs.iter().enumerate() {
+        if idx > 0 {
+            writeln!(writer)?;
+        }
+        write_patch_hunk_header(writer, &diff.path, color)?;
+        match diff.kind {
+            SemanticDiffKind::Added => {
+                let right = diff
+                    .right
+                    .as_ref()
+                    .expect("added diff always has right value");
+                write_patch_value_line(writer, '+', &render_semantic_diff_value(right)?, color)?;
+            }
+            SemanticDiffKind::Removed => {
+                let left = diff
+                    .left
+                    .as_ref()
+                    .expect("removed diff always has left value");
+                write_patch_value_line(writer, '-', &render_semantic_diff_value(left)?, color)?;
+            }
+            SemanticDiffKind::Changed => {
+                let left = diff
+                    .left
+                    .as_ref()
+                    .expect("changed diff always has left value");
+                let right = diff
+                    .right
+                    .as_ref()
+                    .expect("changed diff always has right value");
+                write_patch_value_line(writer, '-', &render_semantic_diff_value(left)?, color)?;
+                write_patch_value_line(writer, '+', &render_semantic_diff_value(right)?, color)?;
+            }
+        }
+    }
+
+    writeln!(
+        writer,
+        "\nSummary: changed={}, added={}, removed={}",
+        summary.changed, summary.added, summary.removed
+    )?;
+    Ok(())
+}
+
+fn write_patch_file_headers<W: Write>(writer: &mut W, color: bool) -> Result<(), Error> {
+    if !color {
+        writeln!(writer, "--- left")?;
+        writeln!(writer, "+++ right")?;
+        return Ok(());
+    }
+    let reset = "\x1b[0m";
+    writeln!(writer, "\x1b[31m--- left{reset}")?;
+    writeln!(writer, "\x1b[32m+++ right{reset}")?;
+    Ok(())
+}
+
+fn write_patch_hunk_header<W: Write>(writer: &mut W, path: &str, color: bool) -> Result<(), Error> {
+    if !color {
+        writeln!(writer, "@@ {path} @@")?;
+        return Ok(());
+    }
+    writeln!(writer, "\x1b[36m@@ {path} @@\x1b[0m")?;
+    Ok(())
+}
+
+fn write_patch_value_line<W: Write>(
+    writer: &mut W,
+    marker: char,
+    value: &str,
+    color: bool,
+) -> Result<(), Error> {
+    if !color {
+        writeln!(writer, "{marker}{value}")?;
+        return Ok(());
+    }
+    let style = match marker {
+        '+' => "\x1b[32m",
+        '-' => "\x1b[31m",
+        _ => "\x1b[0m",
+    };
+    writeln!(writer, "{style}{marker}{value}\x1b[0m")?;
     Ok(())
 }
 

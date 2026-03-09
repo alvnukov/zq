@@ -109,6 +109,33 @@ calc_stats() {
   '
 }
 
+TIME_BIN=""
+TIME_MODE="" # gnu | bsd
+
+detect_time_mode() {
+  if command -v gtime >/dev/null 2>&1; then
+    TIME_BIN="$(command -v gtime)"
+    TIME_MODE="gnu"
+    return
+  fi
+
+  if [[ -x /usr/bin/time ]] && /usr/bin/time -f '%e %M' true >/dev/null 2>&1; then
+    TIME_BIN="/usr/bin/time"
+    TIME_MODE="gnu"
+    return
+  fi
+
+  if [[ -x /usr/bin/time ]] && /usr/bin/time -l true >/dev/null 2>&1; then
+    TIME_BIN="/usr/bin/time"
+    TIME_MODE="bsd"
+    return
+  fi
+
+  echo "missing compatible time tool for memory measurements" >&2
+  echo "need gtime (GNU) or /usr/bin/time with -f or -l support" >&2
+  exit 1
+}
+
 run_engine() {
   local engine="$1"
   local query="$2"
@@ -140,16 +167,51 @@ is_number() {
   [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]
 }
 
+measure_engine_once() {
+  local engine="$1"
+  local query="$2"
+  local output elapsed rss
+
+  if [[ "$engine" == "jq" ]]; then
+    if [[ "$TIME_MODE" == "gnu" ]]; then
+      output=$({ "$TIME_BIN" -f $'%e\t%M' jq -c -- "$query" < "$DATA" > /dev/null; } 2>&1)
+      elapsed="$(printf '%s\n' "$output" | awk -F $'\t' 'NF >= 2 {v=$1} END {print v}')"
+      rss="$(printf '%s\n' "$output" | awk -F $'\t' 'NF >= 2 {v=$2} END {print v}')"
+    else
+      output=$({ "$TIME_BIN" -l jq -c -- "$query" < "$DATA" > /dev/null; } 2>&1)
+      elapsed="$(printf '%s\n' "$output" | awk '$2=="real" {print $1; exit}')"
+      rss="$(printf '%s\n' "$output" | awk '/maximum resident set size/ {print $1/1024; exit}')"
+    fi
+  else
+    if [[ "$TIME_MODE" == "gnu" ]]; then
+      output=$({ "$TIME_BIN" -f $'%e\t%M' "$ZQ_BIN" -c -- "$query" < "$DATA" > /dev/null; } 2>&1)
+      elapsed="$(printf '%s\n' "$output" | awk -F $'\t' 'NF >= 2 {v=$1} END {print v}')"
+      rss="$(printf '%s\n' "$output" | awk -F $'\t' 'NF >= 2 {v=$2} END {print v}')"
+    else
+      output=$({ "$TIME_BIN" -l "$ZQ_BIN" -c -- "$query" < "$DATA" > /dev/null; } 2>&1)
+      elapsed="$(printf '%s\n' "$output" | awk '$2=="real" {print $1; exit}')"
+      rss="$(printf '%s\n' "$output" | awk '/maximum resident set size/ {print $1/1024; exit}')"
+    fi
+  fi
+
+  if ! is_number "$elapsed" || ! is_number "$rss"; then
+    echo "failed to parse measurement output for engine=$engine mode=$TIME_MODE" >&2
+    exit 1
+  fi
+  printf '%s\t%s\n' "$elapsed" "$rss"
+}
+
 mkdir -p "$BENCH_DIR"
+detect_time_mode
+echo "measurement backend: $TIME_BIN ($TIME_MODE)" >&2
 : > "$RESULTS_FILE"
-printf 'case\tjq_median\tjq_mean\tzq_median\tzq_mean\tzq_vs_jq\n' > "$RESULTS_FILE"
+printf 'case\tjq_median\tjq_mean\tzq_median\tzq_mean\tzq_vs_jq\tjq_maxrss_median_kib\tjq_maxrss_mean_kib\tzq_maxrss_median_kib\tzq_maxrss_mean_kib\tzq_vs_jq_maxrss\n' > "$RESULTS_FILE"
 if [[ "$BENCH_MODE" == "full" ]]; then
   printf 'case\tjq_canonical_hash\n' > "$VERIFY_HASHES_FILE"
 else
   validate_verify_hashes_file
 fi
 
-TIMEFORMAT='%R'
 while IFS=$'\t' read -r name query; do
   if [[ -z "${name:-}" ]] || [[ "$name" == \#* ]]; then
     continue
@@ -194,33 +256,48 @@ while IFS=$'\t' read -r name query; do
   run_engine zq "$query" > /dev/null
 
   zq_t="$BENCH_DIR/zq_${name}.times"
+  zq_rss="$BENCH_DIR/zq_${name}.rss"
   : > "$zq_t"
+  : > "$zq_rss"
 
   jq_med="NA"
   jq_mean="NA"
+  jq_rss_med="NA"
+  jq_rss_mean="NA"
   if [[ "$BENCH_MODE" == "full" ]]; then
     jq_t="$BENCH_DIR/jq_${name}.times"
+    jq_rss="$BENCH_DIR/jq_${name}.rss"
     : > "$jq_t"
+    : > "$jq_rss"
     echo "[bench] $name jq" >&2
     for _ in $(seq 1 "$REPEATS"); do
-      t=$({ time run_engine jq "$query" > /dev/null; } 2>&1)
+      read -r t rss < <(measure_engine_once jq "$query")
       printf '%s\n' "$t" >> "$jq_t"
+      printf '%s\n' "$rss" >> "$jq_rss"
     done
     read -r jq_med jq_mean < <(calc_stats "$jq_t")
+    read -r jq_rss_med jq_rss_mean < <(calc_stats "$jq_rss")
   fi
 
   echo "[bench] $name zq" >&2
   for _ in $(seq 1 "$REPEATS"); do
-    t=$({ time run_engine zq "$query" > /dev/null; } 2>&1)
+    read -r t rss < <(measure_engine_once zq "$query")
     printf '%s\n' "$t" >> "$zq_t"
+    printf '%s\n' "$rss" >> "$zq_rss"
   done
 
   read -r zq_med zq_mean < <(calc_stats "$zq_t")
+  read -r zq_rss_med zq_rss_mean < <(calc_stats "$zq_rss")
   ratio="NA"
+  ratio_rss="NA"
   if is_number "$jq_med"; then
     ratio=$(awk -v z="$zq_med" -v j="$jq_med" 'BEGIN { if (j==0) print "inf"; else printf "%.3f", z/j }')
+    ratio_rss=$(awk -v z="$zq_rss_med" -v j="$jq_rss_med" 'BEGIN { if (j==0) print "inf"; else printf "%.3f", z/j }')
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$jq_med" "$jq_mean" "$zq_med" "$zq_mean" "$ratio" >> "$RESULTS_FILE"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$jq_med" "$jq_mean" "$zq_med" "$zq_mean" "$ratio" \
+    "$jq_rss_med" "$jq_rss_mean" "$zq_rss_med" "$zq_rss_mean" "$ratio_rss" \
+    >> "$RESULTS_FILE"
 done < "$CASES_FILE"
 
 cat "$RESULTS_FILE"

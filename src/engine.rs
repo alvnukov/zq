@@ -1,5 +1,6 @@
 use crate::value::ZqValue;
 use serde_json::Value as JsonValue;
+use std::io::Read;
 
 mod yaml_output;
 
@@ -255,6 +256,13 @@ where
         return Ok(NativeStreamStatus::Executed);
     }
 
+    if is_strict_json_stream(input) {
+        program
+            .execute_json_text_stream_auto_native(input, &mut wrapped_emit)
+            .map_err(|e| Error::Query(crate::QueryError::Runtime(e)))?;
+        return Ok(NativeStreamStatus::Executed);
+    }
+
     let parsed = crate::query::parse_input_values_auto_native(input).map_err(Error::Query)?;
     program
         .execute_slice_native_owned(
@@ -264,6 +272,45 @@ where
         )
         .map_err(|e| Error::Query(crate::QueryError::Runtime(e)))?;
     Ok(NativeStreamStatus::Executed)
+}
+
+pub fn try_run_jq_native_stream_json_reader_options_native<R, F>(
+    query: &str,
+    reader: R,
+    run_options: RunOptions,
+    mut emit: F,
+) -> Result<NativeStreamStatus, Error>
+where
+    R: Read + Send + 'static,
+    F: FnMut(ZqValue) -> Result<(), String>,
+{
+    let Some(program) = crate::native_engine::try_compile(query) else {
+        let compile_error = crate::native_engine::try_compile_error(query)
+            .unwrap_or_else(|| format!("query is not supported by native engine: {query}"));
+        return Err(Error::Query(crate::QueryError::Unsupported(compile_error)));
+    };
+    let mut wrapped_emit = |value: ZqValue| emit(value);
+
+    if run_options.null_input {
+        program
+            .execute_input_native(ZqValue::Null, &mut wrapped_emit)
+            .map_err(|e| Error::Query(crate::QueryError::Runtime(e)))?;
+        return Ok(NativeStreamStatus::Executed);
+    }
+
+    program
+        .execute_json_reader_stream_auto_native(Box::new(reader), &mut wrapped_emit)
+        .map_err(|e| Error::Query(crate::QueryError::Runtime(e)))?;
+    Ok(NativeStreamStatus::Executed)
+}
+
+fn is_strict_json_stream(input: &str) -> bool {
+    for item in serde_json::Deserializer::from_str(input).into_iter::<serde::de::IgnoredAny>() {
+        if item.is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 pub fn parse_jq_input_values(

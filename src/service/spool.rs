@@ -240,7 +240,10 @@ mod tests {
             libc::EAGAIN,
         ] {
             let err = io::Error::from_raw_os_error(code);
-            assert!(is_nonfatal_lock_error(&err), "errno={code} must be nonfatal");
+            assert!(
+                is_nonfatal_lock_error(&err),
+                "errno={code} must be nonfatal"
+            );
         }
     }
 

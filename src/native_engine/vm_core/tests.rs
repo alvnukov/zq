@@ -2890,6 +2890,25 @@ fn input_and_inputs_follow_builtin_jq_shape_in_single_input_runtime() {
 }
 
 #[test]
+fn inputs_ir_keeps_try_repeat_input_shape() {
+    let q = compile("inputs").expect("compile");
+    let branch = q.branches.first().expect("inputs branch");
+    let shape = format!("{:?}", branch.ops);
+    assert!(
+        shape.contains("TryCatch"),
+        "inputs ir must contain TryCatch, got: {shape}"
+    );
+    assert!(
+        shape.contains("Repeat"),
+        "inputs ir must contain Repeat, got: {shape}"
+    );
+    assert!(
+        shape.contains("Input"),
+        "inputs ir must contain Input, got: {shape}"
+    );
+}
+
+#[test]
 fn halt_error_builtin_forms_match_jq_builtin_contract() {
     // jq/src/builtin.jq: def halt_error: halt_error(5);
     let q = compile("halt_error").expect("compile");

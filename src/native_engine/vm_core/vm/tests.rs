@@ -49,6 +49,79 @@ fn execute_keeps_non_terminal_stage_errors_hard() {
 }
 
 #[test]
+fn execute_terminal_repeat_softens_break_after_emitting_values() {
+    let program = program_with_ops(vec![Op::Repeat(Box::new(Op::Input))]);
+    let _input_guard =
+        install_input_stream(&[ZqValue::from(1), ZqValue::from(2), ZqValue::from(3)]);
+    set_input_cursor(1);
+
+    let out = execute(&program, &ZqValue::from(1)).expect("terminal repeat must soften break");
+    assert_eq!(out, vec![ZqValue::from(2), ZqValue::from(3)]);
+}
+
+#[test]
+fn execute_terminal_repeat_keeps_break_hard_without_outputs() {
+    let program = program_with_ops(vec![Op::Repeat(Box::new(Op::Input))]);
+    let _input_guard = install_input_stream(&[ZqValue::from(1)]);
+    set_input_cursor(1);
+
+    let err = execute(&program, &ZqValue::from(1))
+        .expect_err("terminal repeat without outputs must return hard error");
+    assert!(
+        err.contains("break"),
+        "unexpected terminal repeat hard error: {err}"
+    );
+}
+
+#[test]
+fn execute_terminal_trycatch_repeat_input_matches_inputs_contract() {
+    let op = Op::TryCatch {
+        inner: Box::new(Op::Repeat(Box::new(Op::Input))),
+        catcher: Box::new(Op::IfElse {
+            cond: Box::new(Op::Binary {
+                op: BinaryOp::Eq,
+                lhs: Box::new(Op::Identity),
+                rhs: Box::new(Op::Literal(ZqValue::String("break".to_string()))),
+            }),
+            then_expr: Box::new(Op::Empty),
+            else_expr: Box::new(Op::Error(Box::new(Op::Identity))),
+        }),
+    };
+    let program = program_with_ops(vec![op]);
+    let _input_guard =
+        install_input_stream(&[ZqValue::from(1), ZqValue::from(2), ZqValue::from(3)]);
+    set_input_cursor(1);
+
+    let out = execute(&program, &ZqValue::from(1)).expect("inputs contract must hold");
+    assert_eq!(out, vec![ZqValue::from(2), ZqValue::from(3)]);
+}
+
+#[test]
+fn execute_terminal_trycatch_reraises_non_break_errors() {
+    let op = Op::TryCatch {
+        inner: Box::new(Op::Error(Box::new(Op::Literal(ZqValue::String(
+            "boom".to_string(),
+        ))))),
+        catcher: Box::new(Op::IfElse {
+            cond: Box::new(Op::Binary {
+                op: BinaryOp::Eq,
+                lhs: Box::new(Op::Identity),
+                rhs: Box::new(Op::Literal(ZqValue::String("break".to_string()))),
+            }),
+            then_expr: Box::new(Op::Empty),
+            else_expr: Box::new(Op::Error(Box::new(Op::Identity))),
+        }),
+    };
+
+    let err = execute(&program_with_ops(vec![op]), &ZqValue::Null)
+        .expect_err("non-break errors must be re-raised");
+    assert!(
+        err.contains("boom"),
+        "unexpected try/catch re-raise text: {err}"
+    );
+}
+
+#[test]
 fn binary_cartesian_order_is_rhs_major() {
     let op = Op::Binary {
         op: BinaryOp::Add,

@@ -14,7 +14,7 @@ use indexmap::IndexMap;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -39,6 +39,7 @@ use self::regex_ops::{
     CachedRegex,
 };
 use self::stream_ops::{run_fromstream, run_tostream, run_truncate_stream};
+use serde::Deserialize;
 
 thread_local! {
     static BINDING_STACK: RefCell<Vec<(String, ZqValue)>> = const { RefCell::new(Vec::new()) };
@@ -58,6 +59,9 @@ const HALT_VALUE_PREFIX: &str = "\u{1f}zq-halt:";
 const REGEX_CACHE_LIMIT: usize = 1024;
 const VALUE_VEC_POOL_LIMIT: usize = 64;
 const VALUE_VEC_RETAIN_CAP: usize = 4096;
+
+type JsonInputReader = Box<dyn std::io::Read + Send>;
+type JsonInputParser = serde_json::Deserializer<serde_json::de::IoRead<JsonInputReader>>;
 
 struct BindingGuard {
     depth_added: usize,
@@ -186,10 +190,45 @@ pub(crate) struct ProgramContextGuard {
     _module_search_dirs_guard: ModuleSearchDirsGuard,
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct InputState {
-    values: Vec<ZqValue>,
+    source: InputSource,
     cursor: usize,
+    has_stream_context: bool,
+}
+
+#[derive(Default)]
+enum InputSource {
+    #[default]
+    None,
+    Buffered(Vec<ZqValue>),
+    Stream(JsonTextInputSource),
+}
+
+struct JsonTextInputSource {
+    replay: VecDeque<ZqValue>,
+    parser: JsonInputParser,
+}
+
+impl JsonTextInputSource {
+    fn from_reader(reader: JsonInputReader, replay: Vec<ZqValue>) -> Self {
+        let parser = serde_json::Deserializer::from_reader(reader);
+        Self {
+            replay: replay.into(),
+            parser,
+        }
+    }
+
+    fn from_json_text(input: &str, replay: Vec<ZqValue>) -> Self {
+        let cursor = std::io::Cursor::new(input.as_bytes().to_vec());
+        Self::from_reader(Box::new(cursor), replay)
+    }
+}
+
+impl Default for JsonTextInputSource {
+    fn default() -> Self {
+        Self::from_json_text("", Vec::new())
+    }
 }
 
 pub(crate) struct InputStateGuard {
@@ -237,38 +276,68 @@ pub(crate) fn install_program_context(program: &Program) -> ProgramContextGuard 
 
 pub(crate) fn execute_prepared(program: &Program, input: ZqValue) -> Result<Vec<ZqValue>, String> {
     let mut out = Vec::new();
-    if let Some((last_branch, head_branches)) = program.branches.split_last() {
-        for branch in head_branches {
-            execute_branch(branch, input.clone(), &mut out)?;
-        }
-        execute_branch(last_branch, input, &mut out)?;
-    }
+    execute_prepared_with(program, input, &mut |value| {
+        out.push(value);
+        Ok(())
+    })?;
     Ok(out)
 }
 
-fn execute_branch(
-    branch: &super::ir::Branch,
+pub(crate) fn execute_prepared_with<F>(
+    program: &Program,
     input: ZqValue,
-    out: &mut Vec<ZqValue>,
-) -> Result<(), String> {
+    emit: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(ZqValue) -> Result<(), String>,
+{
+    if let Some((last_branch, head_branches)) = program.branches.split_last() {
+        for branch in head_branches {
+            execute_branch(branch, input.clone(), emit)?;
+        }
+        execute_branch(last_branch, input, emit)?;
+    }
+    Ok(())
+}
+
+fn execute_branch<F>(branch: &super::ir::Branch, input: ZqValue, emit: &mut F) -> Result<(), String>
+where
+    F: FnMut(ZqValue) -> Result<(), String>,
+{
     let mut current = PooledValueVec::acquire();
     let mut next = PooledValueVec::acquire();
     current.push(input);
     for (op_index, op) in branch.ops.iter().enumerate() {
         let is_last_op = op_index + 1 == branch.ops.len();
+        if is_last_op {
+            let mut hard_error: Option<String> = None;
+            for value in current.drain(..) {
+                let _root_apply_guard = push_root_apply_context();
+                let mut emitted = false;
+                let mut tracked_emit = |produced: ZqValue| {
+                    emitted = true;
+                    emit(produced)
+                };
+                if let Err(err) = apply_op_terminal(op, value, &mut tracked_emit) {
+                    if !emitted {
+                        hard_error = Some(render_public_error(err));
+                    }
+                    // Preserve outputs produced before terminal failure.
+                    break;
+                }
+            }
+            if let Some(err) = hard_error {
+                return Err(err);
+            }
+            return Ok(());
+        }
+
         next.clear();
         let mut hard_error: Option<String> = None;
         for value in current.drain(..) {
             let _root_apply_guard = push_root_apply_context();
             if let Err(err) = apply_op(op, value, &mut next) {
-                let rendered = render_public_error(err);
-                if next.is_empty() || !is_last_op {
-                    hard_error = Some(rendered);
-                }
-                // Preserve outputs produced before the failure and stop
-                // this stage; only terminal-stage failures with prior
-                // emits are softened to keep fixture-compatible stream
-                // behavior.
+                hard_error = Some(render_public_error(err));
                 break;
             }
         }
@@ -277,8 +346,126 @@ fn execute_branch(
         }
         std::mem::swap(current.deref_mut(), next.deref_mut());
     }
-    out.extend(current.drain(..));
+    for value in current.drain(..) {
+        emit(value)?;
+    }
     Ok(())
+}
+
+fn apply_op_terminal<F>(op: &Op, input: ZqValue, emit: &mut F) -> Result<(), String>
+where
+    F: FnMut(ZqValue) -> Result<(), String>,
+{
+    // jq_next() yields top-level results one-by-one while continuing execution
+    // through backtracking points. The terminal path mirrors that style here:
+    // emit as soon as values appear instead of accumulating full stage output.
+    match op {
+        Op::Repeat(arg) => {
+            let _apply_depth_guard = push_apply_op_depth();
+            run_repeat_terminal(arg, input, emit)
+        }
+        Op::Pipe(stages) => {
+            let _apply_depth_guard = push_apply_op_depth();
+            apply_pipe_stages_terminal(stages, input, emit)
+        }
+        Op::Chain(steps) => {
+            let _apply_depth_guard = push_apply_op_depth();
+            let root = input.clone();
+            apply_chain_steps_terminal(steps, &root, input, emit)
+        }
+        Op::Comma(items) => {
+            let _apply_depth_guard = push_apply_op_depth();
+            for item in items {
+                apply_op_terminal(item, input.clone(), emit)?;
+            }
+            Ok(())
+        }
+        Op::Call {
+            function_id,
+            param_id,
+            name,
+            args,
+        } => {
+            let _apply_depth_guard = push_apply_op_depth();
+            let arity = args.len();
+            if function_id.is_none() {
+                if let Some(arg_filter) = param_id.and_then(|id| lookup_param_closure(id, arity)) {
+                    let _guard = push_bindings(arg_filter.bindings.clone());
+                    let mut captured_values = PooledValueVec::acquire();
+                    apply_op_with_borrowed_fast_path(&arg_filter.op, &input, &mut captured_values)?;
+                    for value in captured_values.drain(..) {
+                        emit(value)?;
+                    }
+                    return Ok(());
+                }
+                return Err(format!("{name}/{arity} is not defined"));
+            }
+            let Some(function) = lookup_function_by_id(function_id.expect("checked above")) else {
+                return Err(format!("{name}/{arity} is not defined"));
+            };
+            if function.param_ids.len() != arity {
+                return Err(format!("{name}/{arity} is not defined"));
+            }
+            let captured_args: Vec<CapturedFilter> =
+                args.iter().map(capture_call_argument).collect();
+            let frame = CallFrame {
+                params: function.param_ids.into_iter().zip(captured_args).collect(),
+            };
+            let _call_frame_guard = push_call_frame(frame);
+            let mut body_values = PooledValueVec::acquire();
+            apply_op_with_borrowed_fast_path(&function.body, &input, &mut body_values)?;
+            for value in body_values.drain(..) {
+                emit(value)?;
+            }
+            Ok(())
+        }
+        Op::Label { name, body } => {
+            let _apply_depth_guard = push_apply_op_depth();
+            let label_id = NEXT_LABEL_ID.fetch_add(1, AtomicOrdering::Relaxed);
+            let marker = format!("\u{1f}zq-label:{name}:{label_id}");
+            let label_var = format!("*label-{name}");
+            let _guard = push_bindings(vec![(label_var, ZqValue::String(marker.clone()))]);
+            match apply_op_terminal(body, input, emit) {
+                Ok(()) => Ok(()),
+                Err(err) if err == marker => Ok(()),
+                Err(err) => Err(err),
+            }
+        }
+        Op::TryCatch { inner, catcher } => {
+            let _apply_depth_guard = push_apply_op_depth();
+            let mut inner_values = PooledValueVec::acquire();
+            match apply_op_with_borrowed_fast_path(inner, &input, &mut inner_values) {
+                Ok(()) => {
+                    for value in inner_values.drain(..) {
+                        emit(value)?;
+                    }
+                    Ok(())
+                }
+                Err(err) => {
+                    for value in inner_values.drain(..) {
+                        emit(value)?;
+                    }
+                    if decode_halt_error(&err).is_some() {
+                        return Err(err);
+                    }
+                    let catch_input =
+                        decode_thrown_value(&err).unwrap_or_else(|| ZqValue::String(err));
+                    apply_op_terminal(catcher, catch_input, emit)
+                }
+            }
+        }
+        _ => {
+            let mut stage_out = PooledValueVec::acquire();
+            let stage_err = apply_op(op, input, &mut stage_out).err();
+            for value in stage_out.drain(..) {
+                emit(value)?;
+            }
+            if let Some(err) = stage_err {
+                return Err(err);
+            }
+            Ok(())
+        }
+    }
 }
 
 fn push_apply_op_depth() -> ApplyOpDepthGuard {
@@ -340,8 +527,80 @@ pub(crate) fn install_input_stream(inputs: &[ZqValue]) -> InputStateGuard {
         std::mem::replace(
             &mut *state,
             InputState {
-                values: inputs.to_vec(),
+                source: InputSource::Buffered(inputs.to_vec()),
                 cursor: 0,
+                has_stream_context: !inputs.is_empty(),
+            },
+        )
+    });
+    InputStateGuard { previous }
+}
+
+pub(crate) fn install_input_stream_json_text(
+    remaining_input: &str,
+    replay: Vec<ZqValue>,
+    has_stream_context: bool,
+) -> InputStateGuard {
+    let previous = INPUT_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        std::mem::replace(
+            &mut *state,
+            InputState {
+                source: InputSource::Stream(JsonTextInputSource::from_json_text(
+                    remaining_input,
+                    replay,
+                )),
+                cursor: 0,
+                has_stream_context,
+            },
+        )
+    });
+    InputStateGuard { previous }
+}
+
+pub(crate) fn install_input_stream_json_reader(
+    reader: JsonInputReader,
+    replay: Vec<ZqValue>,
+    has_stream_context: bool,
+) -> InputStateGuard {
+    install_input_stream_json_parser(
+        serde_json::Deserializer::from_reader(reader),
+        replay,
+        has_stream_context,
+    )
+}
+
+pub(crate) fn install_input_stream_json_parser(
+    parser: JsonInputParser,
+    replay: Vec<ZqValue>,
+    has_stream_context: bool,
+) -> InputStateGuard {
+    let previous = INPUT_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        std::mem::replace(
+            &mut *state,
+            InputState {
+                source: InputSource::Stream(JsonTextInputSource {
+                    replay: replay.into(),
+                    parser,
+                }),
+                cursor: 0,
+                has_stream_context,
+            },
+        )
+    });
+    InputStateGuard { previous }
+}
+
+pub(crate) fn install_input_metadata_context() -> InputStateGuard {
+    let previous = INPUT_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        std::mem::replace(
+            &mut *state,
+            InputState {
+                source: InputSource::None,
+                cursor: 0,
+                has_stream_context: true,
             },
         )
     });
@@ -351,31 +610,58 @@ pub(crate) fn install_input_stream(inputs: &[ZqValue]) -> InputStateGuard {
 pub(crate) fn set_input_cursor(cursor: usize) {
     INPUT_STATE.with(|state| {
         let mut state = state.borrow_mut();
-        state.cursor = cursor.min(state.values.len());
+        state.cursor = match &state.source {
+            InputSource::Buffered(values) => cursor.min(values.len()),
+            _ => cursor,
+        };
     });
 }
 
 fn next_input_value() -> Option<ZqValue> {
     INPUT_STATE.with(|state| {
         let mut state = state.borrow_mut();
-        if state.cursor >= state.values.len() {
-            return None;
+        let cursor = state.cursor;
+        match &mut state.source {
+            InputSource::None => None,
+            InputSource::Buffered(values) => {
+                let next = values.get(cursor).cloned();
+                if next.is_some() {
+                    state.cursor = cursor + 1;
+                }
+                next
+            }
+            InputSource::Stream(stream) => {
+                let value = if let Some(replay) = stream.replay.pop_front() {
+                    Some(replay)
+                } else {
+                    next_json_text_input_value(stream)
+                };
+                if value.is_some() {
+                    state.cursor += 1;
+                }
+                value
+            }
         }
-        let value = state.values[state.cursor].clone();
-        state.cursor += 1;
-        Some(value)
     })
 }
 
 fn input_line_number_value() -> Option<i64> {
     INPUT_STATE.with(|state| {
         let state = state.borrow();
-        if state.values.is_empty() {
+        if !state.has_stream_context {
             None
         } else {
             Some((state.cursor as i64) + 1)
         }
     })
+}
+
+fn next_json_text_input_value(stream: &mut JsonTextInputSource) -> Option<ZqValue> {
+    match serde_json::Value::deserialize(&mut stream.parser) {
+        Ok(value) => Some(ZqValue::from_json(value)),
+        Err(err) if err.is_eof() => None,
+        Err(_) => None,
+    }
 }
 
 fn current_module_search_dirs() -> Vec<PathBuf> {
@@ -1743,6 +2029,29 @@ fn apply_pipe_stages(stages: &[Op], input: ZqValue, out: &mut Vec<ZqValue>) -> R
     Ok(())
 }
 
+fn apply_pipe_stages_terminal<F>(stages: &[Op], input: ZqValue, emit: &mut F) -> Result<(), String>
+where
+    F: FnMut(ZqValue) -> Result<(), String>,
+{
+    let Some((stage, rest)) = stages.split_first() else {
+        emit(input)?;
+        return Ok(());
+    };
+    if rest.is_empty() {
+        return apply_op_terminal(stage, input, emit);
+    }
+
+    let mut stage_out = PooledValueVec::acquire();
+    let stage_err = apply_op(stage, input, &mut stage_out).err();
+    for value in stage_out.drain(..) {
+        apply_pipe_stages_terminal(rest, value, emit)?;
+    }
+    if let Some(err) = stage_err {
+        return Err(err);
+    }
+    Ok(())
+}
+
 fn apply_chain_steps(
     steps: &[Op],
     root: &ZqValue,
@@ -1763,6 +2072,44 @@ fn apply_chain_steps(
     };
     for value in stage_out.drain(..) {
         apply_chain_steps(rest, root, value, out)?;
+    }
+    stage_result
+}
+
+fn apply_chain_steps_terminal<F>(
+    steps: &[Op],
+    root: &ZqValue,
+    input: ZqValue,
+    emit: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(ZqValue) -> Result<(), String>,
+{
+    let Some((step, rest)) = steps.split_first() else {
+        emit(input)?;
+        return Ok(());
+    };
+    if rest.is_empty() {
+        if let Op::DynamicIndex { key, optional } = step {
+            let mut stage_out = PooledValueVec::acquire();
+            let stage_result = run_dynamic_index(input, key, root, *optional, &mut stage_out);
+            for value in stage_out.drain(..) {
+                emit(value)?;
+            }
+            return stage_result;
+        }
+        return apply_op_terminal(step, input, emit);
+    }
+
+    let mut stage_out = PooledValueVec::acquire();
+    let stage_result = match step {
+        Op::DynamicIndex { key, optional } => {
+            run_dynamic_index(input, key, root, *optional, &mut stage_out)
+        }
+        _ => apply_op(step, input, &mut stage_out),
+    };
+    for value in stage_out.drain(..) {
+        apply_chain_steps_terminal(rest, root, value, emit)?;
     }
     stage_result
 }
@@ -2247,11 +2594,33 @@ fn run_combinations(input: ZqValue) -> Result<Vec<ZqValue>, String> {
 
 fn run_repeat(arg: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), String> {
     loop {
-        let mut cycle = Vec::new();
+        let mut cycle = PooledValueVec::acquire();
         match apply_op(arg, input.clone(), &mut cycle) {
-            Ok(()) => out.extend(cycle),
+            Ok(()) => out.extend(cycle.drain(..)),
             Err(err) => {
-                out.extend(cycle);
+                out.extend(cycle.drain(..));
+                return Err(err);
+            }
+        }
+    }
+}
+
+fn run_repeat_terminal<F>(arg: &Op, input: ZqValue, emit: &mut F) -> Result<(), String>
+where
+    F: FnMut(ZqValue) -> Result<(), String>,
+{
+    loop {
+        let mut cycle = PooledValueVec::acquire();
+        match apply_op(arg, input.clone(), &mut cycle) {
+            Ok(()) => {
+                for value in cycle.drain(..) {
+                    emit(value)?;
+                }
+            }
+            Err(err) => {
+                for value in cycle.drain(..) {
+                    emit(value)?;
+                }
                 return Err(err);
             }
         }

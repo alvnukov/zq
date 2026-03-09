@@ -50,12 +50,51 @@ pub(crate) fn execute_prepared(
     vm::execute_prepared(program, input)
 }
 
+pub(crate) fn execute_prepared_with<F>(
+    program: &ir::Program,
+    input: ZqValue,
+    emit: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(ZqValue) -> Result<(), String>,
+{
+    vm::execute_prepared_with(program, input, emit)
+}
+
 pub(crate) fn install_program_context(program: &ir::Program) -> vm::ProgramContextGuard {
     vm::install_program_context(program)
 }
 
 pub(crate) fn install_input_stream(inputs: &[ZqValue]) -> vm::InputStateGuard {
     vm::install_input_stream(inputs)
+}
+
+pub(crate) fn install_input_stream_json_text(
+    remaining_input: &str,
+    replay: Vec<ZqValue>,
+    has_stream_context: bool,
+) -> vm::InputStateGuard {
+    vm::install_input_stream_json_text(remaining_input, replay, has_stream_context)
+}
+
+pub(crate) fn install_input_stream_json_reader(
+    reader: Box<dyn std::io::Read + Send>,
+    replay: Vec<ZqValue>,
+    has_stream_context: bool,
+) -> vm::InputStateGuard {
+    vm::install_input_stream_json_reader(reader, replay, has_stream_context)
+}
+
+pub(crate) fn install_input_stream_json_parser(
+    parser: serde_json::Deserializer<serde_json::de::IoRead<Box<dyn std::io::Read + Send>>>,
+    replay: Vec<ZqValue>,
+    has_stream_context: bool,
+) -> vm::InputStateGuard {
+    vm::install_input_stream_json_parser(parser, replay, has_stream_context)
+}
+
+pub(crate) fn install_input_metadata_context() -> vm::InputStateGuard {
+    vm::install_input_metadata_context()
 }
 
 pub(crate) fn set_input_cursor(cursor: usize) {

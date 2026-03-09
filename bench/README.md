@@ -52,7 +52,13 @@ Outputs are written to `.tmp/bench/`:
 - `stdin_results.tsv`
 - `stdin_verify_hashes.tsv` (written by full run as canonical `jq` output hashes, consumed by zq-only mode)
 - `jq_*.times`, `zq_*.times`
+- `jq_*.rss`, `zq_*.rss` (max RSS per run, normalized to KiB)
 - `profiles/*`
+
+`stdin_results.tsv` now contains both latency and memory columns:
+- `*_median`, `*_mean` for wall time (seconds)
+- `*_maxrss_median_kib`, `*_maxrss_mean_kib` for peak RSS
+- `zq_vs_jq` and `zq_vs_jq_maxrss` ratios (zq/jq)
 
 ## Useful env vars
 

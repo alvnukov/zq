@@ -289,21 +289,6 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         }
     }
 
-    let skip_input_read = cli.null_input
-        && !cli.raw_input
-        && !cli.slurp
-        && !cli.seq
-        && !cli.stream
-        && !cli.stream_errors
-        && !query_uses_inputs_builtin(base_query.as_str());
-    let input_data = if skip_input_read {
-        InputData::Owned(String::new())
-    } else {
-        read_input(&input_path, &spool)?
-    };
-    let input_text = input_data.as_str_lossy();
-    let input = input_text.as_ref();
-
     let can_native_stream_direct = matches!(cli.output_format, OutputFormat::Json)
         && matches!(effective_input_format, zq::NativeInputFormat::Auto)
         && !cli.raw_output0
@@ -326,9 +311,15 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
             Some(vec![b' '; color_opts.indent])
         };
 
-        let native_status = zq::try_run_jq_native_stream_json_text_options_native(
+        let reader: Box<dyn io::Read + Send> = if input_path == "-" {
+            Box::new(io::stdin())
+        } else {
+            Box::new(fs::File::open(&input_path)?)
+        };
+
+        zq::try_run_jq_native_stream_json_reader_options_native(
             query.as_str(),
-            input,
+            reader,
             zq::EngineRunOptions { null_input: false },
             |value| {
                 if wrote_any && !cli.join_output {
@@ -348,33 +339,31 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                 Ok(())
             },
         )
-        .map_err(|e| Error::Query(render_engine_error("zq", query.as_str(), input, e)))?;
+        .map_err(|e| Error::Query(render_engine_error("zq", query.as_str(), "", e)))?;
 
-        if matches!(native_status, zq::NativeStreamStatus::Executed) {
-            if wrote_any {
-                if !cli.join_output {
-                    writer.write_all(b"\n")?;
-                }
-                writer.flush()?;
+        if wrote_any {
+            if !cli.join_output {
+                writer.write_all(b"\n")?;
             }
-            return Ok(0);
+            writer.flush()?;
         }
-
-        let err = zq::validate_jq_query_with_paths(query.as_str(), &cli.library_path)
-            .err()
-            .unwrap_or_else(|| {
-                zq::EngineError::Query(zq::QueryError::Unsupported(format!(
-                    "query is not supported by native engine: {}",
-                    query.as_str()
-                )))
-            });
-        return Err(Error::Query(render_engine_error(
-            "jq",
-            query.as_str(),
-            input,
-            err,
-        )));
+        return Ok(0);
     }
+
+    let skip_input_read = cli.null_input
+        && !cli.raw_input
+        && !cli.slurp
+        && !cli.seq
+        && !cli.stream
+        && !cli.stream_errors
+        && !query_uses_inputs_builtin(base_query.as_str());
+    let input_data = if skip_input_read {
+        InputData::Owned(String::new())
+    } else {
+        read_input(&input_path, &spool)?
+    };
+    let input_text = input_data.as_str_lossy();
+    let input = input_text.as_ref();
 
     let out_native = if cli.raw_input
         || cli.slurp

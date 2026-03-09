@@ -1,7 +1,9 @@
 use crate::value::ZqValue;
+use serde::Deserialize;
 #[cfg(test)]
 use serde_json::Value as RawJsonValue;
 use std::collections::{BTreeSet, VecDeque};
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
@@ -40,6 +42,9 @@ const VM_POOL_MAX_WORKERS: usize = 8;
 const VM_POOL_ENV: &str = "ZQ_VM_POOL";
 const PAR_EXEC_MIN_INPUTS: usize = 128;
 const PAR_EXEC_OVERRIDE_ENV: &str = "ZQ_NATIVE_PAR";
+
+type JsonInputReader = Box<dyn Read + Send>;
+type JsonInputParser = serde_json::Deserializer<serde_json::de::IoRead<JsonInputReader>>;
 
 struct VmRunTask {
     program: CompiledProgram,
@@ -307,6 +312,193 @@ pub fn decode_halt_error(err: &str) -> Option<(i32, String)> {
 }
 
 impl CompiledProgram {
+    pub(crate) fn uses_input_op(&self) -> bool {
+        program_uses_input_op(&self.program)
+    }
+
+    pub(crate) fn uses_input_stream_metadata(&self) -> bool {
+        program_uses_input_stream_metadata(&self.program)
+    }
+
+    pub(crate) fn reads_inputs_as_stream_events(&self) -> bool {
+        program_reads_inputs_as_stream_events(&self.program)
+    }
+
+    pub(crate) fn execute_json_text_stream_auto_native<F>(
+        &self,
+        input: &str,
+        emit: &mut F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(ZqValue) -> Result<(), String>,
+    {
+        if self.uses_input_op() {
+            return self.execute_json_text_stream_with_inputs_native(input, emit);
+        }
+        if self.uses_input_stream_metadata() {
+            return self.execute_json_text_stream_with_metadata_native(input, emit);
+        }
+        self.execute_json_text_stream_native(input, emit)
+    }
+
+    pub(crate) fn execute_json_reader_stream_auto_native<F>(
+        &self,
+        reader: JsonInputReader,
+        emit: &mut F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(ZqValue) -> Result<(), String>,
+    {
+        if self.uses_input_op() {
+            return self.execute_json_reader_stream_with_inputs_native(reader, emit);
+        }
+        if self.uses_input_stream_metadata() {
+            return self.execute_json_reader_stream_with_metadata_native(reader, emit);
+        }
+        self.execute_json_reader_stream_native(reader, emit)
+    }
+
+    pub(crate) fn execute_json_text_stream_native<F>(
+        &self,
+        input: &str,
+        emit: &mut F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(ZqValue) -> Result<(), String>,
+    {
+        let _program_context_guard = vm_core::install_program_context(&self.program);
+        for item in serde_json::Deserializer::from_str(input).into_iter::<serde_json::Value>() {
+            let root = ZqValue::from_json(item.map_err(|e| format!("json parse error: {e}"))?);
+            vm_core::execute_prepared_with(&self.program, root, emit)?;
+        }
+        Ok(())
+    }
+
+    fn execute_json_reader_stream_native<F>(
+        &self,
+        reader: JsonInputReader,
+        emit: &mut F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(ZqValue) -> Result<(), String>,
+    {
+        let _program_context_guard = vm_core::install_program_context(&self.program);
+        let mut parser = serde_json::Deserializer::from_reader(reader);
+        loop {
+            match serde_json::Value::deserialize(&mut parser) {
+                Ok(item) => {
+                    let root = ZqValue::from_json(item);
+                    vm_core::execute_prepared_with(&self.program, root, emit)?;
+                }
+                Err(err) if err.is_eof() => break,
+                Err(err) => return Err(format!("json parse error: {err}")),
+            }
+        }
+        Ok(())
+    }
+
+    fn execute_json_text_stream_with_inputs_native<F>(
+        &self,
+        input: &str,
+        emit: &mut F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(ZqValue) -> Result<(), String>,
+    {
+        let _program_context_guard = vm_core::install_program_context(&self.program);
+        let reads_as_events = self.reads_inputs_as_stream_events();
+        let (first, remaining) = parse_first_json_stream_value(input)?;
+        let has_first = first.is_some();
+        let root = first.unwrap_or(ZqValue::Null);
+        let replay = if reads_as_events && has_first {
+            vec![root.clone()]
+        } else {
+            Vec::new()
+        };
+        let _input_guard = vm_core::install_input_stream_json_text(remaining, replay, has_first);
+        let cursor_start = if reads_as_events {
+            0
+        } else {
+            usize::from(has_first)
+        };
+        vm_core::set_input_cursor(cursor_start);
+        self.execute_input_native_prepared(root, emit)
+    }
+
+    fn execute_json_reader_stream_with_inputs_native<F>(
+        &self,
+        reader: JsonInputReader,
+        emit: &mut F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(ZqValue) -> Result<(), String>,
+    {
+        let _program_context_guard = vm_core::install_program_context(&self.program);
+        let reads_as_events = self.reads_inputs_as_stream_events();
+        let (first, parser) = parse_first_json_stream_value_reader(reader)?;
+        let has_first = first.is_some();
+        let root = first.unwrap_or(ZqValue::Null);
+        let replay = if reads_as_events && has_first {
+            vec![root.clone()]
+        } else {
+            Vec::new()
+        };
+        let _input_guard = vm_core::install_input_stream_json_parser(parser, replay, has_first);
+        let cursor_start = if reads_as_events {
+            0
+        } else {
+            usize::from(has_first)
+        };
+        vm_core::set_input_cursor(cursor_start);
+        self.execute_input_native_prepared(root, emit)
+    }
+
+    fn execute_json_text_stream_with_metadata_native<F>(
+        &self,
+        input: &str,
+        emit: &mut F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(ZqValue) -> Result<(), String>,
+    {
+        let _program_context_guard = vm_core::install_program_context(&self.program);
+        let _input_guard = vm_core::install_input_metadata_context();
+        let values = serde_json::Deserializer::from_str(input).into_iter::<serde_json::Value>();
+        for (index, item) in values.enumerate() {
+            vm_core::set_input_cursor(index);
+            let root = ZqValue::from_json(item.map_err(|e| format!("json parse error: {e}"))?);
+            self.execute_input_native_prepared(root, emit)?;
+        }
+        Ok(())
+    }
+
+    fn execute_json_reader_stream_with_metadata_native<F>(
+        &self,
+        reader: JsonInputReader,
+        emit: &mut F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(ZqValue) -> Result<(), String>,
+    {
+        let _program_context_guard = vm_core::install_program_context(&self.program);
+        let _input_guard = vm_core::install_input_metadata_context();
+        let mut parser = serde_json::Deserializer::from_reader(reader);
+        let mut index = 0usize;
+        loop {
+            match serde_json::Value::deserialize(&mut parser) {
+                Ok(item) => {
+                    vm_core::set_input_cursor(index);
+                    index += 1;
+                    let root = ZqValue::from_json(item);
+                    self.execute_input_native_prepared(root, emit)?;
+                }
+                Err(err) if err.is_eof() => break,
+                Err(err) => return Err(format!("json parse error: {err}")),
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn debug_disasm_function_labels(&self) -> Vec<String> {
         let reachable = reachable_function_ids(&self.program);
         self.program
@@ -342,10 +534,7 @@ impl CompiledProgram {
     where
         F: FnMut(ZqValue) -> Result<(), String>,
     {
-        for value in vm_core::execute_prepared(&self.program, root)? {
-            emit(value)?;
-        }
-        Ok(())
+        vm_core::execute_prepared_with(&self.program, root, emit)
     }
 
     pub fn execute_slice_native<F>(
@@ -429,6 +618,27 @@ impl CompiledProgram {
         self.execute_slice_native(&native_inputs, run_options, &mut |value| {
             emit(value.into_json())
         })
+    }
+}
+
+fn parse_first_json_stream_value(input: &str) -> Result<(Option<ZqValue>, &str), String> {
+    let mut values = serde_json::Deserializer::from_str(input).into_iter::<serde_json::Value>();
+    let Some(first) = values.next() else {
+        return Ok((None, input));
+    };
+    let first = first.map_err(|e| format!("json parse error: {e}"))?;
+    let offset = values.byte_offset();
+    Ok((Some(ZqValue::from_json(first)), &input[offset..]))
+}
+
+fn parse_first_json_stream_value_reader(
+    reader: JsonInputReader,
+) -> Result<(Option<ZqValue>, JsonInputParser), String> {
+    let mut parser = serde_json::Deserializer::from_reader(reader);
+    match serde_json::Value::deserialize(&mut parser) {
+        Ok(first) => Ok((Some(ZqValue::from_json(first)), parser)),
+        Err(err) if err.is_eof() => Ok((None, parser)),
+        Err(err) => Err(format!("json parse error: {err}")),
     }
 }
 

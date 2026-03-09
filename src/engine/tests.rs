@@ -91,6 +91,51 @@ fn yaml_output_uses_anchors_for_repeated_subtrees() {
 }
 
 #[test]
+fn yaml_output_uses_merge_for_mapping_extensions() {
+    let out = format_output_yaml_documents_with_options(
+        &[serde_json::json!({
+            "base": {"a": 1, "b": 2},
+            "derived": {"a": 1, "b": 2, "c": 3}
+        })],
+        YamlFormatOptions {
+            use_anchors: true,
+            ..YamlFormatOptions::default()
+        },
+    )
+    .expect("yaml output");
+
+    let anchor_name = out
+        .lines()
+        .find_map(|line| {
+            let (_, tail) = line.split_once('&')?;
+            Some(
+                tail.split(|c: char| c.is_whitespace())
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .filter(|name| !name.is_empty())
+        .expect("merge source anchor name");
+
+    assert!(
+        out.contains(&format!("&{anchor_name}")),
+        "merge source should be anchored with readable name"
+    );
+    assert!(
+        out.contains(&format!("<<: *{anchor_name}")),
+        "derived mapping should use YAML merge against base anchor"
+    );
+
+    let decoded: serde_yaml::Value = serde_yaml::from_str(&out).expect("decode anchored yaml");
+    let normalized = crate::yamlmerge::normalize_value_from_source(&out, decoded);
+    let expected: serde_yaml::Value =
+        serde_yaml::from_str("base:\n  a: 1\n  b: 2\nderived:\n  a: 1\n  b: 2\n  c: 3\n")
+            .expect("decode expected yaml");
+    assert_eq!(normalized, expected);
+}
+
+#[test]
 fn yaml_output_uses_anchors_for_repeated_large_scalars() {
     let out = format_output_yaml_documents_with_options(
         &[serde_json::json!({

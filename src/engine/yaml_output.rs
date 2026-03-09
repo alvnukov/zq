@@ -192,6 +192,17 @@ impl YamlAnchorAnalyzer {
             }
         }
 
+        let merge_sources = select_mapping_merge_sources(&analyzer.fingerprints, &first_seen);
+        let mut merge_base_ids = merge_sources.values().copied().collect::<Vec<_>>();
+        merge_base_ids.sort_by_key(|id| (first_seen[*id], *id));
+        merge_base_ids.dedup();
+        for id in merge_base_ids {
+            if selected_ids.insert(id) {
+                selected_order.push(id);
+            }
+        }
+        selected_order.sort_by_key(|id| (first_seen[*id], *id));
+
         let mut anchor_names = vec![None; analyzer.fingerprints.len()];
         let mut used_names = HashSet::<String>::new();
         for id in selected_order {
@@ -206,10 +217,16 @@ impl YamlAnchorAnalyzer {
             anchor_names[id] = Some(name);
         }
 
+        let fingerprint_len = analyzer.fingerprints.len();
         YamlAnchorPlan {
             node_ids: analyzer.node_ids,
+            fingerprints: analyzer.fingerprints,
             anchor_names,
-            emitted: vec![false; analyzer.fingerprints.len()],
+            emitted: vec![false; fingerprint_len],
+            merge_sources: merge_sources
+                .into_iter()
+                .map(|(target, base)| (target as u32, base as u32))
+                .collect(),
         }
     }
 
@@ -276,6 +293,74 @@ fn should_emit_anchor(fingerprint: &YamlFingerprint, count: usize) -> bool {
         | YamlFingerprint::Mapping(_)
         | YamlFingerprint::Tagged(_, _) => true,
     }
+}
+
+const MIN_MERGE_BASE_KEYS: usize = 2;
+
+fn mapping_pairs(fingerprint: &YamlFingerprint) -> Option<&[(u32, u32)]> {
+    match fingerprint {
+        YamlFingerprint::Mapping(pairs) => Some(pairs),
+        YamlFingerprint::Null
+        | YamlFingerprint::Bool(_)
+        | YamlFingerprint::Number(_)
+        | YamlFingerprint::String(_)
+        | YamlFingerprint::Sequence(_)
+        | YamlFingerprint::Tagged(_, _) => None,
+    }
+}
+
+fn mapping_is_strict_subset(base: &[(u32, u32)], target: &[(u32, u32)]) -> bool {
+    if base.len() < MIN_MERGE_BASE_KEYS || base.len() >= target.len() {
+        return false;
+    }
+    base.iter()
+        .all(|pair| target.iter().any(|candidate| candidate == pair))
+}
+
+fn select_mapping_merge_sources(
+    fingerprints: &[YamlFingerprint],
+    first_seen: &[usize],
+) -> HashMap<usize, usize> {
+    let mut out = HashMap::<usize, usize>::new();
+    for (target_id, target_fp) in fingerprints.iter().enumerate() {
+        let Some(target_pairs) = mapping_pairs(target_fp) else {
+            continue;
+        };
+        if target_pairs.len() <= MIN_MERGE_BASE_KEYS {
+            continue;
+        }
+
+        let mut best: Option<(usize, usize, usize)> = None;
+        for (base_id, base_fp) in fingerprints.iter().enumerate() {
+            if base_id == target_id || first_seen[base_id] >= first_seen[target_id] {
+                continue;
+            }
+            let Some(base_pairs) = mapping_pairs(base_fp) else {
+                continue;
+            };
+            if !mapping_is_strict_subset(base_pairs, target_pairs) {
+                continue;
+            }
+
+            let rank = (base_id, base_pairs.len(), first_seen[base_id]);
+            let better = match best {
+                None => true,
+                Some((best_id, best_len, best_seen)) => {
+                    rank.1 > best_len
+                        || (rank.1 == best_len && rank.2 < best_seen)
+                        || (rank.1 == best_len && rank.2 == best_seen && rank.0 < best_id)
+                }
+            };
+            if better {
+                best = Some(rank);
+            }
+        }
+
+        if let Some((base_id, _, _)) = best {
+            out.insert(target_id, base_id);
+        }
+    }
+    out
 }
 
 fn count_exposed_occurrences(
@@ -886,8 +971,10 @@ fn fill_first_seen(
 
 struct YamlAnchorPlan {
     node_ids: HashMap<usize, u32>,
+    fingerprints: Vec<YamlFingerprint>,
     anchor_names: Vec<Option<String>>,
     emitted: Vec<bool>,
+    merge_sources: HashMap<u32, u32>,
 }
 
 impl YamlAnchorPlan {
@@ -922,6 +1009,55 @@ impl YamlAnchorPlan {
             self.emitted[idx] = true;
             AnchorAction::Define(name)
         }
+    }
+
+    fn node_id(&self, value: &serde_yaml::Value) -> Option<u32> {
+        self.node_ids.get(&(value as *const _ as usize)).copied()
+    }
+
+    fn mapping_merge_base(
+        &self,
+        map_value: &serde_yaml::Value,
+        map: &serde_yaml::Mapping,
+        value_position: bool,
+    ) -> Option<(u32, String)> {
+        if !value_position || mapping_has_plain_merge_key(map) {
+            return None;
+        }
+        let target_id = self.node_id(map_value)?;
+        let base_id = *self.merge_sources.get(&target_id)?;
+        let base_idx = base_id as usize;
+        if !self.emitted.get(base_idx).copied().unwrap_or(false) {
+            return None;
+        }
+        let name = self
+            .anchor_names
+            .get(base_idx)
+            .and_then(|name| name.as_ref())
+            .cloned()?;
+        Some((base_id, name))
+    }
+
+    fn mapping_pair_covered_by_base(
+        &self,
+        base_id: u32,
+        key: &serde_yaml::Value,
+        value: &serde_yaml::Value,
+    ) -> bool {
+        let Some(key_id) = self.node_id(key) else {
+            return false;
+        };
+        let Some(value_id) = self.node_id(value) else {
+            return false;
+        };
+        let Some(base_pairs) = self
+            .fingerprints
+            .get(base_id as usize)
+            .and_then(mapping_pairs)
+        else {
+            return false;
+        };
+        base_pairs.iter().any(|pair| *pair == (key_id, value_id))
     }
 }
 
@@ -981,7 +1117,7 @@ fn emit_yaml_value_standalone(
                 out.push_str(&name);
                 out.push('\n');
             }
-            emit_yaml_mapping_body(map, indent, value_position, out, plan)?;
+            emit_yaml_mapping_body(value, map, indent, value_position, out, plan)?;
         }
         YamlValue::Tagged(_) => {
             write_indent(out, indent);
@@ -1010,22 +1146,44 @@ fn emit_yaml_sequence_body(
 }
 
 fn emit_yaml_mapping_body(
+    map_value: &serde_yaml::Value,
     map: &serde_yaml::Mapping,
     indent: usize,
     value_position: bool,
     out: &mut String,
     plan: &mut YamlAnchorPlan,
 ) -> Result<(), Error> {
-    for (idx, (key, value)) in map.iter().enumerate() {
-        if idx > 0 {
+    let merge_base = plan.mapping_merge_base(map_value, map, value_position);
+    let mut wrote_line = false;
+
+    if let Some((_, merge_name)) = &merge_base {
+        write_indent(out, indent);
+        out.push_str("<<: *");
+        out.push_str(merge_name);
+        wrote_line = true;
+    }
+
+    for (key, value) in map {
+        if let Some((base_id, _)) = &merge_base {
+            if plan.mapping_pair_covered_by_base(*base_id, key, value) {
+                continue;
+            }
+        }
+        if wrote_line {
             out.push('\n');
         }
         write_indent(out, indent);
         out.push_str(&render_yaml_key(key)?);
         out.push(':');
         emit_yaml_value_inline(value, indent, value_position, out, plan)?;
+        wrote_line = true;
     }
     Ok(())
+}
+
+fn mapping_has_plain_merge_key(map: &serde_yaml::Mapping) -> bool {
+    map.keys()
+        .any(|key| matches!(key, serde_yaml::Value::String(s) if s == "<<"))
 }
 
 fn emit_yaml_value_inline(
@@ -1083,6 +1241,7 @@ fn emit_yaml_value_inline(
             }
             out.push('\n');
             emit_yaml_mapping_body(
+                value,
                 map,
                 parent_indent + YAML_INDENT_STEP,
                 value_position,

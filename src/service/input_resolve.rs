@@ -1,4 +1,5 @@
 use super::*;
+use std::io::IsTerminal;
 
 pub(super) fn resolve_effective_input_format(
     cli_format: InputFormat,

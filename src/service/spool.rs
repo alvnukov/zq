@@ -143,9 +143,7 @@ impl Drop for SpoolManager {
 fn is_nonfatal_lock_error(err: &io::Error) -> bool {
     matches!(
         err.kind(),
-        io::ErrorKind::InvalidInput
-            | io::ErrorKind::PermissionDenied
-            | io::ErrorKind::Unsupported
+        io::ErrorKind::InvalidInput | io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
     )
 }
 

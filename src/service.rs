@@ -20,6 +20,7 @@ mod input_resolve;
 mod json_color;
 mod json_stream;
 mod native_json_output;
+mod output_colorize;
 mod output_formats;
 mod output_xml;
 mod run_tests;
@@ -64,9 +65,8 @@ use self::native_json_output::{
     exit_status_from_outputs_native, render_raw_output0_native, write_json_native_value_line,
     write_json_output_lines_native, write_json_output_native,
 };
-use self::output_formats::{
-    colorize_structured_output, render_csv_output_native, render_toml_output_native,
-};
+use self::output_colorize::colorize_structured_output;
+use self::output_formats::{render_csv_output_native, render_toml_output_native};
 use self::output_xml::render_xml_output_native;
 use self::run_tests::run_tests_mode_many;
 #[cfg(test)]

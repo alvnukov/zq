@@ -153,7 +153,11 @@ fn is_nonfatal_lock_error(err: &io::Error) -> bool {
 
 #[cfg(unix)]
 fn is_nonfatal_lock_errno(code: i32) -> bool {
-    matches!(code, libc::EINVAL | libc::ENOTSUP | libc::EOPNOTSUPP | libc::EACCES | libc::EAGAIN)
+    code == libc::EINVAL
+        || code == libc::ENOTSUP
+        || code == libc::EACCES
+        || code == libc::EAGAIN
+        || (libc::EOPNOTSUPP != libc::ENOTSUP && code == libc::EOPNOTSUPP)
 }
 
 #[cfg(not(unix))]
@@ -232,7 +236,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn lock_error_classification_accepts_common_errno_forms() {
-        for code in [libc::EINVAL, libc::ENOTSUP, libc::EOPNOTSUPP, libc::EACCES, libc::EAGAIN] {
+        let mut codes = vec![libc::EINVAL, libc::ENOTSUP, libc::EACCES, libc::EAGAIN];
+        if libc::EOPNOTSUPP != libc::ENOTSUP {
+            codes.push(libc::EOPNOTSUPP);
+        }
+        for code in codes {
             let err = io::Error::from_raw_os_error(code);
             assert!(is_nonfatal_lock_error(&err), "errno={code} must be nonfatal");
         }

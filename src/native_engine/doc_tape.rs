@@ -78,6 +78,8 @@ struct DocBuilder {
     array_items: Vec<NodeId>,
     object_entries: Vec<ObjectEntry>,
     strings: Vec<u8>,
+    root_field_filter: Option<*const RootFieldFilter>,
+    container_depth: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +119,11 @@ pub(crate) enum DocNumberRef<'a> {
     Raw(&'a str),
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RootFieldFilter {
+    names: Box<[String]>,
+}
+
 fn install_active_doc_builder(builder: &mut DocBuilder) -> ActiveDocBuilderGuard {
     let ptr = (builder as *mut DocBuilder).cast::<()>() as usize;
     let prev = ACTIVE_DOC_BUILDER.with(|slot| {
@@ -141,7 +148,11 @@ fn with_active_doc_builder<R>(f: impl FnOnce(&mut DocBuilder) -> R) -> Option<R>
 }
 
 impl JsonDocScratch {
-    pub(crate) fn parse_json<'de, D>(&mut self, deserializer: D) -> Result<DocTape, D::Error>
+    pub(crate) fn parse_json_with_root_filter<'de, D>(
+        &mut self,
+        deserializer: D,
+        root_field_filter: Option<&RootFieldFilter>,
+    ) -> Result<DocTape, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
@@ -150,6 +161,8 @@ impl JsonDocScratch {
             array_items: std::mem::take(&mut self.array_items),
             object_entries: std::mem::take(&mut self.object_entries),
             strings: std::mem::take(&mut self.strings),
+            root_field_filter: root_field_filter.map(|filter| filter as *const RootFieldFilter),
+            container_depth: 0,
         };
         builder.clear();
         let _guard = install_active_doc_builder(&mut builder);
@@ -204,6 +217,19 @@ impl DocBuilder {
         let id = NodeId(Self::encode_len(self.nodes.len(), "json node count")?);
         self.nodes.push(DocNode { kind });
         Ok(id)
+    }
+
+    fn root_field_filter(&self) -> Option<&RootFieldFilter> {
+        let ptr = self.root_field_filter?;
+        // SAFETY: the filter outlives the parse call that owns this builder.
+        Some(unsafe { &*ptr })
+    }
+
+    fn string(&self, range: StringRange) -> &str {
+        let start = range.start as usize;
+        let end = start + range.len as usize;
+        std::str::from_utf8(&self.strings[start..end])
+            .expect("document builder stores valid UTF-8 strings")
     }
 }
 
@@ -426,18 +452,26 @@ impl<'de> Deserialize<'de> for DocNodeRef {
                 A: SeqAccess<'de>,
             {
                 with_active_doc_builder(|builder| {
-                    let start = builder.array_items.len();
-                    if let Some(size_hint) = seq.size_hint() {
-                        builder.array_items.reserve(size_hint);
-                    }
-                    while let Some(item) = seq.next_element::<DocNodeRef>()? {
-                        builder.array_items.push(item.0);
-                    }
-                    let len = builder.array_items.len() - start;
-                    Ok(DocNodeRef(builder.push_node(DocNodeKind::Array {
-                        start: DocBuilder::encode_len(start, "json array item storage")?,
-                        len: DocBuilder::encode_len(len, "json array length")?,
-                    })?))
+                    let prev_depth = builder.container_depth;
+                    builder.container_depth += 1;
+                    let result = (|| {
+                        let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                        if let Some(size_hint) = seq.size_hint() {
+                            items.reserve(size_hint);
+                        }
+                        while let Some(item) = seq.next_element::<DocNodeRef>()? {
+                            items.push(item.0);
+                        }
+                        let start = builder.array_items.len();
+                        let len = items.len();
+                        builder.array_items.extend(items);
+                        Ok(DocNodeRef(builder.push_node(DocNodeKind::Array {
+                            start: DocBuilder::encode_len(start, "json array item storage")?,
+                            len: DocBuilder::encode_len(len, "json array length")?,
+                        })?))
+                    })();
+                    builder.container_depth = prev_depth;
+                    result
                 })
                 .ok_or_else(|| A::Error::custom("document builder is unavailable"))?
             }
@@ -458,28 +492,62 @@ impl<'de> Deserialize<'de> for DocNodeRef {
                         .ok_or_else(|| A::Error::custom("document builder is unavailable"))?
                     }
                     Some(KeyClass::Map(first_key)) => with_active_doc_builder(|builder| {
-                        let start = builder.object_entries.len();
-                        builder.object_entries.reserve(map.size_hint().unwrap_or(0).saturating_add(1));
-                        let first_value = map.next_value::<DocNodeRef>()?;
-                        builder.object_entries.push(ObjectEntry {
-                            key: first_key,
-                            value: first_value.0,
-                        });
-                        while let Some((key, value)) = map.next_entry::<DocStringRef, DocNodeRef>()? {
-                            builder.object_entries.push(ObjectEntry { key: key.0, value: value.0 });
-                        }
-                        let len = builder.object_entries.len() - start;
-                        Ok(DocNodeRef(builder.push_node(DocNodeKind::Object {
-                            start: DocBuilder::encode_len(start, "json object entry storage")?,
-                            len: DocBuilder::encode_len(len, "json object length")?,
-                        })?))
+                        let prev_depth = builder.container_depth;
+                        let is_root_object = prev_depth == 0;
+                        builder.container_depth += 1;
+                        let result = (|| {
+                            let mut entries =
+                                Vec::with_capacity(map.size_hint().unwrap_or(0).saturating_add(1));
+                            let keep_first = !is_root_object
+                                || builder
+                                    .root_field_filter()
+                                    .is_none_or(|filter| filter.contains(builder.string(first_key)));
+                            if keep_first {
+                                let first_value = map.next_value::<DocNodeRef>()?;
+                                entries.push(ObjectEntry {
+                                    key: first_key,
+                                    value: first_value.0,
+                                });
+                            } else {
+                                map.next_value::<serde::de::IgnoredAny>()?;
+                            }
+                            while let Some(key) = map.next_key::<DocStringRef>()? {
+                                let keep = !is_root_object
+                                    || builder.root_field_filter().is_none_or(|filter| {
+                                        filter.contains(builder.string(key.0))
+                                    });
+                                if keep {
+                                    let value = map.next_value::<DocNodeRef>()?;
+                                    entries.push(ObjectEntry {
+                                        key: key.0,
+                                        value: value.0,
+                                    });
+                                } else {
+                                    map.next_value::<serde::de::IgnoredAny>()?;
+                                }
+                            }
+                            let start = builder.object_entries.len();
+                            let len = entries.len();
+                            builder.object_entries.extend(entries);
+                            Ok(DocNodeRef(builder.push_node(DocNodeKind::Object {
+                                start: DocBuilder::encode_len(start, "json object entry storage")?,
+                                len: DocBuilder::encode_len(len, "json object length")?,
+                            })?))
+                        })();
+                        builder.container_depth = prev_depth;
+                        result
                     })
                     .ok_or_else(|| A::Error::custom("document builder is unavailable"))?,
                     None => with_active_doc_builder(|builder| {
-                        Ok(DocNodeRef(builder.push_node(DocNodeKind::Object {
-                            start: 0,
+                        let prev_depth = builder.container_depth;
+                        builder.container_depth += 1;
+                        let start = builder.object_entries.len();
+                        let result = Ok(DocNodeRef(builder.push_node(DocNodeKind::Object {
+                            start: DocBuilder::encode_len(start, "json object entry storage")?,
                             len: 0,
-                        })?))
+                        })?));
+                        builder.container_depth = prev_depth;
+                        result
                     })
                     .ok_or_else(|| A::Error::custom("document builder is unavailable"))?,
                 }
@@ -936,5 +1004,63 @@ impl<'a> DocNumberRef<'a> {
                 &other.to_json_number(),
             ),
         }
+    }
+}
+
+impl RootFieldFilter {
+    pub(crate) fn from_names(mut names: Vec<String>) -> Self {
+        names.sort();
+        names.dedup();
+        Self { names: names.into_boxed_slice() }
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.names.binary_search_by(|candidate| candidate.as_str().cmp(name)).is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_json_with_root_filter_keeps_only_requested_root_fields() {
+        let mut scratch = JsonDocScratch::default();
+        let mut parser =
+            serde_json::Deserializer::from_str(r#"{"id":7,"skip":9,"text":"alpha"}"#);
+        let doc = scratch
+            .parse_json_with_root_filter(
+                &mut parser,
+                Some(&RootFieldFilter::from_names(vec!["id".to_string(), "text".to_string()])),
+            )
+            .expect("parse");
+        assert_eq!(doc.root().materialize().into_json(), json!({"id": 7, "text": "alpha"}));
+    }
+
+    #[test]
+    fn parse_json_with_root_filter_preserves_nested_subtree_of_kept_field() {
+        let mut scratch = JsonDocScratch::default();
+        let mut parser =
+            serde_json::Deserializer::from_str(r#"{"keep":{"a":1,"b":2},"drop":{"x":9}}"#);
+        let doc = scratch
+            .parse_json_with_root_filter(
+                &mut parser,
+                Some(&RootFieldFilter::from_names(vec!["keep".to_string()])),
+            )
+            .expect("parse");
+        assert_eq!(doc.root().materialize().into_json(), json!({"keep": {"a": 1, "b": 2}}));
+    }
+
+    #[test]
+    fn parse_json_preserves_nested_arrays_and_objects() {
+        let mut scratch = JsonDocScratch::default();
+        let mut parser =
+            serde_json::Deserializer::from_str(r#"{"nested":[[1,2],{"a":[3,4]}],"tail":5}"#);
+        let doc = scratch.parse_json_with_root_filter(&mut parser, None).expect("parse");
+        assert_eq!(
+            doc.root().materialize().into_json(),
+            json!({"nested": [[1, 2], {"a": [3, 4]}], "tail": 5})
+        );
     }
 }

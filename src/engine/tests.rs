@@ -54,6 +54,7 @@ fn run_jq_api_reads_json_stream_even_with_default_doc_mode() {
 
 #[test]
 fn native_stream_direct_writer_support_matches_fast_subset() {
+    assert!(supports_native_stream_json_direct_write("."));
     assert!(supports_native_stream_json_direct_write(".a"));
     assert!(supports_native_stream_json_direct_write("select(.id > 2) | .id"));
     assert!(!supports_native_stream_json_direct_write(".text | test(\"a.*\")"));

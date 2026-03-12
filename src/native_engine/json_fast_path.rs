@@ -1,5 +1,6 @@
 use super::doc_tape::{
     write_json_evaluated_line, DocNumberRef, DocTape, EvaluatedNode, JsonDocScratch,
+    RootFieldFilter,
 };
 use super::JsonWriteOptions;
 use super::vm_core::ast::{BinaryOp, Builtin};
@@ -8,12 +9,14 @@ use super::vm_core::vm::{apply_binary, jq_run_length, jq_truthy};
 use crate::c_compat::math as c_math;
 use crate::c_compat::value::{type_name_jq, value_for_error_jq};
 use crate::value::ZqValue;
+use std::collections::BTreeSet;
 use std::cmp::Ordering;
 use std::io::Write;
 
 #[derive(Clone)]
 pub(crate) struct FastProgram {
     branches: Vec<FastBranch>,
+    root_field_filter: Option<RootFieldFilter>,
 }
 
 #[derive(Clone)]
@@ -54,7 +57,8 @@ impl FastProgram {
         for branch in &program.branches {
             branches.push(compile_branch(branch)?);
         }
-        Some(Self { branches })
+        let root_field_filter = compile_root_field_filter(&branches);
+        Some(Self { branches, root_field_filter })
     }
 
     pub(crate) fn execute_json_text_stream<F>(
@@ -68,7 +72,7 @@ impl FastProgram {
         let mut parser = serde_json::Deserializer::from_str(input);
         let mut scratch = JsonDocScratch::default();
         loop {
-            match scratch.parse_json(&mut parser) {
+            match scratch.parse_json_with_root_filter(&mut parser, self.root_field_filter.as_ref()) {
                 Ok(doc) => {
                     self.execute_doc(&doc, emit)?;
                     scratch.recycle(doc);
@@ -91,7 +95,7 @@ impl FastProgram {
         let mut parser = serde_json::Deserializer::from_reader(reader);
         let mut scratch = JsonDocScratch::default();
         loop {
-            match scratch.parse_json(&mut parser) {
+            match scratch.parse_json_with_root_filter(&mut parser, self.root_field_filter.as_ref()) {
                 Ok(doc) => {
                     self.execute_doc(&doc, emit)?;
                     scratch.recycle(doc);
@@ -115,7 +119,7 @@ impl FastProgram {
         let pretty_indent = (!options.compact).then(|| vec![b' '; options.indent]);
         let mut wrote_any = false;
         loop {
-            match scratch.parse_json(&mut parser) {
+            match scratch.parse_json_with_root_filter(&mut parser, self.root_field_filter.as_ref()) {
                 Ok(doc) => {
                     self.execute_doc_write_json(
                         &doc,
@@ -178,7 +182,41 @@ impl FastProgram {
     }
 }
 
+fn compile_root_field_filter(branches: &[FastBranch]) -> Option<RootFieldFilter> {
+    let mut fields = BTreeSet::new();
+    for branch in branches {
+        let Some(branch_fields) = branch.required_root_fields() else {
+            return None;
+        };
+        fields.extend(branch_fields);
+    }
+    Some(RootFieldFilter::from_names(fields.into_iter().collect()))
+}
+
 impl FastBranch {
+    fn required_root_fields(&self) -> Option<BTreeSet<String>> {
+        let mut fields = BTreeSet::new();
+        let mut current_is_root = true;
+        for stage in &self.stages {
+            match stage {
+                FastStage::Expr(expr) => {
+                    let (stage_fields, next_is_root) = analyze_expr_root_fields(expr, current_is_root)?;
+                    fields.extend(stage_fields);
+                    current_is_root = next_is_root;
+                }
+                FastStage::Select(predicate) => {
+                    let (predicate_fields, _) =
+                        analyze_expr_root_fields(predicate, current_is_root)?;
+                    fields.extend(predicate_fields);
+                }
+            }
+        }
+        if current_is_root {
+            return None;
+        }
+        Some(fields)
+    }
+
     fn eval<'a>(&self, doc: &'a DocTape) -> Result<Option<EvaluatedNode<'a>>, String> {
         let mut current = Some(EvaluatedNode::Node(doc.root()));
         for stage in &self.stages {
@@ -202,6 +240,62 @@ impl FastBranch {
             }
         }
         Ok(current)
+    }
+}
+
+fn analyze_expr_root_fields(
+    expr: &FastExpr,
+    current_is_root: bool,
+) -> Option<(BTreeSet<String>, bool)> {
+    match expr {
+        FastExpr::Input => Some((BTreeSet::new(), current_is_root)),
+        FastExpr::Literal(_) => Some((BTreeSet::new(), false)),
+        FastExpr::Pipe(items) => {
+            let mut fields = BTreeSet::new();
+            let mut current_is_root = current_is_root;
+            for item in items {
+                let (item_fields, next_is_root) = analyze_expr_root_fields(item, current_is_root)?;
+                fields.extend(item_fields);
+                current_is_root = next_is_root;
+            }
+            Some((fields, current_is_root))
+        }
+        FastExpr::Path(steps) => {
+            if current_is_root {
+                match steps.first() {
+                    Some(PathStep::Field { name, .. }) => {
+                        Some((BTreeSet::from([name.clone()]), false))
+                    }
+                    Some(PathStep::Index { .. }) => None,
+                    None => Some((BTreeSet::new(), false)),
+                }
+            } else {
+                Some((BTreeSet::new(), false))
+            }
+        }
+        FastExpr::Object(fields) => {
+            let mut deps = BTreeSet::new();
+            for (_, value) in fields {
+                let (field_deps, _) = analyze_expr_root_fields(value, current_is_root)?;
+                deps.extend(field_deps);
+            }
+            Some((deps, false))
+        }
+        FastExpr::Length(inner) => {
+            let (deps, output_is_root) = analyze_expr_root_fields(inner, current_is_root)?;
+            (!output_is_root).then_some((deps, false))
+        }
+        FastExpr::LiteralTest(_) => (!current_is_root).then_some((BTreeSet::new(), false)),
+        FastExpr::Binary { op: _, lhs, rhs } => {
+            let (lhs_deps, lhs_is_root) = analyze_expr_root_fields(lhs, current_is_root)?;
+            let (rhs_deps, rhs_is_root) = analyze_expr_root_fields(rhs, current_is_root)?;
+            if lhs_is_root || rhs_is_root {
+                return None;
+            }
+            let mut deps = lhs_deps;
+            deps.extend(rhs_deps);
+            Some((deps, false))
+        }
     }
 }
 

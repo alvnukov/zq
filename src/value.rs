@@ -123,7 +123,7 @@ impl NativeValueRecycleContext {
         while let Some(current) = self.stack.pop() {
             match current {
                 ZqValue::Array(mut items) => {
-                    self.stack.extend(items.drain(..));
+                    self.stack.append(&mut items);
                     self.recycle_value_vec(items);
                 }
                 ZqValue::Object(mut map) => {

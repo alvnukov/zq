@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
@@ -31,7 +31,7 @@ jobs:
           components: rustfmt, clippy, llvm-tools-preview
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -62,7 +62,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
@@ -70,7 +70,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
 
       - name: Build release binary
         run: cargo build --release --locked
@@ -84,7 +84,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
@@ -92,7 +92,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
 
       - name: Install jq 1.7.1
         shell: bash
@@ -136,7 +136,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
@@ -145,7 +145,7 @@ jobs:
           components: llvm-tools-preview
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
 
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
@@ -195,19 +195,33 @@ jobs:
           git commit -m "chore: update coverage badge [skip ci]"
           git push origin HEAD:main
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de
+      - name: Get Codecov OIDC token
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        id: codecov-oidc
         with:
-          use_oidc: true
-          files: lcov.info
-          fail_ci_if_error: false
+          script: return await core.getIDToken('https://codecov.io')
+
+      - name: Upload coverage to Codecov
+        shell: bash
+        env:
+          CC_TOKEN: ${{ steps.codecov-oidc.outputs.result }}
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/codecov/codecov-action/671740ac38dd9b0130fbe1cec585b89eea48d3de/dist/codecov.sh \
+            -o "$RUNNER_TEMP/codecov.sh"
+          chmod +x "$RUNNER_TEMP/codecov.sh"
+          CC_RUN_CMD=upload-coverage \
+          CC_FAIL_ON_ERROR=false \
+          CC_FILES=lcov.info \
+          CC_GIT_SERVICE=github \
+          "$RUNNER_TEMP/codecov.sh"
 
   security:
     name: Security Checks
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
@@ -215,7 +229,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
 
       - name: Install security tools
         run: cargo install --locked cargo-audit cargo-deny

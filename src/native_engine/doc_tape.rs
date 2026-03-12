@@ -197,8 +197,7 @@ impl<'de> Deserialize<'de> for DocStringRef {
                 E: DeError,
             {
                 with_active_doc_builder(|builder| builder.push_string(value).map(DocStringRef))
-                    .ok_or_else(|| E::custom("document builder is unavailable"))
-                    ?
+                    .ok_or_else(|| E::custom("document builder is unavailable"))?
             }
 
             fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E>
@@ -241,8 +240,7 @@ impl<'de> Deserialize<'de> for DocNodeRef {
                 with_active_doc_builder(|builder| {
                     builder.push_node(DocNodeKind::Bool(value)).map(DocNodeRef)
                 })
-                    .ok_or_else(|| E::custom("document builder is unavailable"))
-                    ?
+                .ok_or_else(|| E::custom("document builder is unavailable"))?
             }
 
             fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
@@ -250,12 +248,9 @@ impl<'de> Deserialize<'de> for DocNodeRef {
                 E: DeError,
             {
                 with_active_doc_builder(|builder| {
-                    builder
-                        .push_node(DocNodeKind::Number(JsonNumber::from(value)))
-                        .map(DocNodeRef)
+                    builder.push_node(DocNodeKind::Number(JsonNumber::from(value))).map(DocNodeRef)
                 })
-                .ok_or_else(|| E::custom("document builder is unavailable"))
-                ?
+                .ok_or_else(|| E::custom("document builder is unavailable"))?
             }
 
             fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
@@ -263,12 +258,9 @@ impl<'de> Deserialize<'de> for DocNodeRef {
                 E: DeError,
             {
                 with_active_doc_builder(|builder| {
-                    builder
-                        .push_node(DocNodeKind::Number(JsonNumber::from(value)))
-                        .map(DocNodeRef)
+                    builder.push_node(DocNodeKind::Number(JsonNumber::from(value))).map(DocNodeRef)
                 })
-                .ok_or_else(|| E::custom("document builder is unavailable"))
-                ?
+                .ok_or_else(|| E::custom("document builder is unavailable"))?
             }
 
             fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
@@ -281,8 +273,7 @@ impl<'de> Deserialize<'de> for DocNodeRef {
                 with_active_doc_builder(|builder| {
                     builder.push_node(DocNodeKind::Number(number)).map(DocNodeRef)
                 })
-                    .ok_or_else(|| E::custom("document builder is unavailable"))
-                    ?
+                .ok_or_else(|| E::custom("document builder is unavailable"))?
             }
 
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
@@ -293,8 +284,7 @@ impl<'de> Deserialize<'de> for DocNodeRef {
                     let slot = builder.push_string(value)?;
                     builder.push_node(DocNodeKind::String(slot)).map(DocNodeRef)
                 })
-                .ok_or_else(|| E::custom("document builder is unavailable"))
-                ?
+                .ok_or_else(|| E::custom("document builder is unavailable"))?
             }
 
             fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E>
@@ -318,8 +308,7 @@ impl<'de> Deserialize<'de> for DocNodeRef {
                 with_active_doc_builder(|builder| {
                     builder.push_node(DocNodeKind::Null).map(DocNodeRef)
                 })
-                    .ok_or_else(|| E::custom("document builder is unavailable"))
-                    ?
+                .ok_or_else(|| E::custom("document builder is unavailable"))?
             }
 
             fn visit_unit<E>(self) -> Result<Self::Value, E>
@@ -408,7 +397,10 @@ impl DocTape {
                 let len = *len as usize;
                 let mut out: IndexMap<String, ZqValue> = take_pooled_object_map_with_capacity(len);
                 for entry in &self.object_entries[start..(start + len)] {
-                    out.insert(self.string(entry.key).to_owned(), self.materialize_node(entry.value));
+                    out.insert(
+                        self.string(entry.key).to_owned(),
+                        self.materialize_node(entry.value),
+                    );
                 }
                 ZqValue::Object(out)
             }
@@ -465,11 +457,10 @@ impl<'a> NodeRef<'a> {
                 let id = self.doc.array_items[start + idx];
                 Some(EvaluatedNode::Node(NodeRef { doc: self.doc, id }))
             }
-            DocNodeKind::String(range) => crate::c_compat::string::string_index_like_jq(
-                self.doc.string(*range),
-                index,
-            )
-            .map(EvaluatedNode::Owned),
+            DocNodeKind::String(range) => {
+                crate::c_compat::string::string_index_like_jq(self.doc.string(*range), index)
+                    .map(EvaluatedNode::Owned)
+            }
             _ => None,
         }
     }

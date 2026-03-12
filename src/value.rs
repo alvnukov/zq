@@ -78,8 +78,11 @@ fn with_active_recycle_context<R>(
     })
 }
 
-pub(crate) fn take_pooled_object_map_with_capacity(min_capacity: usize) -> IndexMap<String, ZqValue> {
-    if let Some(map) = with_active_recycle_context(|ctx| ctx.take_object_map_with_capacity(min_capacity))
+pub(crate) fn take_pooled_object_map_with_capacity(
+    min_capacity: usize,
+) -> IndexMap<String, ZqValue> {
+    if let Some(map) =
+        with_active_recycle_context(|ctx| ctx.take_object_map_with_capacity(min_capacity))
     {
         return map;
     }
@@ -87,7 +90,9 @@ pub(crate) fn take_pooled_object_map_with_capacity(min_capacity: usize) -> Index
 }
 
 pub(crate) fn take_pooled_value_vec_with_capacity(min_capacity: usize) -> Vec<ZqValue> {
-    if let Some(items) = with_active_recycle_context(|ctx| ctx.take_value_vec_with_capacity(min_capacity)) {
+    if let Some(items) =
+        with_active_recycle_context(|ctx| ctx.take_value_vec_with_capacity(min_capacity))
+    {
         return items;
     }
     Vec::with_capacity(min_capacity)
@@ -587,8 +592,8 @@ b:
 
     #[test]
     fn serde_json_deserializes_large_integer_as_number() {
-        let native: ZqValue =
-            serde_json::from_str("10000000000000000000000000000000000002").expect("deserialize native");
+        let native: ZqValue = serde_json::from_str("10000000000000000000000000000000000002")
+            .expect("deserialize native");
         let ZqValue::Number(number) = native else {
             panic!("expected number");
         };

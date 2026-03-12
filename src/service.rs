@@ -107,10 +107,7 @@ pub fn run() -> Result<i32, Error> {
 }
 
 pub(super) fn cli_error_tool_name() -> &'static str {
-    if std::env::var("ZQ_COMPAT_TOOL")
-        .ok()
-        .is_some_and(|value| value.eq_ignore_ascii_case("jq"))
-    {
+    if std::env::var("ZQ_COMPAT_TOOL").ok().is_some_and(|value| value.eq_ignore_ascii_case("jq")) {
         return "jq";
     }
     if std::env::var("ZQ_COLOR_COMPAT").ok().as_deref() == Some("jq171") {

@@ -14,6 +14,7 @@ permissions:
 
 env:
   RUST_TOOLCHAIN: "1.94.0"
+  JQ_VERSION: "jq-1.7.1"
 
 jobs:
   lint-and-test:
@@ -93,16 +94,28 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5
 
-      - name: Ensure jq and git (Linux)
-        if: runner.os == 'Linux'
+      - name: Install jq 1.7.1
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq git
-
-      - name: Ensure jq and git (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install jq git
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          case "${RUNNER_OS}-$(uname -m)" in
+            Linux-x86_64) asset="jq-linux-amd64" ;;
+            Linux-aarch64|Linux-arm64) asset="jq-linux-arm64" ;;
+            macOS-x86_64) asset="jq-macos-amd64" ;;
+            macOS-arm64) asset="jq-macos-arm64" ;;
+            *)
+              echo "unsupported runner for ${JQ_VERSION}: ${RUNNER_OS}-$(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          curl -fsSL "https://github.com/jqlang/jq/releases/download/${JQ_VERSION}/${asset}" \
+            -o "$RUNNER_TEMP/bin/jq"
+          chmod +x "$RUNNER_TEMP/bin/jq"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          test "$(jq --version)" = "${JQ_VERSION}"
+          git --version
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Run upstream jq compatibility suite
         env:

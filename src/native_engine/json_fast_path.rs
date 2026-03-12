@@ -30,23 +30,13 @@ enum FastExpr {
     Object(Vec<(String, FastExpr)>),
     Length(Box<FastExpr>),
     LiteralTest(String),
-    Binary {
-        op: BinaryOp,
-        lhs: Box<FastExpr>,
-        rhs: Box<FastExpr>,
-    },
+    Binary { op: BinaryOp, lhs: Box<FastExpr>, rhs: Box<FastExpr> },
 }
 
 #[derive(Clone)]
 enum PathStep {
-    Field {
-        name: String,
-        optional: bool,
-    },
-    Index {
-        index: i64,
-        optional: bool,
-    },
+    Field { name: String, optional: bool },
+    Index { index: i64, optional: bool },
 }
 
 impl FastProgram {
@@ -186,8 +176,7 @@ fn compile_expr(op: &Op) -> Option<FastExpr> {
             Some(FastExpr::Pipe(compiled))
         }
         Op::Builtin(Builtin::Length) => Some(FastExpr::Length(Box::new(FastExpr::Input))),
-        Op::RegexMatch { spec, flags, test, .. } if *test && flags.is_none() =>
-        {
+        Op::RegexMatch { spec, flags, test, .. } if *test && flags.is_none() => {
             let Op::Literal(ZqValue::String(pattern)) = spec.as_ref() else {
                 return None;
             };
@@ -220,14 +209,12 @@ fn compile_expr(op: &Op) -> Option<FastExpr> {
 
 fn compile_path_steps(op: &Op) -> Option<Vec<PathStep>> {
     match op {
-        Op::GetField { name, optional } => Some(vec![PathStep::Field {
-            name: name.clone(),
-            optional: *optional,
-        }]),
-        Op::GetIndex { index, optional } => Some(vec![PathStep::Index {
-            index: *index,
-            optional: *optional,
-        }]),
+        Op::GetField { name, optional } => {
+            Some(vec![PathStep::Field { name: name.clone(), optional: *optional }])
+        }
+        Op::GetIndex { index, optional } => {
+            Some(vec![PathStep::Index { index: *index, optional: *optional }])
+        }
         Op::Chain(items) => {
             let mut steps = Vec::with_capacity(items.len());
             for item in items {
@@ -291,9 +278,9 @@ fn eval_expr<'a>(
             };
             Ok(Some(EvaluatedNode::Owned(jq_run_length(value.into_owned())?)))
         }
-        FastExpr::LiteralTest(pattern) => Ok(Some(EvaluatedNode::Owned(ZqValue::Bool(
-            literal_test(input, pattern)?,
-        )))),
+        FastExpr::LiteralTest(pattern) => {
+            Ok(Some(EvaluatedNode::Owned(ZqValue::Bool(literal_test(input, pattern)?))))
+        }
         FastExpr::Binary { op, lhs, rhs } => {
             let Some(lhs) = eval_expr(lhs, input.clone())? else {
                 return Ok(None);
@@ -301,11 +288,7 @@ fn eval_expr<'a>(
             let Some(rhs) = eval_expr(rhs, input)? else {
                 return Ok(None);
             };
-            Ok(Some(EvaluatedNode::Owned(apply_binary(
-                *op,
-                lhs.into_owned(),
-                rhs.into_owned(),
-            )?)))
+            Ok(Some(EvaluatedNode::Owned(apply_binary(*op, lhs.into_owned(), rhs.into_owned())?)))
         }
     }
 }
@@ -333,7 +316,12 @@ fn literal_test<'a>(input: EvaluatedNode<'a>, pattern: &str) -> Result<bool, Str
 }
 
 fn is_plain_literal_pattern(pattern: &str) -> bool {
-    !pattern.contains(|ch| matches!(ch, '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|'))
+    !pattern.contains(|ch| {
+        matches!(
+            ch,
+            '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
+        )
+    })
 }
 
 fn eval_path<'a>(
@@ -355,24 +343,29 @@ fn eval_path_step<'a>(
     step: &PathStep,
 ) -> Result<Option<EvaluatedNode<'a>>, String> {
     match (input, step) {
-        (EvaluatedNode::Node(node), PathStep::Field { name, optional }) => match node.lookup_field(name)
-        {
-            Some(value) => Ok(Some(EvaluatedNode::Node(value))),
-            None if node.type_name() == "object" || node.type_name() == "null" => {
-                Ok(Some(EvaluatedNode::Owned(ZqValue::Null)))
+        (EvaluatedNode::Node(node), PathStep::Field { name, optional }) => {
+            match node.lookup_field(name) {
+                Some(value) => Ok(Some(EvaluatedNode::Node(value))),
+                None if node.type_name() == "object" || node.type_name() == "null" => {
+                    Ok(Some(EvaluatedNode::Owned(ZqValue::Null)))
+                }
+                None if *optional => Ok(None),
+                None => Err(format!("Cannot index {} with string {:?}", node.type_name(), name)),
             }
-            None if *optional => Ok(None),
-            None => Err(format!("Cannot index {} with string {:?}", node.type_name(), name)),
-        },
-        (EvaluatedNode::Node(node), PathStep::Index { index, optional }) => match node.lookup_index(*index)
-        {
-            Some(value) => Ok(Some(value)),
-            None if node.type_name() == "array" || node.type_name() == "string" || node.type_name() == "null" => {
-                Ok(Some(EvaluatedNode::Owned(ZqValue::Null)))
+        }
+        (EvaluatedNode::Node(node), PathStep::Index { index, optional }) => {
+            match node.lookup_index(*index) {
+                Some(value) => Ok(Some(value)),
+                None if node.type_name() == "array"
+                    || node.type_name() == "string"
+                    || node.type_name() == "null" =>
+                {
+                    Ok(Some(EvaluatedNode::Owned(ZqValue::Null)))
+                }
+                None if *optional => Ok(None),
+                None => Err(format!("Cannot index {} with number", node.type_name())),
             }
-            None if *optional => Ok(None),
-            None => Err(format!("Cannot index {} with number", node.type_name())),
-        },
+        }
         (EvaluatedNode::Owned(value), step) => eval_path_step_owned(value, step),
     }
 }
@@ -390,15 +383,13 @@ fn eval_path_step_owned<'a>(
             if *optional {
                 Ok(None)
             } else {
-                Err(format!(
-                    "Cannot index {} with string {:?}",
-                    other.jq_type_name(),
-                    name
-                ))
+                Err(format!("Cannot index {} with string {:?}", other.jq_type_name(), name))
             }
         }
         (ZqValue::Array(mut items), PathStep::Index { index, .. }) => {
-            if let Some(normalized) = crate::c_compat::string::normalize_index_jq(items.len(), *index) {
+            if let Some(normalized) =
+                crate::c_compat::string::normalize_index_jq(items.len(), *index)
+            {
                 Ok(Some(EvaluatedNode::Owned(items.swap_remove(normalized))))
             } else {
                 Ok(Some(EvaluatedNode::Owned(ZqValue::Null)))
@@ -482,10 +473,8 @@ mod tests {
         );
         assert_eq!(selected, vec![ZqValue::from(7)]);
 
-        let rejected = eval_fast(
-            "select(.text | test(\"alpha\")) | .id",
-            json!({"id":7,"text":"beta"}),
-        );
+        let rejected =
+            eval_fast("select(.text | test(\"alpha\")) | .id", json!({"id":7,"text":"beta"}));
         assert!(rejected.is_empty());
     }
 
@@ -494,9 +483,8 @@ mod tests {
         let program = compile(".text | test(\"alpha\")").expect("compile");
         let fast = FastProgram::compile(&program).expect("fast compile");
         let text = serde_json::to_string(&json!({"text": null})).expect("json");
-        let err = fast
-            .execute_json_text_stream(&text, &mut |_value| Ok(()))
-            .expect_err("must fail");
+        let err =
+            fast.execute_json_text_stream(&text, &mut |_value| Ok(())).expect_err("must fail");
         assert_eq!(err, "null (null) cannot be matched, as it is not a string");
     }
 }

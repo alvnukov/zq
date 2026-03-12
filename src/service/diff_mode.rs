@@ -133,7 +133,8 @@ pub(super) fn build_custom_input_stream_native(
         return Ok(raw_input_lines(input).into_iter().map(zq::NativeValue::String).collect());
     }
 
-    let mut parsed = zq::parse_jq_input_values_with_format_native(input, doc_mode, tool, input_format)?;
+    let mut parsed =
+        zq::parse_jq_input_values_with_format_native(input, doc_mode, tool, input_format)?;
     if cli.csv_parse_json_cells && matches!(input_format, zq::NativeInputFormat::Csv) {
         decode_csv_json_cells_in_place(&mut parsed);
     }

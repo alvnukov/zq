@@ -130,8 +130,9 @@ struct PooledValueVec {
 
 impl PooledValueVec {
     fn acquire() -> Self {
-        let inner =
-            with_active_vm_execution_context(|ctx| ctx.value_vec_pool.pop()).flatten().unwrap_or_default();
+        let inner = with_active_vm_execution_context(|ctx| ctx.value_vec_pool.pop())
+            .flatten()
+            .unwrap_or_default();
         Self { inner }
     }
 
@@ -1142,7 +1143,8 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
                         let Op::GetField { name, .. } = value_expr else {
                             unreachable!("validated by object_literal_can_move_projection");
                         };
-                        object.insert(key.clone(), source.swap_remove(name).unwrap_or(ZqValue::Null));
+                        object
+                            .insert(key.clone(), source.swap_remove(name).unwrap_or(ZqValue::Null));
                     }
                     out.push(ZqValue::Object(object));
                     return Ok(());

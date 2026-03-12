@@ -181,10 +181,7 @@ fn object_literal_projection_with_duplicate_source_field_keeps_both_values() {
 
     let input = object(&[("x", ZqValue::from(11))]);
     let out = execute_single(op, input).expect("duplicate projection execute");
-    assert_eq!(
-        out,
-        vec![object(&[("left", ZqValue::from(11)), ("right", ZqValue::from(11))])]
-    );
+    assert_eq!(out, vec![object(&[("left", ZqValue::from(11)), ("right", ZqValue::from(11))])]);
 }
 
 #[test]

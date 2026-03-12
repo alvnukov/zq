@@ -52,9 +52,9 @@ pub use query::{
     PreparedQuery as NativePreparedQuery, RunOptions as NativeRunOptions,
 };
 pub use value::{
-    install_active_native_value_recycle_context, ActiveRecycleContextGuard,
-    recycle_native_value, recycle_native_values, recycle_native_values_with_context,
-    NativeValueRecycleContext, ZqValue as NativeValue,
+    install_active_native_value_recycle_context, recycle_native_value, recycle_native_values,
+    recycle_native_values_with_context, ActiveRecycleContextGuard, NativeValueRecycleContext,
+    ZqValue as NativeValue,
 };
 
 pub fn decode_native_halt_error(err: &str) -> Option<(i32, String)> {

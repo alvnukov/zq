@@ -1,6 +1,6 @@
 use crate::value::ZqValue;
 use serde_json::Value as JsonValue;
-use std::io::Read;
+use std::io::{Read, Write};
 
 mod yaml_output;
 
@@ -27,6 +27,8 @@ pub struct QueryOptions {
 pub struct RunOptions {
     pub null_input: bool,
 }
+
+pub type NativeJsonWriteOptions = crate::native_engine::JsonWriteOptions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct YamlFormatOptions {
@@ -279,6 +281,39 @@ where
 
     program
         .execute_json_reader_stream_auto_native(Box::new(reader), &mut wrapped_emit)
+        .map_err(|e| Error::Query(crate::QueryError::Runtime(e)))?;
+    Ok(NativeStreamStatus::Executed)
+}
+
+pub fn supports_native_stream_json_direct_write(query: &str) -> bool {
+    crate::native_engine::supports_direct_json_stream_write(query)
+}
+
+pub fn try_run_jq_native_stream_json_reader_write_options_native<R, W>(
+    query: &str,
+    reader: R,
+    run_options: RunOptions,
+    writer: &mut W,
+    write_options: NativeJsonWriteOptions,
+) -> Result<NativeStreamStatus, Error>
+where
+    R: Read + Send + 'static,
+    W: Write,
+{
+    let Some(program) = crate::native_engine::try_compile(query) else {
+        let compile_error = crate::native_engine::try_compile_error(query)
+            .unwrap_or_else(|| format!("query is not supported by native engine: {query}"));
+        return Err(Error::Query(crate::QueryError::Unsupported(compile_error)));
+    };
+
+    if run_options.null_input || !program.supports_direct_json_stream_write() {
+        return Err(Error::Query(crate::QueryError::Unsupported(
+            format!("query is not supported by direct json stream writer: {query}"),
+        )));
+    }
+
+    program
+        .execute_json_reader_stream_direct_write(Box::new(reader), writer, write_options)
         .map_err(|e| Error::Query(crate::QueryError::Runtime(e)))?;
     Ok(NativeStreamStatus::Executed)
 }

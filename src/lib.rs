@@ -16,12 +16,15 @@ pub use engine::{
     parse_jq_input_values_with_format_native, parse_jq_json_values_only,
     parse_jq_json_values_only_native, prepare_jq_query_with_paths, run_jq, run_jq_jsonish_lines,
     run_jq_native, run_jq_stream_with_paths_options, run_jq_stream_with_paths_options_native,
+    supports_native_stream_json_direct_write,
     try_run_jq_native_stream_json_reader_options_native,
+    try_run_jq_native_stream_json_reader_write_options_native,
     try_run_jq_native_stream_json_text_options, try_run_jq_native_stream_json_text_options_native,
     try_run_jq_native_stream_with_paths_options,
     try_run_jq_native_stream_with_paths_options_native, validate_jq_query,
-    validate_jq_query_with_paths, DocMode, Error as EngineError, NativeStreamStatus, PreparedJq,
-    QueryOptions, RunOptions as EngineRunOptions, YamlAnchorNameMode, YamlFormatOptions,
+    validate_jq_query_with_paths, DocMode, Error as EngineError, NativeJsonWriteOptions,
+    NativeStreamStatus, PreparedJq, QueryOptions, RunOptions as EngineRunOptions,
+    YamlAnchorNameMode, YamlFormatOptions,
 };
 pub use query::Error as QueryError;
 pub use query::{

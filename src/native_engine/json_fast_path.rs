@@ -1,9 +1,15 @@
-use super::doc_tape::{DocTape, EvaluatedNode, JsonDocScratch};
+use super::doc_tape::{
+    write_json_evaluated_line, DocNumberRef, DocTape, EvaluatedNode, JsonDocScratch,
+};
+use super::JsonWriteOptions;
 use super::vm_core::ast::{BinaryOp, Builtin};
 use super::vm_core::ir::{Branch, Op, OpObjectKey, Program};
 use super::vm_core::vm::{apply_binary, jq_run_length, jq_truthy};
+use crate::c_compat::math as c_math;
 use crate::c_compat::value::{type_name_jq, value_for_error_jq};
-use crate::value::{take_pooled_object_map_with_capacity, ZqValue};
+use crate::value::ZqValue;
+use std::cmp::Ordering;
+use std::io::Write;
 
 #[derive(Clone)]
 pub(crate) struct FastProgram {
@@ -97,6 +103,40 @@ impl FastProgram {
         Ok(())
     }
 
+    pub(crate) fn execute_json_reader_stream_write_json<W: Write>(
+        &self,
+        reader: Box<dyn std::io::Read + Send>,
+        writer: &mut W,
+        options: JsonWriteOptions,
+    ) -> Result<(), String> {
+        let mut parser = serde_json::Deserializer::from_reader(reader);
+        let mut scratch = JsonDocScratch::default();
+        let mut json_scratch = Vec::new();
+        let pretty_indent = (!options.compact).then(|| vec![b' '; options.indent]);
+        let mut wrote_any = false;
+        loop {
+            match scratch.parse_json(&mut parser) {
+                Ok(doc) => {
+                    self.execute_doc_write_json(
+                        &doc,
+                        writer,
+                        &mut wrote_any,
+                        &mut json_scratch,
+                        pretty_indent.as_deref(),
+                        options,
+                    )?;
+                    scratch.recycle(doc);
+                }
+                Err(err) if err.is_eof() => break,
+                Err(err) => return Err(format!("json parse error: {err}")),
+            }
+        }
+        if wrote_any && !options.join_output {
+            writer.write_all(b"\n").map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     fn execute_doc<F>(&self, doc: &DocTape, emit: &mut F) -> Result<(), String>
     where
         F: FnMut(ZqValue) -> Result<(), String>,
@@ -104,6 +144,34 @@ impl FastProgram {
         for branch in &self.branches {
             if let Some(value) = branch.eval(doc)? {
                 emit(value.into_owned())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn execute_doc_write_json<W: Write>(
+        &self,
+        doc: &DocTape,
+        writer: &mut W,
+        wrote_any: &mut bool,
+        scratch: &mut Vec<u8>,
+        pretty_indent: Option<&[u8]>,
+        options: JsonWriteOptions,
+    ) -> Result<(), String> {
+        for branch in &self.branches {
+            if let Some(value) = branch.eval(doc)? {
+                if *wrote_any && !options.join_output {
+                    writer.write_all(b"\n").map_err(|e| e.to_string())?;
+                }
+                write_json_evaluated_line(
+                    writer,
+                    &value,
+                    options.compact,
+                    options.raw_output,
+                    scratch,
+                    pretty_indent,
+                )?;
+                *wrote_any = true;
             }
         }
         Ok(())
@@ -125,7 +193,7 @@ impl FastBranch {
                     let Some(result) = eval_expr(predicate, input.clone())? else {
                         return Ok(None);
                     };
-                    if jq_truthy(&result.into_owned()) {
+                    if jq_truthy_evaluated(&result) {
                         current = Some(input);
                     } else {
                         return Ok(None);
@@ -263,20 +331,25 @@ fn eval_expr<'a>(
         }
         FastExpr::Path(steps) => eval_path(input, steps),
         FastExpr::Object(fields) => {
-            let mut out = take_pooled_object_map_with_capacity(fields.len());
+            let mut out = Vec::with_capacity(fields.len());
             for (key, value_expr) in fields {
                 let Some(value) = eval_expr(value_expr, input.clone())? else {
                     return Ok(None);
                 };
-                out.insert(key.clone(), value.into_owned());
+                out.push((key.clone(), value));
             }
-            Ok(Some(EvaluatedNode::Owned(ZqValue::Object(out))))
+            Ok(Some(EvaluatedNode::ProjectedObject(out)))
         }
         FastExpr::Length(inner) => {
             let Some(value) = eval_expr(inner, input)? else {
                 return Ok(None);
             };
-            Ok(Some(EvaluatedNode::Owned(jq_run_length(value.into_owned())?)))
+            let output = match value {
+                EvaluatedNode::Node(node) => node.jq_length()?,
+                EvaluatedNode::ProjectedObject(entries) => ZqValue::from(entries.len() as i64),
+                EvaluatedNode::Owned(value) => jq_run_length(value)?,
+            };
+            Ok(Some(EvaluatedNode::Owned(output)))
         }
         FastExpr::LiteralTest(pattern) => {
             Ok(Some(EvaluatedNode::Owned(ZqValue::Bool(literal_test(input, pattern)?))))
@@ -288,8 +361,221 @@ fn eval_expr<'a>(
             let Some(rhs) = eval_expr(rhs, input)? else {
                 return Ok(None);
             };
-            Ok(Some(EvaluatedNode::Owned(apply_binary(*op, lhs.into_owned(), rhs.into_owned())?)))
+            Ok(Some(EvaluatedNode::Owned(apply_binary_evaluated(*op, lhs, rhs)?)))
         }
+    }
+}
+
+fn apply_binary_evaluated(
+    op: BinaryOp,
+    lhs: EvaluatedNode<'_>,
+    rhs: EvaluatedNode<'_>,
+) -> Result<ZqValue, String> {
+    match op {
+        BinaryOp::Eq => Ok(ZqValue::Bool(compare_evaluated_jq(&lhs, &rhs) == Ordering::Equal)),
+        BinaryOp::Ne => Ok(ZqValue::Bool(compare_evaluated_jq(&lhs, &rhs) != Ordering::Equal)),
+        BinaryOp::Gt => Ok(ZqValue::Bool(compare_evaluated_jq(&lhs, &rhs) == Ordering::Greater)),
+        BinaryOp::Ge => {
+            let ord = compare_evaluated_jq(&lhs, &rhs);
+            Ok(ZqValue::Bool(ord == Ordering::Greater || ord == Ordering::Equal))
+        }
+        BinaryOp::Lt => Ok(ZqValue::Bool(compare_evaluated_jq(&lhs, &rhs) == Ordering::Less)),
+        BinaryOp::Le => {
+            let ord = compare_evaluated_jq(&lhs, &rhs);
+            Ok(ZqValue::Bool(ord == Ordering::Less || ord == Ordering::Equal))
+        }
+        BinaryOp::Add => {
+            if let Some(value) = fast_add_evaluated(&lhs, &rhs)? {
+                return Ok(value);
+            }
+            apply_binary(op, lhs.into_owned(), rhs.into_owned())
+        }
+        BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Pow => {
+            if let Some(value) = fast_numeric_binary_evaluated(op, &lhs, &rhs)? {
+                return Ok(value);
+            }
+            apply_binary(op, lhs.into_owned(), rhs.into_owned())
+        }
+        BinaryOp::And | BinaryOp::Or | BinaryOp::DefinedOr => {
+            unreachable!("boolean/defined-or ops handled separately")
+        }
+    }
+}
+
+fn compare_evaluated_jq(lhs: &EvaluatedNode<'_>, rhs: &EvaluatedNode<'_>) -> Ordering {
+    let lrank = evaluated_kind_rank(lhs);
+    let rrank = evaluated_kind_rank(rhs);
+    if lrank != rrank {
+        return lrank.cmp(&rrank);
+    }
+
+    match (scalar_ref(lhs), scalar_ref(rhs)) {
+        (Some(ScalarRef::Null), Some(ScalarRef::Null)) => Ordering::Equal,
+        (Some(ScalarRef::Bool), Some(ScalarRef::Bool)) => Ordering::Equal,
+        (Some(ScalarRef::Number(a)), Some(ScalarRef::Number(b))) => a.compare_jq(b),
+        (Some(ScalarRef::String(a)), Some(ScalarRef::String(b))) => a.cmp(b),
+        _ => crate::c_compat::value::compare_jq(&lhs.clone().into_owned(), &rhs.clone().into_owned()),
+    }
+}
+
+fn fast_add_evaluated(
+    lhs: &EvaluatedNode<'_>,
+    rhs: &EvaluatedNode<'_>,
+) -> Result<Option<ZqValue>, String> {
+    if let (Some(left), Some(right)) = (number_ref(lhs), number_ref(rhs)) {
+        let af = left.to_f64_lossy().ok_or_else(|| "number is out of range".to_string())?;
+        let bf = right.to_f64_lossy().ok_or_else(|| "number is out of range".to_string())?;
+        return Ok(Some(c_math::number_to_value_with_hint(af + bf, false)));
+    }
+
+    if let (Some(left), Some(right)) = (string_ref(lhs), string_ref(rhs)) {
+        let mut out = String::with_capacity(left.len() + right.len());
+        out.push_str(left);
+        out.push_str(right);
+        return Ok(Some(ZqValue::String(out)));
+    }
+
+    Ok(None)
+}
+
+fn fast_numeric_binary_evaluated(
+    op: BinaryOp,
+    lhs: &EvaluatedNode<'_>,
+    rhs: &EvaluatedNode<'_>,
+) -> Result<Option<ZqValue>, String> {
+    let (Some(left), Some(right)) = (number_ref(lhs), number_ref(rhs)) else {
+        return Ok(None);
+    };
+    let af = left.to_f64_lossy().ok_or_else(|| "number is out of range".to_string())?;
+    let bf = right.to_f64_lossy().ok_or_else(|| "number is out of range".to_string())?;
+
+    let result = match op {
+        BinaryOp::Sub => Some(c_math::number_to_value_with_hint(af - bf, false)),
+        BinaryOp::Mul => Some(c_math::number_to_value_with_hint(af * bf, false)),
+        BinaryOp::Div => {
+            if bf == 0.0 {
+                None
+            } else {
+                Some(c_math::number_to_value_with_hint(af / bf, false))
+            }
+        }
+        BinaryOp::Mod => {
+            if bf == 0.0 {
+                None
+            } else {
+                Some(c_math::number_to_value_with_hint(c_math::mod_compat(af, bf)?, false))
+            }
+        }
+        BinaryOp::Pow => Some(c_math::number_to_value_with_hint(af.powf(bf), false)),
+        _ => None,
+    };
+    Ok(result)
+}
+
+fn evaluated_kind_rank(value: &EvaluatedNode<'_>) -> i32 {
+    match value {
+        EvaluatedNode::Node(node) => node.jq_kind_rank(),
+        EvaluatedNode::ProjectedObject(_) => 7,
+        EvaluatedNode::Owned(value) => match value {
+            ZqValue::Null => 1,
+            ZqValue::Bool(false) => 2,
+            ZqValue::Bool(true) => 3,
+            ZqValue::Number(_) => 4,
+            ZqValue::String(_) => 5,
+            ZqValue::Array(_) => 6,
+            ZqValue::Object(_) => 7,
+        },
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ScalarRef<'a> {
+    Null,
+    Bool,
+    Number(NumberRef<'a>),
+    String(&'a str),
+}
+
+fn scalar_ref<'a>(value: &'a EvaluatedNode<'a>) -> Option<ScalarRef<'a>> {
+    match value {
+        EvaluatedNode::Node(node) => {
+            if node.is_null() {
+                Some(ScalarRef::Null)
+            } else if node.as_bool().is_some() {
+                Some(ScalarRef::Bool)
+            } else if let Some(number) = node.as_number() {
+                Some(ScalarRef::Number(NumberRef::Doc(number)))
+            } else {
+                node.as_str().map(ScalarRef::String)
+            }
+        }
+        EvaluatedNode::ProjectedObject(_) => None,
+        EvaluatedNode::Owned(ZqValue::Null) => Some(ScalarRef::Null),
+        EvaluatedNode::Owned(ZqValue::Bool(_)) => Some(ScalarRef::Bool),
+        EvaluatedNode::Owned(ZqValue::Number(number)) => Some(ScalarRef::Number(NumberRef::Owned(number))),
+        EvaluatedNode::Owned(ZqValue::String(text)) => Some(ScalarRef::String(text)),
+        EvaluatedNode::Owned(ZqValue::Array(_) | ZqValue::Object(_)) => None,
+    }
+}
+
+fn number_ref<'a>(value: &'a EvaluatedNode<'a>) -> Option<NumberRef<'a>> {
+    match value {
+        EvaluatedNode::Node(node) => node.as_number().map(NumberRef::Doc),
+        EvaluatedNode::ProjectedObject(_) => None,
+        EvaluatedNode::Owned(ZqValue::Number(number)) => Some(NumberRef::Owned(number)),
+        EvaluatedNode::Owned(_) => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NumberRef<'a> {
+    Doc(DocNumberRef<'a>),
+    Owned(&'a serde_json::Number),
+}
+
+impl NumberRef<'_> {
+    fn to_f64_lossy(self) -> Option<f64> {
+        match self {
+            NumberRef::Doc(number) => number.to_f64_lossy(),
+            NumberRef::Owned(number) => c_math::jq_number_to_f64_lossy(number),
+        }
+    }
+
+    fn compare_jq(self, other: Self) -> Ordering {
+        match (self, other) {
+            (NumberRef::Doc(left), NumberRef::Doc(right)) => left.compare_jq(right),
+            (NumberRef::Owned(left), NumberRef::Owned(right)) => {
+                c_math::compare_json_numbers_like_jq(left, right)
+            }
+            (left, right) => c_math::compare_json_numbers_like_jq(
+                &left.to_json_number(),
+                &right.to_json_number(),
+            ),
+        }
+    }
+
+    fn to_json_number(self) -> serde_json::Number {
+        match self {
+            NumberRef::Doc(number) => number.to_json_number(),
+            NumberRef::Owned(number) => number.clone(),
+        }
+    }
+}
+
+fn string_ref<'a>(value: &'a EvaluatedNode<'a>) -> Option<&'a str> {
+    match value {
+        EvaluatedNode::Node(node) => node.as_str(),
+        EvaluatedNode::ProjectedObject(_) => None,
+        EvaluatedNode::Owned(ZqValue::String(text)) => Some(text.as_str()),
+        EvaluatedNode::Owned(_) => None,
+    }
+}
+
+fn jq_truthy_evaluated(value: &EvaluatedNode<'_>) -> bool {
+    match value {
+        EvaluatedNode::Node(node) => node.jq_truthy(),
+        EvaluatedNode::ProjectedObject(_) => true,
+        EvaluatedNode::Owned(value) => jq_truthy(value),
     }
 }
 
@@ -306,6 +592,14 @@ fn literal_test<'a>(input: EvaluatedNode<'a>, pattern: &str) -> Result<bool, Str
                 ))
             }
         },
+        EvaluatedNode::ProjectedObject(other) => {
+            let value = EvaluatedNode::ProjectedObject(other).into_owned();
+            Err(format!(
+                "{} ({}) cannot be matched, as it is not a string",
+                type_name_jq(&value),
+                value_for_error_jq(&value)
+            ))
+        }
         EvaluatedNode::Owned(ZqValue::String(text)) => Ok(text.contains(pattern)),
         EvaluatedNode::Owned(other) => Err(format!(
             "{} ({}) cannot be matched, as it is not a string",
@@ -365,6 +659,9 @@ fn eval_path_step<'a>(
                 None if *optional => Ok(None),
                 None => Err(format!("Cannot index {} with number", node.type_name())),
             }
+        }
+        (EvaluatedNode::ProjectedObject(entries), step) => {
+            eval_path_step_owned(EvaluatedNode::ProjectedObject(entries).into_owned(), step)
         }
         (EvaluatedNode::Owned(value), step) => eval_path_step_owned(value, step),
     }
@@ -463,6 +760,37 @@ mod tests {
 
         let length = eval_fast(".tags | length", json!({"tags":[1,2,3]}));
         assert_eq!(length, vec![ZqValue::from(3)]);
+    }
+
+    #[test]
+    fn executes_borrowed_scalar_binary_subset() {
+        let arith = eval_fast(".a + .b", json!({"a": 1, "b": 2}));
+        assert_eq!(arith, vec![ZqValue::from(3)]);
+
+        let modulo = eval_fast(".value % 7", json!({"value": 42}));
+        assert_eq!(modulo, vec![ZqValue::from(0)]);
+
+        let selected = eval_fast("select(.id == 3) | .id", json!({"id": 3}));
+        assert_eq!(selected, vec![ZqValue::from(3)]);
+    }
+
+    #[test]
+    fn executes_large_raw_integer_compare_subset() {
+        let program = compile("select(.n > 1) | .n").expect("compile");
+        let fast = FastProgram::compile(&program).expect("fast compile");
+        let mut emit = Vec::new();
+        let text = r#"{"n":123456789012345678901234567890}"#;
+        fast.execute_json_text_stream(text, &mut |value| {
+            emit.push(value);
+            Ok(())
+        })
+        .expect("fast execute");
+        assert_eq!(
+            emit,
+            vec![ZqValue::Number(serde_json::Number::from_string_unchecked(
+                "123456789012345678901234567890".to_string()
+            ))]
+        );
     }
 
     #[test]

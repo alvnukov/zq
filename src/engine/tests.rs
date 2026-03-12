@@ -53,6 +53,78 @@ fn run_jq_api_reads_json_stream_even_with_default_doc_mode() {
 }
 
 #[test]
+fn native_stream_direct_writer_support_matches_fast_subset() {
+    assert!(supports_native_stream_json_direct_write(".a"));
+    assert!(supports_native_stream_json_direct_write("select(.id > 2) | .id"));
+    assert!(!supports_native_stream_json_direct_write(".text | test(\"a.*\")"));
+    assert!(!supports_native_stream_json_direct_write("inputs"));
+}
+
+#[test]
+fn native_stream_direct_writer_emits_json_and_raw_string_output() {
+    let mut json_out = Vec::new();
+    let json_input = std::io::Cursor::new(br#"{"id":7,"group":2,"skip":9}"#.to_vec());
+    let status = try_run_jq_native_stream_json_reader_write_options_native(
+        "{id,group}",
+        json_input,
+        RunOptions::default(),
+        &mut json_out,
+        NativeJsonWriteOptions {
+            compact: false,
+            raw_output: false,
+            join_output: false,
+            indent: 2,
+        },
+    )
+    .expect("direct writer");
+    assert_eq!(status, NativeStreamStatus::Executed);
+    assert_eq!(
+        String::from_utf8(json_out).expect("utf8"),
+        "{\n  \"id\": 7,\n  \"group\": 2\n}\n"
+    );
+
+    let mut raw_out = Vec::new();
+    let raw_input = std::io::Cursor::new(br#"{"text":"svc"}"#.to_vec());
+    try_run_jq_native_stream_json_reader_write_options_native(
+        ".text",
+        raw_input,
+        RunOptions::default(),
+        &mut raw_out,
+        NativeJsonWriteOptions {
+            compact: true,
+            raw_output: true,
+            join_output: false,
+            indent: 2,
+        },
+    )
+    .expect("direct raw writer");
+    assert_eq!(String::from_utf8(raw_out).expect("utf8"), "svc\n");
+}
+
+#[test]
+fn native_stream_direct_writer_preserves_large_raw_integer() {
+    let mut out = Vec::new();
+    let input = std::io::Cursor::new(br#"{"n":123456789012345678901234567890}"#.to_vec());
+    try_run_jq_native_stream_json_reader_write_options_native(
+        ".n",
+        input,
+        RunOptions::default(),
+        &mut out,
+        NativeJsonWriteOptions {
+            compact: true,
+            raw_output: false,
+            join_output: false,
+            indent: 2,
+        },
+    )
+    .expect("direct writer");
+    assert_eq!(
+        String::from_utf8(out).expect("utf8"),
+        "123456789012345678901234567890\n"
+    );
+}
+
+#[test]
 fn yaml_output_for_multiple_values_is_multidoc() {
     let out =
         format_output_yaml_documents(&[serde_json::json!({"a":1}), serde_json::json!({"b":2})])

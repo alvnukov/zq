@@ -8,13 +8,21 @@ use serde::Deserialize;
 #[cfg(test)]
 use serde_json::Value as RawJsonValue;
 use std::collections::{BTreeSet, VecDeque};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunOptions {
     pub null_input: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JsonWriteOptions {
+    pub compact: bool,
+    pub raw_output: bool,
+    pub join_output: bool,
+    pub indent: usize,
 }
 
 #[cfg(test)]
@@ -302,6 +310,10 @@ pub fn decode_halt_error(err: &str) -> Option<(i32, String)> {
     vm_core::decode_halt_error(err)
 }
 
+pub fn supports_direct_json_stream_write(query: &str) -> bool {
+    try_compile(query).is_some_and(|program| program.supports_direct_json_stream_write())
+}
+
 impl CompiledProgram {
     pub(crate) fn uses_input_op(&self) -> bool {
         program_uses_input_op(&self.program)
@@ -313,6 +325,12 @@ impl CompiledProgram {
 
     pub(crate) fn reads_inputs_as_stream_events(&self) -> bool {
         program_reads_inputs_as_stream_events(&self.program)
+    }
+
+    pub(crate) fn supports_direct_json_stream_write(&self) -> bool {
+        !self.uses_input_op()
+            && !self.uses_input_stream_metadata()
+            && json_fast_path::FastProgram::compile(&self.program).is_some()
     }
 
     pub(crate) fn execute_json_text_stream_auto_native<F>(
@@ -393,6 +411,20 @@ impl CompiledProgram {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn execute_json_reader_stream_direct_write<W: Write>(
+        &self,
+        reader: JsonInputReader,
+        writer: &mut W,
+        options: JsonWriteOptions,
+    ) -> Result<(), String> {
+        if !self.supports_direct_json_stream_write() {
+            return Err("query is not supported by direct json stream writer".to_string());
+        }
+        let plan = json_fast_path::FastProgram::compile(&self.program)
+            .ok_or_else(|| "query is not supported by direct json stream writer".to_string())?;
+        plan.execute_json_reader_stream_write_json(reader, writer, options)
     }
 
     fn execute_json_text_stream_with_inputs_native<F>(

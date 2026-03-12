@@ -2,11 +2,16 @@ use crate::value::{
     take_pooled_object_map_with_capacity, take_pooled_value_vec_with_capacity, ZqValue,
 };
 use indexmap::IndexMap;
+use serde::de::{self, DeserializeSeed};
+use serde::ser::{SerializeMap, SerializeSeq};
+use serde::Serialize;
 use serde::de::{Error as DeError, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use serde_json::Number as JsonNumber;
 use std::cell::Cell;
+use std::cmp::Ordering;
 use std::fmt;
+use std::io::{self, Write};
 
 thread_local! {
     static ACTIVE_DOC_BUILDER: Cell<usize> = const { Cell::new(0) };
@@ -30,10 +35,18 @@ struct DocNode {
 enum DocNodeKind {
     Null,
     Bool(bool),
-    Number(JsonNumber),
+    Number(DocNumber),
     String(StringRange),
     Array { start: u32, len: u32 },
     Object { start: u32, len: u32 },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DocNumber {
+    I64(i64),
+    U64(u64),
+    F64(u64),
+    Raw(StringRange),
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +100,22 @@ struct DocStringRef(StringRange);
 
 #[derive(Clone, Copy)]
 struct DocNodeRef(NodeId);
+
+#[derive(Clone, Copy)]
+enum KeyClass {
+    Map(StringRange),
+    Number,
+}
+
+struct KeyClassifier;
+
+#[derive(Clone, Copy)]
+pub(crate) enum DocNumberRef<'a> {
+    I64(i64),
+    U64(u64),
+    F64(f64),
+    Raw(&'a str),
+}
 
 fn install_active_doc_builder(builder: &mut DocBuilder) -> ActiveDocBuilderGuard {
     let ptr = (builder as *mut DocBuilder).cast::<()>() as usize;
@@ -219,6 +248,43 @@ impl<'de> Deserialize<'de> for DocStringRef {
     }
 }
 
+impl<'de> DeserializeSeed<'de> for KeyClassifier {
+    type Value = KeyClass;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_str(self)
+    }
+}
+
+impl<'de> Visitor<'de> for KeyClassifier {
+    type Value = KeyClass;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a string key")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        if value == "$serde_json::private::Number" {
+            return Ok(KeyClass::Number);
+        }
+        with_active_doc_builder(|builder| builder.push_string(value).map(KeyClass::Map))
+            .ok_or_else(|| E::custom("document builder is unavailable"))?
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        self.visit_str(&value)
+    }
+}
+
 impl<'de> Deserialize<'de> for DocNodeRef {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -248,7 +314,7 @@ impl<'de> Deserialize<'de> for DocNodeRef {
                 E: DeError,
             {
                 with_active_doc_builder(|builder| {
-                    builder.push_node(DocNodeKind::Number(JsonNumber::from(value))).map(DocNodeRef)
+                    builder.push_node(DocNodeKind::Number(DocNumber::I64(value))).map(DocNodeRef)
                 })
                 .ok_or_else(|| E::custom("document builder is unavailable"))?
             }
@@ -258,7 +324,35 @@ impl<'de> Deserialize<'de> for DocNodeRef {
                 E: DeError,
             {
                 with_active_doc_builder(|builder| {
-                    builder.push_node(DocNodeKind::Number(JsonNumber::from(value))).map(DocNodeRef)
+                    builder.push_node(DocNodeKind::Number(DocNumber::U64(value))).map(DocNodeRef)
+                })
+                .ok_or_else(|| E::custom("document builder is unavailable"))?
+            }
+
+            fn visit_i128<E>(self, value: i128) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                if let Ok(value) = i64::try_from(value) {
+                    return self.visit_i64(value);
+                }
+                with_active_doc_builder(|builder| {
+                    let raw = builder.push_string(&value.to_string())?;
+                    builder.push_node(DocNodeKind::Number(DocNumber::Raw(raw))).map(DocNodeRef)
+                })
+                .ok_or_else(|| E::custom("document builder is unavailable"))?
+            }
+
+            fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                if let Ok(value) = u64::try_from(value) {
+                    return self.visit_u64(value);
+                }
+                with_active_doc_builder(|builder| {
+                    let raw = builder.push_string(&value.to_string())?;
+                    builder.push_node(DocNodeKind::Number(DocNumber::Raw(raw))).map(DocNodeRef)
                 })
                 .ok_or_else(|| E::custom("document builder is unavailable"))?
             }
@@ -267,11 +361,13 @@ impl<'de> Deserialize<'de> for DocNodeRef {
             where
                 E: DeError,
             {
-                let Some(number) = JsonNumber::from_f64(value) else {
+                if !value.is_finite() {
                     return Err(E::custom("non-finite number is not supported"));
-                };
+                }
                 with_active_doc_builder(|builder| {
-                    builder.push_node(DocNodeKind::Number(number)).map(DocNodeRef)
+                    builder
+                        .push_node(DocNodeKind::Number(DocNumber::F64(value.to_bits())))
+                        .map(DocNodeRef)
                 })
                 .ok_or_else(|| E::custom("document builder is unavailable"))?
             }
@@ -350,21 +446,43 @@ impl<'de> Deserialize<'de> for DocNodeRef {
             where
                 A: MapAccess<'de>,
             {
-                with_active_doc_builder(|builder| {
-                    let start = builder.object_entries.len();
-                    if let Some(size_hint) = map.size_hint() {
-                        builder.object_entries.reserve(size_hint);
+                match map.next_key_seed(KeyClassifier)? {
+                    Some(KeyClass::Number) => {
+                        let raw = map.next_value::<String>()?;
+                        with_active_doc_builder(|builder| {
+                            let slot = builder.push_string(&raw)?;
+                            builder
+                                .push_node(DocNodeKind::Number(DocNumber::Raw(slot)))
+                                .map(DocNodeRef)
+                        })
+                        .ok_or_else(|| A::Error::custom("document builder is unavailable"))?
                     }
-                    while let Some((key, value)) = map.next_entry::<DocStringRef, DocNodeRef>()? {
-                        builder.object_entries.push(ObjectEntry { key: key.0, value: value.0 });
-                    }
-                    let len = builder.object_entries.len() - start;
-                    Ok(DocNodeRef(builder.push_node(DocNodeKind::Object {
-                        start: DocBuilder::encode_len(start, "json object entry storage")?,
-                        len: DocBuilder::encode_len(len, "json object length")?,
-                    })?))
-                })
-                .ok_or_else(|| A::Error::custom("document builder is unavailable"))?
+                    Some(KeyClass::Map(first_key)) => with_active_doc_builder(|builder| {
+                        let start = builder.object_entries.len();
+                        builder.object_entries.reserve(map.size_hint().unwrap_or(0).saturating_add(1));
+                        let first_value = map.next_value::<DocNodeRef>()?;
+                        builder.object_entries.push(ObjectEntry {
+                            key: first_key,
+                            value: first_value.0,
+                        });
+                        while let Some((key, value)) = map.next_entry::<DocStringRef, DocNodeRef>()? {
+                            builder.object_entries.push(ObjectEntry { key: key.0, value: value.0 });
+                        }
+                        let len = builder.object_entries.len() - start;
+                        Ok(DocNodeRef(builder.push_node(DocNodeKind::Object {
+                            start: DocBuilder::encode_len(start, "json object entry storage")?,
+                            len: DocBuilder::encode_len(len, "json object length")?,
+                        })?))
+                    })
+                    .ok_or_else(|| A::Error::custom("document builder is unavailable"))?,
+                    None => with_active_doc_builder(|builder| {
+                        Ok(DocNodeRef(builder.push_node(DocNodeKind::Object {
+                            start: 0,
+                            len: 0,
+                        })?))
+                    })
+                    .ok_or_else(|| A::Error::custom("document builder is unavailable"))?,
+                }
             }
         }
 
@@ -381,7 +499,7 @@ impl DocTape {
         match &self.nodes[node.0 as usize].kind {
             DocNodeKind::Null => ZqValue::Null,
             DocNodeKind::Bool(value) => ZqValue::Bool(*value),
-            DocNodeKind::Number(value) => ZqValue::Number(value.clone()),
+            DocNodeKind::Number(value) => ZqValue::Number(value.to_json_number(self)),
             DocNodeKind::String(range) => ZqValue::String(self.string(*range).to_owned()),
             DocNodeKind::Array { start, len } => {
                 let start = *start as usize;
@@ -434,6 +552,24 @@ impl<'a> NodeRef<'a> {
         Some(self.doc.string(*range))
     }
 
+    pub(crate) fn as_number(self) -> Option<DocNumberRef<'a>> {
+        let DocNodeKind::Number(number) = &self.doc.nodes[self.id.0 as usize].kind else {
+            return None;
+        };
+        Some(number.as_ref(self.doc))
+    }
+
+    pub(crate) fn as_bool(self) -> Option<bool> {
+        let DocNodeKind::Bool(value) = &self.doc.nodes[self.id.0 as usize].kind else {
+            return None;
+        };
+        Some(*value)
+    }
+
+    pub(crate) fn is_null(self) -> bool {
+        matches!(&self.doc.nodes[self.id.0 as usize].kind, DocNodeKind::Null)
+    }
+
     pub(crate) fn lookup_field(self, name: &str) -> Option<NodeRef<'a>> {
         let DocNodeKind::Object { start, len } = &self.doc.nodes[self.id.0 as usize].kind else {
             return None;
@@ -468,11 +604,52 @@ impl<'a> NodeRef<'a> {
     pub(crate) fn materialize(self) -> ZqValue {
         self.doc.materialize_node(self.id)
     }
+
+    pub(crate) fn jq_truthy(self) -> bool {
+        !matches!(
+            &self.doc.nodes[self.id.0 as usize].kind,
+            DocNodeKind::Null | DocNodeKind::Bool(false)
+        )
+    }
+
+    pub(crate) fn jq_kind_rank(self) -> i32 {
+        match &self.doc.nodes[self.id.0 as usize].kind {
+            DocNodeKind::Null => 1,
+            DocNodeKind::Bool(false) => 2,
+            DocNodeKind::Bool(true) => 3,
+            DocNodeKind::Number(_) => 4,
+            DocNodeKind::String(_) => 5,
+            DocNodeKind::Array { .. } => 6,
+            DocNodeKind::Object { .. } => 7,
+        }
+    }
+
+    pub(crate) fn jq_length(self) -> Result<ZqValue, String> {
+        match &self.doc.nodes[self.id.0 as usize].kind {
+            DocNodeKind::Null => Ok(ZqValue::from(0)),
+            DocNodeKind::Bool(value) => Err(format!("boolean ({value}) has no length")),
+            DocNodeKind::Number(number) => {
+                if let Some(value) = number.as_ref(self.doc).to_f64_lossy() {
+                    return Ok(crate::c_compat::math::number_to_value(value.abs()));
+                }
+                let raw = number.as_ref(self.doc).to_text();
+                let abs_raw = raw.strip_prefix('-').unwrap_or(raw.as_ref()).to_string();
+                Ok(ZqValue::Number(serde_json::Number::from_string_unchecked(abs_raw)))
+            }
+            DocNodeKind::String(range) => {
+                Ok(ZqValue::from(self.doc.string(*range).chars().count() as i64))
+            }
+            DocNodeKind::Array { len, .. } | DocNodeKind::Object { len, .. } => {
+                Ok(ZqValue::from(i64::from(*len)))
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
 pub(crate) enum EvaluatedNode<'a> {
     Node(NodeRef<'a>),
+    ProjectedObject(Vec<(String, EvaluatedNode<'a>)>),
     Owned(ZqValue),
 }
 
@@ -480,7 +657,284 @@ impl<'a> EvaluatedNode<'a> {
     pub(crate) fn into_owned(self) -> ZqValue {
         match self {
             EvaluatedNode::Node(node) => node.materialize(),
+            EvaluatedNode::ProjectedObject(entries) => {
+                let mut out = take_pooled_object_map_with_capacity(entries.len());
+                for (key, value) in entries {
+                    out.insert(key, value.into_owned());
+                }
+                ZqValue::Object(out)
+            }
             EvaluatedNode::Owned(value) => value,
+        }
+    }
+}
+
+pub(crate) fn write_json_evaluated_line<W: Write>(
+    writer: &mut W,
+    value: &EvaluatedNode<'_>,
+    compact: bool,
+    raw_output: bool,
+    scratch: &mut Vec<u8>,
+    pretty_indent: Option<&[u8]>,
+) -> Result<(), String> {
+    if raw_output {
+        if let Some(text) = evaluated_as_str(value) {
+            writer.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+    }
+
+    scratch.clear();
+    if compact {
+        let mut serializer = serde_json::Serializer::new(&mut *scratch);
+        EvaluatedCliJsonCompat(value)
+            .serialize(&mut serializer)
+            .map_err(|e| format!("encode output: {e}"))?;
+    } else {
+        let indent = pretty_indent.unwrap_or(&[]);
+        let formatter = serde_json::ser::PrettyFormatter::with_indent(indent);
+        let mut serializer = serde_json::Serializer::with_formatter(&mut *scratch, formatter);
+        EvaluatedCliJsonCompat(value)
+            .serialize(&mut serializer)
+            .map_err(|e| format!("encode output: {e}"))?;
+    }
+    write_jq_style_escaped_del(writer, scratch).map_err(|e| e.to_string())
+}
+
+fn evaluated_as_str<'a>(value: &'a EvaluatedNode<'a>) -> Option<&'a str> {
+    match value {
+        EvaluatedNode::Node(node) => node.as_str(),
+        EvaluatedNode::ProjectedObject(_) => None,
+        EvaluatedNode::Owned(ZqValue::String(text)) => Some(text.as_str()),
+        EvaluatedNode::Owned(_) => None,
+    }
+}
+
+fn write_jq_style_escaped_del<W: Write>(writer: &mut W, bytes: &[u8]) -> io::Result<()> {
+    for &byte in bytes {
+        if byte == 0x7f {
+            writer.write_all(b"\\u007f")?;
+        } else {
+            writer.write_all(&[byte])?;
+        }
+    }
+    Ok(())
+}
+
+struct EvaluatedCliJsonCompat<'a>(&'a EvaluatedNode<'a>);
+
+impl Serialize for EvaluatedCliJsonCompat<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0 {
+            EvaluatedNode::Node(node) => NodeCliJsonCompat(*node).serialize(serializer),
+            EvaluatedNode::ProjectedObject(entries) => {
+                let mut object = serializer.serialize_map(Some(entries.len()))?;
+                for (key, value) in entries {
+                    object.serialize_entry(key, &EvaluatedCliJsonCompat(value))?;
+                }
+                object.end()
+            }
+            EvaluatedNode::Owned(value) => OwnedCliJsonCompat(value).serialize(serializer),
+        }
+    }
+}
+
+struct NodeCliJsonCompat<'a>(NodeRef<'a>);
+
+impl Serialize for NodeCliJsonCompat<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match &self.0.doc.nodes[self.0.id.0 as usize].kind {
+            DocNodeKind::Null => serializer.serialize_unit(),
+            DocNodeKind::Bool(value) => serializer.serialize_bool(*value),
+            DocNodeKind::Number(number) => {
+                serialize_doc_number_cli_compat(number.as_ref(self.0.doc), serializer)
+            }
+            DocNodeKind::String(range) => serializer.serialize_str(self.0.doc.string(*range)),
+            DocNodeKind::Array { start, len } => {
+                let start = *start as usize;
+                let len = *len as usize;
+                let mut seq = serializer.serialize_seq(Some(len))?;
+                for child in &self.0.doc.array_items[start..(start + len)] {
+                    seq.serialize_element(&NodeCliJsonCompat(NodeRef {
+                        doc: self.0.doc,
+                        id: *child,
+                    }))?;
+                }
+                seq.end()
+            }
+            DocNodeKind::Object { start, len } => {
+                let start = *start as usize;
+                let len = *len as usize;
+                let mut map = serializer.serialize_map(Some(len))?;
+                for entry in &self.0.doc.object_entries[start..(start + len)] {
+                    map.serialize_entry(
+                        self.0.doc.string(entry.key),
+                        &NodeCliJsonCompat(NodeRef {
+                            doc: self.0.doc,
+                            id: entry.value,
+                        }),
+                    )?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
+struct OwnedCliJsonCompat<'a>(&'a ZqValue);
+
+impl Serialize for OwnedCliJsonCompat<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0 {
+            ZqValue::Null => serializer.serialize_unit(),
+            ZqValue::Bool(value) => serializer.serialize_bool(*value),
+            ZqValue::Number(number) => serialize_json_number_cli_compat(number, serializer),
+            ZqValue::String(text) => serializer.serialize_str(text),
+            ZqValue::Array(items) => {
+                let mut seq = serializer.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(&OwnedCliJsonCompat(item))?;
+                }
+                seq.end()
+            }
+            ZqValue::Object(map) => {
+                let mut object = serializer.serialize_map(Some(map.len()))?;
+                for (key, value) in map {
+                    object.serialize_entry(key, &OwnedCliJsonCompat(value))?;
+                }
+                object.end()
+            }
+        }
+    }
+}
+
+fn serialize_json_number_cli_compat<S>(
+    number: &serde_json::Number,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if number.is_i64() || number.is_u64() || number.is_f64() {
+        return number.serialize(serializer);
+    }
+
+    let raw = number.to_string();
+    let unsigned = raw.strip_prefix('-').or_else(|| raw.strip_prefix('+')).unwrap_or(&raw);
+    let lower = unsigned.to_ascii_lowercase();
+
+    if lower.starts_with("nan") {
+        return serializer.serialize_unit();
+    }
+
+    if lower == "inf" || lower == "infinity" {
+        let finite = if raw.starts_with('-') {
+            "-1.7976931348623157e+308"
+        } else {
+            "1.7976931348623157e+308"
+        };
+        let finite_number = serde_json::Number::from_string_unchecked(finite.to_string());
+        return finite_number.serialize(serializer);
+    }
+
+    number.serialize(serializer)
+}
+
+fn serialize_doc_number_cli_compat<S>(
+    number: DocNumberRef<'_>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match number {
+        DocNumberRef::I64(value) => serializer.serialize_i64(value),
+        DocNumberRef::U64(value) => serializer.serialize_u64(value),
+        DocNumberRef::F64(value) => serde_json::Number::from_f64(value)
+            .expect("document tape stores only finite f64 numbers")
+            .serialize(serializer),
+        DocNumberRef::Raw(raw) => {
+            let number = serde_json::Number::from_string_unchecked(raw.to_owned());
+            serialize_json_number_cli_compat(&number, serializer)
+        }
+    }
+}
+
+impl DocNumber {
+    fn as_ref<'a>(self, doc: &'a DocTape) -> DocNumberRef<'a> {
+        match self {
+            DocNumber::I64(value) => DocNumberRef::I64(value),
+            DocNumber::U64(value) => DocNumberRef::U64(value),
+            DocNumber::F64(bits) => DocNumberRef::F64(f64::from_bits(bits)),
+            DocNumber::Raw(range) => DocNumberRef::Raw(doc.string(range)),
+        }
+    }
+
+    fn to_json_number(self, doc: &DocTape) -> JsonNumber {
+        self.as_ref(doc).to_json_number()
+    }
+}
+
+impl<'a> DocNumberRef<'a> {
+    pub(crate) fn to_f64_lossy(self) -> Option<f64> {
+        match self {
+            DocNumberRef::I64(value) => Some(value as f64),
+            DocNumberRef::U64(value) => Some(value as f64),
+            DocNumberRef::F64(value) => Some(value),
+            DocNumberRef::Raw(raw) => {
+                let number = serde_json::Number::from_string_unchecked(raw.to_owned());
+                crate::c_compat::math::jq_number_to_f64_lossy(&number)
+            }
+        }
+    }
+
+    pub(crate) fn to_json_number(self) -> JsonNumber {
+        match self {
+            DocNumberRef::I64(value) => JsonNumber::from(value),
+            DocNumberRef::U64(value) => JsonNumber::from(value),
+            DocNumberRef::F64(value) => {
+                JsonNumber::from_f64(value).expect("document tape stores only finite f64 numbers")
+            }
+            DocNumberRef::Raw(raw) => serde_json::Number::from_string_unchecked(raw.to_owned()),
+        }
+    }
+
+    pub(crate) fn to_text(self) -> std::borrow::Cow<'a, str> {
+        match self {
+            DocNumberRef::I64(value) => std::borrow::Cow::Owned(value.to_string()),
+            DocNumberRef::U64(value) => std::borrow::Cow::Owned(value.to_string()),
+            DocNumberRef::F64(value) => std::borrow::Cow::Owned(
+                JsonNumber::from_f64(value)
+                    .expect("document tape stores only finite f64 numbers")
+                    .to_string(),
+            ),
+            DocNumberRef::Raw(raw) => std::borrow::Cow::Borrowed(raw),
+        }
+    }
+
+    pub(crate) fn compare_jq(self, other: Self) -> Ordering {
+        match (self, other) {
+            (DocNumberRef::I64(left), DocNumberRef::I64(right)) => left.cmp(&right),
+            (DocNumberRef::U64(left), DocNumberRef::U64(right)) => left.cmp(&right),
+            (DocNumberRef::I64(left), DocNumberRef::U64(right)) => {
+                if left < 0 { Ordering::Less } else { (left as u64).cmp(&right) }
+            }
+            (DocNumberRef::U64(left), DocNumberRef::I64(right)) => {
+                if right < 0 { Ordering::Greater } else { left.cmp(&(right as u64)) }
+            }
+            _ => crate::c_compat::math::compare_json_numbers_like_jq(
+                &self.to_json_number(),
+                &other.to_json_number(),
+            ),
         }
     }
 }

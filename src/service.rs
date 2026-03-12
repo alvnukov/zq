@@ -310,6 +310,31 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         const IO_BUFFER_CAP: usize = 64 * 1024;
         let stdout = io::stdout();
         let mut writer = io::BufWriter::with_capacity(IO_BUFFER_CAP, stdout.lock());
+
+        let reader: Box<dyn io::Read + Send> = if input_path == "-" {
+            Box::new(io::BufReader::with_capacity(IO_BUFFER_CAP, io::stdin()))
+        } else {
+            Box::new(io::BufReader::with_capacity(IO_BUFFER_CAP, fs::File::open(&input_path)?))
+        };
+
+        if !color_opts.enabled && zq::supports_native_stream_json_direct_write(query.as_str()) {
+            zq::try_run_jq_native_stream_json_reader_write_options_native(
+                query.as_str(),
+                reader,
+                zq::EngineRunOptions { null_input: false },
+                &mut writer,
+                zq::NativeJsonWriteOptions {
+                    compact: cli.compact,
+                    raw_output: effective_raw_output,
+                    join_output: cli.join_output,
+                    indent: color_opts.indent,
+                },
+            )
+            .map_err(|e| Error::Query(render_engine_error(tool, query.as_str(), "", e)))?;
+            writer.flush()?;
+            return Ok(0);
+        }
+
         let mut wrote_any = false;
         let mut json_scratch = Vec::new();
         let mut recycle_ctx = zq::NativeValueRecycleContext::default();
@@ -318,12 +343,6 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
             None
         } else {
             Some(vec![b' '; color_opts.indent])
-        };
-
-        let reader: Box<dyn io::Read + Send> = if input_path == "-" {
-            Box::new(io::BufReader::with_capacity(IO_BUFFER_CAP, io::stdin()))
-        } else {
-            Box::new(io::BufReader::with_capacity(IO_BUFFER_CAP, fs::File::open(&input_path)?))
         };
 
         zq::try_run_jq_native_stream_json_reader_options_native(

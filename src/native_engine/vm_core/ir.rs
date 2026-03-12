@@ -265,22 +265,16 @@ fn compile_stage(stage: &Stage) -> Op {
         Stage::Identity => Op::Identity,
         Stage::Chain(items) => Op::Chain(items.iter().map(compile_stage).collect()),
         Stage::Pipe(items) => Op::Pipe(items.iter().map(compile_stage).collect()),
-        Stage::Call {
-            function_id,
-            param_id,
-            name,
-            args,
-        } => Op::Call {
+        Stage::Call { function_id, param_id, name, args } => Op::Call {
             function_id: *function_id,
             param_id: *param_id,
             name: name.clone(),
             args: args.iter().map(compile_stage).collect(),
         },
         Stage::Var(name) => Op::Var(name.clone()),
-        Stage::Label { name, body } => Op::Label {
-            name: name.clone(),
-            body: Box::new(compile_stage(body)),
-        },
+        Stage::Label { name, body } => {
+            Op::Label { name: name.clone(), body: Box::new(compile_stage(body)) }
+        }
         Stage::Break(name) => Op::Break(name.clone()),
         Stage::Literal(value) => Op::Literal(value.clone()),
         Stage::Comma(items) => Op::Comma(items.iter().map(compile_stage).collect()),
@@ -318,22 +312,13 @@ fn compile_stage(stage: &Stage) -> Op {
         Stage::UniqueByImpl(arg) => Op::UniqueByImpl(Box::new(compile_stage(arg))),
         Stage::MinByImpl(arg) => Op::MinByImpl(Box::new(compile_stage(arg))),
         Stage::MaxByImpl(arg) => Op::MaxByImpl(Box::new(compile_stage(arg))),
-        Stage::RegexMatch {
-            spec,
-            flags,
-            test,
-            tuple_mode,
-        } => Op::RegexMatch {
+        Stage::RegexMatch { spec, flags, test, tuple_mode } => Op::RegexMatch {
             spec: Box::new(compile_stage(spec)),
             flags: flags.as_ref().map(|flags| Box::new(compile_stage(flags))),
             test: *test,
             tuple_mode: *tuple_mode,
         },
-        Stage::RegexCapture {
-            spec,
-            flags,
-            tuple_mode,
-        } => Op::RegexCapture {
+        Stage::RegexCapture { spec, flags, tuple_mode } => Op::RegexCapture {
             spec: Box::new(compile_stage(spec)),
             flags: flags.as_ref().map(|flags| Box::new(compile_stage(flags))),
             tuple_mode: *tuple_mode,
@@ -346,12 +331,7 @@ fn compile_stage(stage: &Stage) -> Op {
             regex: Box::new(compile_stage(regex)),
             flags: flags.as_ref().map(|flags| Box::new(compile_stage(flags))),
         },
-        Stage::RegexSub {
-            regex,
-            replacement,
-            flags,
-            global,
-        } => Op::RegexSub {
+        Stage::RegexSub { regex, replacement, flags, global } => Op::RegexSub {
             regex: Box::new(compile_stage(regex)),
             replacement: Box::new(compile_stage(replacement)),
             flags: Box::new(compile_stage(flags)),
@@ -360,14 +340,12 @@ fn compile_stage(stage: &Stage) -> Op {
         Stage::Path(arg) => Op::Path(Box::new(compile_stage(arg))),
         Stage::Paths => Op::Paths,
         Stage::GetPath(arg) => Op::GetPath(Box::new(compile_stage(arg))),
-        Stage::SetPath(path, value) => Op::SetPath(
-            Box::new(compile_stage(path)),
-            Box::new(compile_stage(value)),
-        ),
-        Stage::Modify(path, update) => Op::Modify(
-            Box::new(compile_stage(path)),
-            Box::new(compile_stage(update)),
-        ),
+        Stage::SetPath(path, value) => {
+            Op::SetPath(Box::new(compile_stage(path)), Box::new(compile_stage(value)))
+        }
+        Stage::Modify(path, update) => {
+            Op::Modify(Box::new(compile_stage(path)), Box::new(compile_stage(update)))
+        }
         Stage::DelPaths(arg) => Op::DelPaths(Box::new(compile_stage(arg))),
         Stage::TruncateStream(arg) => Op::TruncateStream(Box::new(compile_stage(arg))),
         Stage::FromStream(arg) => Op::FromStream(Box::new(compile_stage(arg))),
@@ -375,62 +353,45 @@ fn compile_stage(stage: &Stage) -> Op {
         Stage::Flatten(arg) => Op::Flatten(Box::new(compile_stage(arg))),
         Stage::FlattenRaw(arg) => Op::FlattenRaw(Box::new(compile_stage(arg))),
         Stage::Nth(arg) => Op::Nth(Box::new(compile_stage(arg))),
-        Stage::NthBy(index, source) => Op::NthBy(
-            Box::new(compile_stage(index)),
-            Box::new(compile_stage(source)),
-        ),
-        Stage::LimitBy(count, source) => Op::LimitBy(
-            Box::new(compile_stage(count)),
-            Box::new(compile_stage(source)),
-        ),
-        Stage::SkipBy(count, source) => Op::SkipBy(
-            Box::new(compile_stage(count)),
-            Box::new(compile_stage(source)),
-        ),
+        Stage::NthBy(index, source) => {
+            Op::NthBy(Box::new(compile_stage(index)), Box::new(compile_stage(source)))
+        }
+        Stage::LimitBy(count, source) => {
+            Op::LimitBy(Box::new(compile_stage(count)), Box::new(compile_stage(source)))
+        }
+        Stage::SkipBy(count, source) => {
+            Op::SkipBy(Box::new(compile_stage(count)), Box::new(compile_stage(source)))
+        }
         Stage::Range(init, upto, by) => Op::Range(
             Box::new(compile_stage(init)),
             Box::new(compile_stage(upto)),
             Box::new(compile_stage(by)),
         ),
-        Stage::While(cond, update) => Op::While(
-            Box::new(compile_stage(cond)),
-            Box::new(compile_stage(update)),
-        ),
+        Stage::While(cond, update) => {
+            Op::While(Box::new(compile_stage(cond)), Box::new(compile_stage(update)))
+        }
         Stage::Until(cond, next) => {
             Op::Until(Box::new(compile_stage(cond)), Box::new(compile_stage(next)))
         }
-        Stage::Reduce {
-            source,
-            pattern,
-            init,
-            update,
-        } => Op::Reduce {
+        Stage::Reduce { source, pattern, init, update } => Op::Reduce {
             source: Box::new(compile_stage(source)),
             pattern: compile_binding_pattern(pattern),
             init: Box::new(compile_stage(init)),
             update: Box::new(compile_stage(update)),
         },
-        Stage::Foreach {
-            source,
-            pattern,
-            init,
-            update,
-            extract,
-        } => Op::Foreach {
+        Stage::Foreach { source, pattern, init, update, extract } => Op::Foreach {
             source: Box::new(compile_stage(source)),
             pattern: compile_binding_pattern(pattern),
             init: Box::new(compile_stage(init)),
             update: Box::new(compile_stage(update)),
             extract: Box::new(compile_stage(extract)),
         },
-        Stage::Any(generator, condition) => Op::Any(
-            Box::new(compile_stage(generator)),
-            Box::new(compile_stage(condition)),
-        ),
-        Stage::All(generator, condition) => Op::All(
-            Box::new(compile_stage(generator)),
-            Box::new(compile_stage(condition)),
-        ),
+        Stage::Any(generator, condition) => {
+            Op::Any(Box::new(compile_stage(generator)), Box::new(compile_stage(condition)))
+        }
+        Stage::All(generator, condition) => {
+            Op::All(Box::new(compile_stage(generator)), Box::new(compile_stage(condition)))
+        }
         Stage::FirstBy(source) => Op::FirstBy(Box::new(compile_stage(source))),
         Stage::LastBy(source) => Op::LastBy(Box::new(compile_stage(source))),
         Stage::IsEmpty(arg) => Op::IsEmpty(Box::new(compile_stage(arg))),
@@ -447,15 +408,13 @@ fn compile_stage(stage: &Stage) -> Op {
         Stage::Combinations => Op::Combinations,
         Stage::Repeat(arg) => Op::Repeat(Box::new(compile_stage(arg))),
         Stage::Input => Op::Input,
-        Stage::Format { fmt, expr } => Op::Format {
-            fmt: fmt.clone(),
-            expr: Box::new(compile_stage(expr)),
-        },
+        Stage::Format { fmt, expr } => {
+            Op::Format { fmt: fmt.clone(), expr: Box::new(compile_stage(expr)) }
+        }
         Stage::Strptime(format) => Op::Strptime(Box::new(compile_stage(format))),
-        Stage::Strftime { format, local } => Op::Strftime {
-            format: Box::new(compile_stage(format)),
-            local: *local,
-        },
+        Stage::Strftime { format, local } => {
+            Op::Strftime { format: Box::new(compile_stage(format)), local: *local }
+        }
         Stage::Empty => Op::Empty,
         Stage::Error(inner) => Op::Error(Box::new(compile_stage(inner))),
         Stage::HaltError(inner) => Op::HaltError(Box::new(compile_stage(inner))),
@@ -465,11 +424,7 @@ fn compile_stage(stage: &Stage) -> Op {
             inner: Box::new(compile_stage(inner)),
             catcher: Box::new(compile_stage(catcher)),
         },
-        Stage::IfElse {
-            cond,
-            then_expr,
-            else_expr,
-        } => Op::IfElse {
+        Stage::IfElse { cond, then_expr, else_expr } => Op::IfElse {
             cond: Box::new(compile_stage(cond)),
             then_expr: Box::new(compile_stage(then_expr)),
             else_expr: Box::new(compile_stage(else_expr)),
@@ -490,39 +445,20 @@ fn compile_stage(stage: &Stage) -> Op {
             b: Box::new(compile_stage(b)),
             c: Box::new(compile_stage(c)),
         },
-        Stage::Field { name, optional } => Op::GetField {
-            name: name.clone(),
-            optional: *optional,
-        },
-        Stage::Index { index, optional } => Op::GetIndex {
-            index: *index,
-            optional: *optional,
-        },
-        Stage::DynamicIndex { key, optional } => Op::DynamicIndex {
-            key: Box::new(compile_stage(key)),
-            optional: *optional,
-        },
-        Stage::Slice {
-            start,
-            end,
-            optional,
-        } => Op::Slice {
-            start: *start,
-            end: *end,
-            optional: *optional,
-        },
-        Stage::Bind {
-            source,
-            pattern,
-            body,
-        } => Op::Bind {
+        Stage::Field { name, optional } => Op::GetField { name: name.clone(), optional: *optional },
+        Stage::Index { index, optional } => Op::GetIndex { index: *index, optional: *optional },
+        Stage::DynamicIndex { key, optional } => {
+            Op::DynamicIndex { key: Box::new(compile_stage(key)), optional: *optional }
+        }
+        Stage::Slice { start, end, optional } => {
+            Op::Slice { start: *start, end: *end, optional: *optional }
+        }
+        Stage::Bind { source, pattern, body } => Op::Bind {
             source: Box::new(compile_stage(source)),
             pattern: compile_binding_pattern(pattern),
             body: Box::new(compile_stage(body)),
         },
-        Stage::Iterate { optional } => Op::Iterate {
-            optional: *optional,
-        },
+        Stage::Iterate { optional } => Op::Iterate { optional: *optional },
     }
 }
 

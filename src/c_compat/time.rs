@@ -32,10 +32,23 @@ fn libc_time_lock() -> &'static std::sync::Mutex<()> {
 }
 
 fn lock_libc_time() -> std::sync::MutexGuard<'static, ()> {
-    libc_time_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    libc_time_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+#[cfg(unix)]
+pub(crate) fn initialize_process_locale_from_env() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _guard = lock_libc_time();
+        let empty = b"\0";
+        unsafe {
+            let _ = libc::setlocale(libc::LC_ALL, empty.as_ptr().cast::<libc::c_char>());
+        }
+    });
+}
+
+#[cfg(not(unix))]
+pub(crate) fn initialize_process_locale_from_env() {}
 
 // c-ref: zero-initialized `struct tm` constructor for libc APIs.
 // moved-from: src/native_engine/vm_core/vm.rs::jq_array_to_tm
@@ -160,11 +173,7 @@ pub(crate) fn format_tm_with_strftime(
     let _ = local;
 
     #[cfg(target_vendor = "apple")]
-    let _tz_guard = if local {
-        None
-    } else {
-        Some(ScopedUtcTz::enter())
-    };
+    let _tz_guard = if local { None } else { Some(ScopedUtcTz::enter()) };
 
     let mut capacity = format.len().saturating_add(100).max(64);
     for _ in 0..6 {
@@ -478,10 +487,7 @@ mod tests {
 
     #[test]
     fn strict_iso8601_formatter_matches_expected_shape() {
-        assert_eq!(
-            format_iso8601_utc_seconds(0),
-            "1970-01-01T00:00:00Z".to_string()
-        );
+        assert_eq!(format_iso8601_utc_seconds(0), "1970-01-01T00:00:00Z".to_string());
     }
 
     #[test]

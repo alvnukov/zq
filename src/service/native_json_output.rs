@@ -56,6 +56,7 @@ pub(super) fn render_raw_output0_native(
     values: &[zq::NativeValue],
     compact: bool,
 ) -> Result<(Vec<u8>, Option<Error>), Error> {
+    let tool = super::cli_error_tool_name();
     let mut out = Vec::new();
     let mut scratch = Vec::new();
     for value in values {
@@ -64,7 +65,9 @@ pub(super) fn render_raw_output0_native(
                 return Ok((
                     out,
                     Some(Error::Query(
-                        "zq: error (at <stdin>:0): Cannot dump a string containing NUL with --raw-output0 option".to_string(),
+                        format!(
+                            "{tool}: error (at <stdin>:0): Cannot dump a string containing NUL with --raw-output0 option"
+                        ),
                     )),
                 ));
             }
@@ -147,10 +150,7 @@ where
     }
 
     let raw = number.to_string();
-    let unsigned = raw
-        .strip_prefix('-')
-        .or_else(|| raw.strip_prefix('+'))
-        .unwrap_or(&raw);
+    let unsigned = raw.strip_prefix('-').or_else(|| raw.strip_prefix('+')).unwrap_or(&raw);
     let lower = unsigned.to_ascii_lowercase();
 
     if lower.starts_with("nan") {
@@ -176,12 +176,9 @@ fn native_value_to_cli_json_compat(value: &zq::NativeValue) -> JsonValue {
         zq::NativeValue::Bool(v) => JsonValue::Bool(*v),
         zq::NativeValue::Number(number) => native_number_to_cli_json_compat(number),
         zq::NativeValue::String(text) => JsonValue::String(text.clone()),
-        zq::NativeValue::Array(items) => JsonValue::Array(
-            items
-                .iter()
-                .map(native_value_to_cli_json_compat)
-                .collect::<Vec<_>>(),
-        ),
+        zq::NativeValue::Array(items) => {
+            JsonValue::Array(items.iter().map(native_value_to_cli_json_compat).collect::<Vec<_>>())
+        }
         zq::NativeValue::Object(map) => {
             let mut out = serde_json::Map::with_capacity(map.len());
             for (key, value) in map {
@@ -198,10 +195,7 @@ fn native_number_to_cli_json_compat(number: &serde_json::Number) -> JsonValue {
     }
 
     let raw = number.to_string();
-    let unsigned = raw
-        .strip_prefix('-')
-        .or_else(|| raw.strip_prefix('+'))
-        .unwrap_or(&raw);
+    let unsigned = raw.strip_prefix('-').or_else(|| raw.strip_prefix('+')).unwrap_or(&raw);
     let lower = unsigned.to_ascii_lowercase();
 
     if lower.starts_with("nan") {
@@ -214,9 +208,7 @@ fn native_number_to_cli_json_compat(number: &serde_json::Number) -> JsonValue {
         } else {
             "1.7976931348623157e+308"
         };
-        return JsonValue::Number(serde_json::Number::from_string_unchecked(
-            finite.to_string(),
-        ));
+        return JsonValue::Number(serde_json::Number::from_string_unchecked(finite.to_string()));
     }
 
     JsonValue::Number(number.clone())
@@ -231,11 +223,8 @@ pub(super) fn write_json_output_native<W: Write>(
     color_opts: &JsonColorOptions,
 ) -> Result<(), Error> {
     let mut scratch = Vec::new();
-    let pretty_indent = if compact || color_opts.enabled {
-        None
-    } else {
-        Some(vec![b' '; color_opts.indent])
-    };
+    let pretty_indent =
+        if compact || color_opts.enabled { None } else { Some(vec![b' '; color_opts.indent]) };
     for (idx, value) in values.iter().enumerate() {
         if idx > 0 && !join_output {
             writer.write_all(b"\n")?;
@@ -263,16 +252,10 @@ pub(super) fn write_json_output_lines_native(
     join_output: bool,
     color_opts: &JsonColorOptions,
 ) -> Result<(), Error> {
+    const IO_BUFFER_CAP: usize = 64 * 1024;
     let stdout = io::stdout();
-    let mut writer = io::BufWriter::new(stdout.lock());
-    write_json_output_native(
-        &mut writer,
-        values,
-        compact,
-        raw_output,
-        join_output,
-        color_opts,
-    )?;
+    let mut writer = io::BufWriter::with_capacity(IO_BUFFER_CAP, stdout.lock());
+    write_json_output_native(&mut writer, values, compact, raw_output, join_output, color_opts)?;
     writer.flush()?;
     Ok(())
 }

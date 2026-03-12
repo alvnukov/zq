@@ -29,10 +29,7 @@ impl CachedRegex {
             .capture_names()
             .map(|name| name.map(|name| name.to_string()))
             .collect::<Vec<_>>();
-        Ok(Self {
-            compiled,
-            capture_names,
-        })
+        Ok(Self { compiled, capture_names })
     }
 }
 
@@ -53,9 +50,7 @@ pub(super) fn run_regex_match(
     let (pattern, mode) = resolve_regex_spec_and_mode(spec, flags, tuple_mode)?;
     let config = parse_regex_mode(&mode)?;
     if test_mode {
-        return Ok(vec![ZqValue::Bool(regex_has_match(
-            text, &pattern, &config,
-        )?)]);
+        return Ok(vec![ZqValue::Bool(regex_has_match(text, &pattern, &config)?)]);
     }
     let records = regex_collect_matches(text, &pattern, &config)?;
     Ok(records.into_iter().map(regex_record_to_value).collect())
@@ -164,28 +159,17 @@ pub(super) fn run_regex_splits(
         if offset > total_cp || offset < previous {
             return Err("regex offset out of range".to_string());
         }
-        out.push(ZqValue::String(codepoint_slice(
-            text,
-            &cp_to_byte,
-            previous,
-            offset,
-        )?));
+        out.push(ZqValue::String(codepoint_slice(text, &cp_to_byte, previous, offset)?));
 
         let length =
             usize::try_from(record.length).map_err(|_| "regex length out of range".to_string())?;
-        previous = offset
-            .checked_add(length)
-            .ok_or_else(|| "regex length out of range".to_string())?;
+        previous =
+            offset.checked_add(length).ok_or_else(|| "regex length out of range".to_string())?;
         if previous > total_cp {
             return Err("regex length out of range".to_string());
         }
     }
-    out.push(ZqValue::String(codepoint_slice(
-        text,
-        &cp_to_byte,
-        previous,
-        total_cp,
-    )?));
+    out.push(ZqValue::String(codepoint_slice(text, &cp_to_byte, previous, total_cp)?));
     Ok(out)
 }
 
@@ -242,9 +226,8 @@ pub(super) fn run_regex_sub(
 
         let length =
             usize::try_from(edit.length).map_err(|_| "regex length out of range".to_string())?;
-        previous = offset
-            .checked_add(length)
-            .ok_or_else(|| "regex length out of range".to_string())?;
+        previous =
+            offset.checked_add(length).ok_or_else(|| "regex length out of range".to_string())?;
         if previous > total_cp {
             return Err("regex length out of range".to_string());
         }
@@ -284,10 +267,7 @@ fn resolve_regex_spec_and_mode(
     tuple_mode: bool,
 ) -> Result<(String, Option<String>), String> {
     if let Some(flags) = flags {
-        return Ok((
-            expect_regex_string(spec)?,
-            parse_regex_modifier_value(flags)?,
-        ));
+        return Ok((expect_regex_string(spec)?, parse_regex_modifier_value(flags)?));
     }
     if !tuple_mode {
         return Ok((expect_regex_string(spec)?, None));
@@ -309,11 +289,9 @@ fn resolve_regex_spec_and_mode(
 fn expect_regex_string(value: ZqValue) -> Result<String, String> {
     match value {
         ZqValue::String(s) => Ok(s),
-        other => Err(format!(
-            "{} ({}) is not a string",
-            type_name(&other),
-            value_for_error(&other)
-        )),
+        other => {
+            Err(format!("{} ({}) is not a string", type_name(&other), value_for_error(&other)))
+        }
     }
 }
 
@@ -321,11 +299,9 @@ fn parse_regex_modifier_value(value: ZqValue) -> Result<Option<String>, String> 
     match value {
         ZqValue::Null => Ok(None),
         ZqValue::String(s) => Ok(Some(s)),
-        other => Err(format!(
-            "{} ({}) is not a string",
-            type_name(&other),
-            value_for_error(&other)
-        )),
+        other => {
+            Err(format!("{} ({}) is not a string", type_name(&other), value_for_error(&other)))
+        }
     }
 }
 
@@ -422,9 +398,8 @@ fn regex_has_match_compiled(
     config: &RegexModeConfig,
 ) -> Result<bool, String> {
     if !config.global {
-        if let Some(captures) = regex
-            .captures(input)
-            .map_err(|err| format!("Regex failure: {err}"))?
+        if let Some(captures) =
+            regex.captures(input).map_err(|err| format!("Regex failure: {err}"))?
         {
             let Some(full) = captures.get(0) else {
                 return Ok(false);
@@ -468,9 +443,8 @@ fn regex_collect_matches_compiled(
     let mut cp_table: Option<Vec<i64>> = None;
     let mut out = Vec::new();
     if !config.global {
-        if let Some(captures) = regex
-            .captures(input)
-            .map_err(|err| format!("Regex failure: {err}"))?
+        if let Some(captures) =
+            regex.captures(input).map_err(|err| format!("Regex failure: {err}"))?
         {
             let Some(full) = captures.get(0) else {
                 return Ok(Vec::new());
@@ -572,10 +546,7 @@ pub(super) fn normalize_named_capture_syntax<'a>(pattern: &'a str) -> Cow<'a, st
             let mut has_name = false;
             let mut valid = true;
             while cursor < pattern.len() {
-                let ch = pattern[cursor..]
-                    .chars()
-                    .next()
-                    .expect("index is in-bounds");
+                let ch = pattern[cursor..].chars().next().expect("index is in-bounds");
                 if ch == '\'' {
                     break;
                 }
@@ -605,11 +576,7 @@ pub(super) fn normalize_named_capture_syntax<'a>(pattern: &'a str) -> Cow<'a, st
                 continue;
             }
         }
-        let ch_len = pattern[i..]
-            .chars()
-            .next()
-            .expect("index is in-bounds")
-            .len_utf8();
+        let ch_len = pattern[i..].chars().next().expect("index is in-bounds").len_utf8();
         i += ch_len;
     }
     if let Some(mut out) = out {
@@ -701,21 +668,11 @@ fn regex_captures_to_record(
                 name,
             });
         } else {
-            groups.push(RegexCaptureGroup {
-                offset: -1,
-                length: 0,
-                string: None,
-                name,
-            });
+            groups.push(RegexCaptureGroup { offset: -1, length: 0, string: None, name });
         }
     }
 
-    RegexMatchRecord {
-        offset,
-        length,
-        string,
-        captures: groups,
-    }
+    RegexMatchRecord { offset, length, string, captures: groups }
 }
 
 fn regex_record_to_value(record: RegexMatchRecord) -> ZqValue {

@@ -86,11 +86,7 @@ fn format_yaml_documents_with_anchors(
 
     let mut docs = Vec::with_capacity(values.len());
     for value in values {
-        docs.push(render_yaml_document_with_anchors(
-            value,
-            name_mode,
-            enrich_single_token,
-        )?);
+        docs.push(render_yaml_document_with_anchors(value, name_mode, enrich_single_token)?);
     }
 
     if docs.len() == 1 {
@@ -143,13 +139,7 @@ impl YamlAnchorAnalyzer {
 
         let mut first_seen = vec![usize::MAX; analyzer.fingerprints.len()];
         let mut cursor = 0usize;
-        fill_first_seen(
-            value,
-            true,
-            &analyzer.node_ids,
-            &mut first_seen,
-            &mut cursor,
-        );
+        fill_first_seen(value, true, &analyzer.node_ids, &mut first_seen, &mut cursor);
         let mut first_hints = vec![None; analyzer.fingerprints.len()];
         let mut path = Vec::new();
         fill_first_hints(
@@ -313,8 +303,7 @@ fn mapping_is_strict_subset(base: &[(u32, u32)], target: &[(u32, u32)]) -> bool 
     if base.len() < MIN_MERGE_BASE_KEYS || base.len() >= target.len() {
         return false;
     }
-    base.iter()
-        .all(|pair| target.iter().any(|candidate| candidate == pair))
+    base.iter().all(|pair| target.iter().any(|candidate| candidate == pair))
 }
 
 fn select_mapping_merge_sources(
@@ -617,12 +606,7 @@ fn normalize_anchor_name_with_enrichment(
     if out.is_empty() {
         out.push_str("anchor");
     }
-    if !out
-        .chars()
-        .next()
-        .map(|ch| ch.is_ascii_alphabetic() || ch == '_')
-        .unwrap_or(false)
-    {
+    if !out.chars().next().map(|ch| ch.is_ascii_alphabetic() || ch == '_').unwrap_or(false) {
         out.insert_str(0, "key_");
     }
     let max_len = match name_mode {
@@ -663,7 +647,7 @@ fn normalize_anchor_component_with_enrichment(
         .map(|(_, token)| token.clone())
         .collect::<Vec<_>>();
     if filtered.is_empty() {
-        filtered = tokens.iter().cloned().collect();
+        filtered = tokens.to_vec();
     }
 
     let mut normalized = filtered
@@ -672,11 +656,8 @@ fn normalize_anchor_component_with_enrichment(
         .collect::<Vec<_>>();
     normalized = squash_anchor_tokens(normalized);
     if matches!(name_mode, YamlAnchorNameMode::StrictFriendly) && normalized.len() > 1 {
-        let without_single_chars = normalized
-            .iter()
-            .filter(|token| token.len() > 1)
-            .cloned()
-            .collect::<Vec<_>>();
+        let without_single_chars =
+            normalized.iter().filter(|token| token.len() > 1).cloned().collect::<Vec<_>>();
         if !without_single_chars.is_empty() {
             normalized = without_single_chars;
         }
@@ -703,11 +684,8 @@ fn normalize_anchor_component_with_enrichment(
         }
     }
     if matches!(name_mode, YamlAnchorNameMode::StrictFriendly) && normalized.len() > 1 {
-        let without_single_chars = normalized
-            .iter()
-            .filter(|token| token.len() > 1)
-            .cloned()
-            .collect::<Vec<_>>();
+        let without_single_chars =
+            normalized.iter().filter(|token| token.len() > 1).cloned().collect::<Vec<_>>();
         if !without_single_chars.is_empty() {
             normalized = without_single_chars;
         }
@@ -728,10 +706,7 @@ fn normalize_anchor_component_with_enrichment(
         normalized
     } else {
         match max_parts {
-            2 => vec![
-                normalized[0].clone(),
-                normalized[normalized.len() - 1].clone(),
-            ],
+            2 => vec![normalized[0].clone(), normalized[normalized.len() - 1].clone()],
             _ => vec![
                 normalized[0].clone(),
                 normalized[normalized.len() - 2].clone(),
@@ -827,10 +802,7 @@ fn canonicalize_anchor_token_readable(token: String, name_mode: YamlAnchorNameMo
 }
 
 fn should_enrich_strict_single_token(token: &str) -> bool {
-    matches!(
-        token,
-        "meta" | "kind" | "spec" | "status" | "data" | "api" | "cfg" | "config"
-    )
+    matches!(token, "meta" | "kind" | "spec" | "status" | "data" | "api" | "cfg" | "config")
 }
 
 #[derive(Default)]
@@ -995,12 +967,7 @@ impl YamlAnchorPlan {
             return AnchorAction::None;
         };
         let idx = id as usize;
-        let Some(name) = self
-            .anchor_names
-            .get(idx)
-            .and_then(|name| name.as_ref())
-            .cloned()
-        else {
+        let Some(name) = self.anchor_names.get(idx).and_then(|name| name.as_ref()).cloned() else {
             return AnchorAction::None;
         };
         if self.emitted[idx] {
@@ -1030,11 +997,7 @@ impl YamlAnchorPlan {
         if !self.emitted.get(base_idx).copied().unwrap_or(false) {
             return None;
         }
-        let name = self
-            .anchor_names
-            .get(base_idx)
-            .and_then(|name| name.as_ref())
-            .cloned()?;
+        let name = self.anchor_names.get(base_idx).and_then(|name| name.as_ref()).cloned()?;
         Some((base_id, name))
     }
 
@@ -1050,14 +1013,11 @@ impl YamlAnchorPlan {
         let Some(value_id) = self.node_id(value) else {
             return false;
         };
-        let Some(base_pairs) = self
-            .fingerprints
-            .get(base_id as usize)
-            .and_then(mapping_pairs)
+        let Some(base_pairs) = self.fingerprints.get(base_id as usize).and_then(mapping_pairs)
         else {
             return false;
         };
-        base_pairs.iter().any(|pair| *pair == (key_id, value_id))
+        base_pairs.contains(&(key_id, value_id))
     }
 }
 
@@ -1182,8 +1142,7 @@ fn emit_yaml_mapping_body(
 }
 
 fn mapping_has_plain_merge_key(map: &serde_yaml::Mapping) -> bool {
-    map.keys()
-        .any(|key| matches!(key, serde_yaml::Value::String(s) if s == "<<"))
+    map.keys().any(|key| matches!(key, serde_yaml::Value::String(s) if s == "<<"))
 }
 
 fn emit_yaml_value_inline(

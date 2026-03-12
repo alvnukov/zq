@@ -511,10 +511,7 @@ fn consume_exponent(
 
     let exp_digits = consume_digits(chars, out);
     if exp_digits == 0 {
-        return Err(LexError {
-            message: format!("invalid number literal `{out}`"),
-            position,
-        });
+        return Err(LexError { message: format!("invalid number literal `{out}`"), position });
     }
     Ok(())
 }
@@ -534,9 +531,8 @@ fn lex_string_tokens(
             '"' => {
                 if has_interpolation || force_qq {
                     if !segment.is_empty() {
-                        qq_tokens.push(Token::QQStringText(decode_string_segment(
-                            &segment, position,
-                        )?));
+                        qq_tokens
+                            .push(Token::QQStringText(decode_string_segment(&segment, position)?));
                     }
                     let mut out = Vec::with_capacity(qq_tokens.len() + 2);
                     out.push(Token::QQStringStart);
@@ -550,9 +546,8 @@ fn lex_string_tokens(
                 if chars.next_if(|(_, c)| *c == '(').is_some() {
                     has_interpolation = true;
                     if !segment.is_empty() {
-                        qq_tokens.push(Token::QQStringText(decode_string_segment(
-                            &segment, position,
-                        )?));
+                        qq_tokens
+                            .push(Token::QQStringText(decode_string_segment(&segment, position)?));
                         segment.clear();
                     }
                     qq_tokens.push(Token::QQInterpStart);
@@ -585,10 +580,7 @@ fn lex_string_tokens(
         }
     }
 
-    Err(LexError {
-        message: "unterminated string literal".to_string(),
-        position,
-    })
+    Err(LexError { message: "unterminated string literal".to_string(), position })
 }
 
 fn decode_string_segment(raw: &str, position: usize) -> Result<String, LexError> {
@@ -651,10 +643,7 @@ fn consume_interpolation_tokens(
         }
     }
 
-    Err(LexError {
-        message: "unterminated string interpolation".to_string(),
-        position,
-    })
+    Err(LexError { message: "unterminated string interpolation".to_string(), position })
 }
 
 fn consume_interpolation_string_literal(
@@ -681,10 +670,7 @@ fn consume_interpolation_string_literal(
             return Ok(());
         }
     }
-    Err(LexError {
-        message: "unterminated string literal in interpolation".to_string(),
-        position,
-    })
+    Err(LexError { message: "unterminated string literal in interpolation".to_string(), position })
 }
 
 fn consume_interpolation_comment(
@@ -771,9 +757,6 @@ mod tests {
     #[test]
     fn lexes_namespace_binding_tokens_like_jq() {
         let tokens = lex(r#"$mod::value"#).expect("lex");
-        assert_eq!(
-            tokens,
-            vec![Token::Binding("mod::value".to_string()), Token::End]
-        );
+        assert_eq!(tokens, vec![Token::Binding("mod::value".to_string()), Token::End]);
     }
 }

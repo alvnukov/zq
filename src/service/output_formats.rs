@@ -21,9 +21,9 @@ pub(super) fn render_toml_output_native(values: &[zq::NativeValue]) -> Result<St
 
 fn native_to_toml_value(value: &zq::NativeValue) -> Result<toml::Value, Error> {
     match value {
-        zq::NativeValue::Null => Err(Error::Query(
-            "encode toml: null is not supported in TOML output".to_string(),
-        )),
+        zq::NativeValue::Null => {
+            Err(Error::Query("encode toml: null is not supported in TOML output".to_string()))
+        }
         zq::NativeValue::Bool(v) => Ok(toml::Value::Boolean(*v)),
         zq::NativeValue::Number(v) => {
             if let Some(i) = v.as_i64() {
@@ -37,16 +37,12 @@ fn native_to_toml_value(value: &zq::NativeValue) -> Result<toml::Value, Error> {
             if let Some(f) = v.as_f64() {
                 return Ok(toml::Value::Float(f));
             }
-            Err(Error::Query(format!(
-                "encode toml: unsupported number `{v}`"
-            )))
+            Err(Error::Query(format!("encode toml: unsupported number `{v}`")))
         }
         zq::NativeValue::String(v) => Ok(toml::Value::String(v.clone())),
         zq::NativeValue::Array(values) => {
-            let converted = values
-                .iter()
-                .map(native_to_toml_value)
-                .collect::<Result<Vec<_>, _>>()?;
+            let converted =
+                values.iter().map(native_to_toml_value).collect::<Result<Vec<_>, _>>()?;
             Ok(toml::Value::Array(converted))
         }
         zq::NativeValue::Object(fields) => {
@@ -63,10 +59,7 @@ pub(super) fn render_csv_output_native(values: &[zq::NativeValue]) -> Result<Str
     let mut out = Vec::new();
     {
         let mut writer = csv::WriterBuilder::new().from_writer(&mut out);
-        if values
-            .iter()
-            .all(|value| matches!(value, zq::NativeValue::Object(_)))
-        {
+        if values.iter().all(|value| matches!(value, zq::NativeValue::Object(_))) {
             let headers = collect_csv_headers(values);
             writer
                 .write_record(headers.iter())
@@ -101,10 +94,9 @@ pub(super) fn render_csv_output_native(values: &[zq::NativeValue]) -> Result<Str
                 .max(1);
             for value in values {
                 let mut row = match value {
-                    zq::NativeValue::Array(items) => items
-                        .iter()
-                        .map(native_to_csv_cell)
-                        .collect::<Result<Vec<_>, _>>()?,
+                    zq::NativeValue::Array(items) => {
+                        items.iter().map(native_to_csv_cell).collect::<Result<Vec<_>, _>>()?
+                    }
                     other => {
                         let cell = native_to_csv_cell(other)?;
                         vec![cell]
@@ -118,9 +110,7 @@ pub(super) fn render_csv_output_native(values: &[zq::NativeValue]) -> Result<Str
                     .map_err(|e| Error::Query(format!("encode csv: {e}")))?;
             }
         }
-        writer
-            .flush()
-            .map_err(|e| Error::Query(format!("encode csv: {e}")))?;
+        writer.flush().map_err(|e| Error::Query(format!("encode csv: {e}")))?;
     }
     String::from_utf8(out).map_err(|e| Error::Query(format!("encode csv: {e}")))
 }

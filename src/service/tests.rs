@@ -21,17 +21,10 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 fn cursor_parses_compile_fail_case_mode() {
     let mut cursor = TestCursor::new("%%FAIL\n@\nplaceholder\n\n.\nnull\nnull\n");
     let fail_case = cursor.next_case_program().expect("first case");
-    assert!(matches!(
-        fail_case.mode,
-        RunTestMode::CompileFail {
-            check_message: true
-        }
-    ));
+    assert!(matches!(fail_case.mode, RunTestMode::CompileFail { check_message: true }));
     assert_eq!(fail_case.program, "@");
 
-    let payload = cursor
-        .read_case_payload(fail_case.mode)
-        .expect("fail payload");
+    let payload = cursor.read_case_payload(fail_case.mode).expect("fail payload");
     match payload {
         CasePayload::CompileFail(payload) => {
             assert_eq!(payload.expected_error_line, "placeholder");
@@ -86,17 +79,10 @@ fn run_tests_runtime_error_without_expected_outputs_is_treated_as_stream_end() {
         expected_lines: Vec::new(),
     };
     let mut compile_cache = std::collections::HashMap::new();
-    let mut stats = RunTestsStats {
-        tests: 1,
-        passed: 0,
-        invalid: 0,
-    };
+    let mut stats = RunTestsStats { tests: 1, passed: 0, invalid: 0 };
 
     run_query_case(&case, payload, &[], &mut compile_cache, &mut stats);
-    assert_eq!(
-        stats.passed, 1,
-        "runtime error must terminate stream like jq"
-    );
+    assert_eq!(stats.passed, 1, "runtime error must terminate stream like jq");
     assert_eq!(stats.invalid, 0);
 }
 
@@ -121,18 +107,9 @@ fn exit_status_contract_matches_jq() {
     assert_eq!(exit_status_from_outputs(&[JsonValue::Bool(true)]), 0);
     assert_eq!(exit_status_from_outputs(&[JsonValue::Number(1.into())]), 0);
     assert_eq!(exit_status_from_outputs_native(&[zq::NativeValue::Null]), 1);
-    assert_eq!(
-        exit_status_from_outputs_native(&[zq::NativeValue::Bool(false)]),
-        1
-    );
-    assert_eq!(
-        exit_status_from_outputs_native(&[zq::NativeValue::Bool(true)]),
-        0
-    );
-    assert_eq!(
-        exit_status_from_outputs_native(&[zq::NativeValue::from(1i64)]),
-        0
-    );
+    assert_eq!(exit_status_from_outputs_native(&[zq::NativeValue::Bool(false)]), 1);
+    assert_eq!(exit_status_from_outputs_native(&[zq::NativeValue::Bool(true)]), 0);
+    assert_eq!(exit_status_from_outputs_native(&[zq::NativeValue::from(1i64)]), 0);
 }
 
 #[test]
@@ -230,12 +207,7 @@ fn compat_cli_parser_handles_named_and_positional_args() {
     let (filtered, compat) = extract_cli_compat_args(args).expect("parse");
     assert_eq!(
         filtered,
-        vec![
-            "zq".to_string(),
-            "-n".to_string(),
-            "-c".to_string(),
-            "$ARGS.positional".to_string()
-        ]
+        vec!["zq".to_string(), "-n".to_string(), "-c".to_string(), "$ARGS.positional".to_string()]
     );
     assert_eq!(
         compat.named_vars.get("foo"),
@@ -267,14 +239,7 @@ fn compat_cli_parser_accepts_args_before_query() {
     ];
 
     let (filtered, compat) = extract_cli_compat_args(args).expect("parse");
-    assert_eq!(
-        filtered,
-        vec![
-            "zq".to_string(),
-            "-n".to_string(),
-            "$ARGS.positional".to_string()
-        ]
-    );
+    assert_eq!(filtered, vec!["zq".to_string(), "-n".to_string(), "$ARGS.positional".to_string()]);
     assert_eq!(
         compat.positional_args,
         vec![
@@ -305,10 +270,7 @@ fn compat_cli_parser_preserves_double_dash_before_query_in_args_mode() {
             "$ARGS.positional[0]".to_string(),
         ]
     );
-    assert_eq!(
-        compat.positional_args,
-        vec![zq::NativeValue::from_json(serde_json::json!("bar"))]
-    );
+    assert_eq!(compat.positional_args, vec![zq::NativeValue::from_json(serde_json::json!("bar"))]);
 }
 
 #[test]
@@ -344,10 +306,7 @@ fn compat_cli_parser_switches_modes_and_collects_tail_after_double_dash() {
     ];
 
     let (filtered, compat) = extract_cli_compat_args(args).expect("parse");
-    assert_eq!(
-        filtered,
-        vec!["zq".to_string(), "-n".to_string(), ".".to_string()]
-    );
+    assert_eq!(filtered, vec!["zq".to_string(), "-n".to_string(), ".".to_string()]);
     assert_eq!(
         compat.positional_args,
         vec![
@@ -368,27 +327,15 @@ fn compat_cli_parser_reports_missing_flag_values() {
             "--arg requires two arguments",
         ),
         (
-            vec![
-                "zq".to_string(),
-                "--argjson".to_string(),
-                "name".to_string(),
-            ],
+            vec!["zq".to_string(), "--argjson".to_string(), "name".to_string()],
             "--argjson requires two arguments",
         ),
         (
-            vec![
-                "zq".to_string(),
-                "--slurpfile".to_string(),
-                "name".to_string(),
-            ],
+            vec!["zq".to_string(), "--slurpfile".to_string(), "name".to_string()],
             "--slurpfile requires two arguments",
         ),
         (
-            vec![
-                "zq".to_string(),
-                "--rawfile".to_string(),
-                "name".to_string(),
-            ],
+            vec!["zq".to_string(), "--rawfile".to_string(), "name".to_string()],
             "--rawfile requires two arguments",
         ),
     ];
@@ -430,10 +377,9 @@ fn build_query_injects_empty_args_object_when_query_uses_args() {
 #[test]
 fn build_query_rejects_invalid_variable_names() {
     let mut compat = CliCompatArgs::default();
-    compat.named_vars.insert(
-        "1bad".to_string(),
-        zq::NativeValue::from_json(serde_json::json!("x")),
-    );
+    compat
+        .named_vars
+        .insert("1bad".to_string(), zq::NativeValue::from_json(serde_json::json!("x")));
     let err = build_query_with_cli_compat(".", &compat).expect_err("must fail");
     assert!(format!("{err}").contains("invalid variable name"));
 }
@@ -467,10 +413,9 @@ fn build_query_with_cli_compat_preserves_query_without_compat_args() {
 #[test]
 fn build_query_with_cli_compat_rejects_invalid_var_name_before_wrapping() {
     let mut compat = CliCompatArgs::default();
-    compat.named_vars.insert(
-        "9bad".to_string(),
-        zq::NativeValue::from_json(serde_json::json!("x")),
-    );
+    compat
+        .named_vars
+        .insert("9bad".to_string(), zq::NativeValue::from_json(serde_json::json!("x")));
     let err = build_query_with_cli_compat("$ARGS.positional", &compat).expect_err("must fail");
     assert!(format!("{err}").contains("invalid variable name"));
 }
@@ -480,21 +425,14 @@ fn stream_json_values_matches_jq_shape_for_arrays() {
     let events = stream_json_values(vec![serde_json::json!([1, 2])]);
     assert_eq!(
         events,
-        vec![
-            serde_json::json!([[0], 1]),
-            serde_json::json!([[1], 2]),
-            serde_json::json!([[1]]),
-        ]
+        vec![serde_json::json!([[0], 1]), serde_json::json!([[1], 2]), serde_json::json!([[1]]),]
     );
 }
 
 #[test]
 fn stream_json_values_handles_empty_containers() {
     let events = stream_json_values(vec![serde_json::json!([]), serde_json::json!({})]);
-    assert_eq!(
-        events,
-        vec![serde_json::json!([[], []]), serde_json::json!([[], {}])]
-    );
+    assert_eq!(events, vec![serde_json::json!([[], []]), serde_json::json!([[], {}])]);
 }
 
 #[test]
@@ -502,10 +440,7 @@ fn stream_error_value_matches_jq_contract() {
     let input = "[";
     let err = serde_json::from_str::<serde_json::Value>(input).expect_err("invalid json");
     let event = stream_error_value_from_json_error(input, &err);
-    assert_eq!(
-        event,
-        serde_json::json!(["Unfinished JSON term at EOF at line 1, column 1", [0]])
-    );
+    assert_eq!(event, serde_json::json!(["Unfinished JSON term at EOF at line 1, column 1", [0]]));
 }
 
 #[test]
@@ -537,10 +472,7 @@ fn stream_error_value_uses_null_path_for_missing_colon() {
     let event = stream_error_value_from_json_error(input, &err);
     assert_eq!(
         event,
-        serde_json::json!([
-            "Objects must consist of key:value pairs at line 1, column 6",
-            [null]
-        ])
+        serde_json::json!(["Objects must consist of key:value pairs at line 1, column 6", [null]])
     );
 }
 
@@ -556,10 +488,7 @@ fn json_scanner_helper_contract() {
 
     let raw = r#""a\"b""#;
     let mut i = 0usize;
-    assert_eq!(
-        scan_json_string(raw.as_bytes(), &mut i, raw.len()),
-        Some("a\"b".to_string())
-    );
+    assert_eq!(scan_json_string(raw.as_bytes(), &mut i, raw.len()), Some("a\"b".to_string()));
     assert_eq!(i, raw.len());
 
     let num = "-12.34e+5";
@@ -582,128 +511,72 @@ fn json_scanner_helper_contract() {
 }
 
 #[test]
+fn json_scanner_line_col_handles_utf8_weird_sequences() {
+    let input = "a🙂\nб👩‍💻z\n";
+    assert_eq!(line_col_to_byte_index(input, 1, 1), Some(0));
+    assert_eq!(line_col_to_byte_index(input, 1, 2), input.find('🙂'));
+    assert_eq!(line_col_to_byte_index(input, 1, 3), input.find('\n'));
+    assert_eq!(line_col_to_byte_index(input, 2, 1), input.find('б'));
+    assert_eq!(line_col_to_byte_index(input, 2, 2), input.find('👩'));
+    assert_eq!(line_col_to_byte_index(input, 2, 3), input.find('\u{200d}'));
+    assert_eq!(line_col_to_byte_index(input, 2, 4), input.find('💻'));
+    assert_eq!(line_col_to_byte_index(input, 2, 5), input.find('z'));
+    // Contract today is to clamp unknown/out-of-range positions to end.
+    assert_eq!(line_col_to_byte_index(input, 99, 99), Some(input.len()));
+}
+
+#[test]
 fn json_scan_state_machine_contract() {
-    let mut frames = vec![JsonScanFrame::Array {
-        index: 0,
-        state: JsonArrayState::ValueOrEnd,
-    }];
+    let mut frames = vec![JsonScanFrame::Array { index: 0, state: JsonArrayState::ValueOrEnd }];
     let mut i = 0usize;
     let mut root_done = false;
-    assert!(advance_json_scan(
-        b"]",
-        &mut i,
-        1,
-        &mut frames,
-        &mut root_done
-    ));
+    assert!(advance_json_scan(b"]", &mut i, 1, &mut frames, &mut root_done));
     assert!(root_done);
 
-    let mut frames = vec![JsonScanFrame::Array {
-        index: 0,
-        state: JsonArrayState::CommaOrEnd,
-    }];
+    let mut frames = vec![JsonScanFrame::Array { index: 0, state: JsonArrayState::CommaOrEnd }];
     let mut i = 0usize;
     let mut root_done = false;
-    assert!(advance_json_scan(
-        b",",
-        &mut i,
-        1,
-        &mut frames,
-        &mut root_done
-    ));
+    assert!(advance_json_scan(b",", &mut i, 1, &mut frames, &mut root_done));
     assert!(matches!(
         frames[0],
-        JsonScanFrame::Array {
-            index: 1,
-            state: JsonArrayState::ValueOrEnd
-        }
+        JsonScanFrame::Array { index: 1, state: JsonArrayState::ValueOrEnd }
     ));
 
-    let mut frames = vec![JsonScanFrame::Array {
-        index: 0,
-        state: JsonArrayState::CommaOrEnd,
-    }];
+    let mut frames = vec![JsonScanFrame::Array { index: 0, state: JsonArrayState::CommaOrEnd }];
     let mut i = 0usize;
     let mut root_done = false;
-    assert!(advance_json_scan(
-        b"]",
-        &mut i,
-        1,
-        &mut frames,
-        &mut root_done
-    ));
+    assert!(advance_json_scan(b"]", &mut i, 1, &mut frames, &mut root_done));
     assert!(root_done);
 
-    let mut frames = vec![JsonScanFrame::Array {
-        index: 0,
-        state: JsonArrayState::CommaOrEnd,
-    }];
+    let mut frames = vec![JsonScanFrame::Array { index: 0, state: JsonArrayState::CommaOrEnd }];
     let mut i = 0usize;
     let mut root_done = false;
-    assert!(!advance_json_scan(
-        b"x",
-        &mut i,
-        1,
-        &mut frames,
-        &mut root_done
-    ));
+    assert!(!advance_json_scan(b"x", &mut i, 1, &mut frames, &mut root_done));
 
-    let mut frames = vec![JsonScanFrame::Object {
-        key: None,
-        state: JsonObjectState::KeyOrEnd,
-    }];
+    let mut frames = vec![JsonScanFrame::Object { key: None, state: JsonObjectState::KeyOrEnd }];
     let mut i = 0usize;
     let mut root_done = false;
-    assert!(advance_json_scan(
-        b"}",
-        &mut i,
-        1,
-        &mut frames,
-        &mut root_done
-    ));
+    assert!(advance_json_scan(b"}", &mut i, 1, &mut frames, &mut root_done));
     assert!(root_done);
 
     let raw = r#""a""#;
-    let mut frames = vec![JsonScanFrame::Object {
-        key: None,
-        state: JsonObjectState::KeyOrEnd,
-    }];
+    let mut frames = vec![JsonScanFrame::Object { key: None, state: JsonObjectState::KeyOrEnd }];
     let mut i = 0usize;
     let mut root_done = false;
-    assert!(advance_json_scan(
-        raw.as_bytes(),
-        &mut i,
-        raw.len(),
-        &mut frames,
-        &mut root_done
-    ));
+    assert!(advance_json_scan(raw.as_bytes(), &mut i, raw.len(), &mut frames, &mut root_done));
     assert!(matches!(
         frames[0],
-        JsonScanFrame::Object {
-            key: Some(_),
-            state: JsonObjectState::Colon
-        }
+        JsonScanFrame::Object { key: Some(_), state: JsonObjectState::Colon }
     ));
 
-    let mut frames = vec![JsonScanFrame::Object {
-        key: Some("a".to_string()),
-        state: JsonObjectState::Colon,
-    }];
+    let mut frames =
+        vec![JsonScanFrame::Object { key: Some("a".to_string()), state: JsonObjectState::Colon }];
     let mut i = 0usize;
     let mut root_done = false;
-    assert!(advance_json_scan(
-        b":",
-        &mut i,
-        1,
-        &mut frames,
-        &mut root_done
-    ));
+    assert!(advance_json_scan(b":", &mut i, 1, &mut frames, &mut root_done));
     assert!(matches!(
         frames[0],
-        JsonScanFrame::Object {
-            key: Some(_),
-            state: JsonObjectState::Value
-        }
+        JsonScanFrame::Object { key: Some(_), state: JsonObjectState::Value }
     ));
 
     let mut frames = vec![JsonScanFrame::Object {
@@ -712,19 +585,10 @@ fn json_scan_state_machine_contract() {
     }];
     let mut i = 0usize;
     let mut root_done = false;
-    assert!(advance_json_scan(
-        b",",
-        &mut i,
-        1,
-        &mut frames,
-        &mut root_done
-    ));
+    assert!(advance_json_scan(b",", &mut i, 1, &mut frames, &mut root_done));
     assert!(matches!(
         frames[0],
-        JsonScanFrame::Object {
-            key: None,
-            state: JsonObjectState::KeyOrEnd
-        }
+        JsonScanFrame::Object { key: None, state: JsonObjectState::KeyOrEnd }
     ));
 
     let mut frames = vec![JsonScanFrame::Object {
@@ -733,86 +597,42 @@ fn json_scan_state_machine_contract() {
     }];
     let mut i = 0usize;
     let mut root_done = false;
-    assert!(advance_json_scan(
-        b"}",
-        &mut i,
-        1,
-        &mut frames,
-        &mut root_done
-    ));
+    assert!(advance_json_scan(b"}", &mut i, 1, &mut frames, &mut root_done));
     assert!(root_done);
 
     let mut i = 0usize;
     let mut frames = Vec::new();
     let mut root_done = false;
-    assert!(scan_json_value(
-        b"true",
-        &mut i,
-        4,
-        &mut frames,
-        &mut root_done
-    ));
+    assert!(scan_json_value(b"true", &mut i, 4, &mut frames, &mut root_done));
     assert!(root_done);
 
     let mut i = 0usize;
     let mut frames = Vec::new();
     let mut root_done = false;
-    assert!(scan_json_value(
-        b"false",
-        &mut i,
-        5,
-        &mut frames,
-        &mut root_done
-    ));
+    assert!(scan_json_value(b"false", &mut i, 5, &mut frames, &mut root_done));
     assert!(root_done);
 
     let mut i = 0usize;
     let mut frames = Vec::new();
     let mut root_done = false;
-    assert!(scan_json_value(
-        b"null",
-        &mut i,
-        4,
-        &mut frames,
-        &mut root_done
-    ));
+    assert!(scan_json_value(b"null", &mut i, 4, &mut frames, &mut root_done));
     assert!(root_done);
 
     let mut i = 0usize;
     let mut frames = Vec::new();
     let mut root_done = false;
-    assert!(!scan_json_value(
-        b"\"",
-        &mut i,
-        1,
-        &mut frames,
-        &mut root_done
-    ));
+    assert!(!scan_json_value(b"\"", &mut i, 1, &mut frames, &mut root_done));
 
     let mut i = 0usize;
     let mut frames = Vec::new();
     let mut root_done = false;
-    assert!(!scan_json_value(
-        b"x",
-        &mut i,
-        1,
-        &mut frames,
-        &mut root_done
-    ));
+    assert!(!scan_json_value(b"x", &mut i, 1, &mut frames, &mut root_done));
 
-    let mut frames = vec![JsonScanFrame::Object {
-        key: Some("a".to_string()),
-        state: JsonObjectState::Value,
-    }];
+    let mut frames =
+        vec![JsonScanFrame::Object { key: Some("a".to_string()), state: JsonObjectState::Value }];
     let mut root_done = false;
     complete_json_value(&mut frames, &mut root_done);
-    assert!(matches!(
-        frames[0],
-        JsonScanFrame::Object {
-            state: JsonObjectState::CommaOrEnd,
-            ..
-        }
-    ));
+    assert!(matches!(frames[0], JsonScanFrame::Object { state: JsonObjectState::CommaOrEnd, .. }));
 
     let mut frames = Vec::new();
     let mut root_done = false;
@@ -835,10 +655,7 @@ fn json_error_message_and_suffix_stripping_contract() {
     let msg = json_parse_error_message(&expected_value);
     assert!(msg.contains("expected value"));
 
-    assert_eq!(
-        strip_serde_line_col_suffix("expected value at line 1 column 2"),
-        "expected value"
-    );
+    assert_eq!(strip_serde_line_col_suffix("expected value at line 1 column 2"), "expected value");
     assert_eq!(
         strip_serde_line_col_suffix("expected value at line x column 2"),
         "expected value at line x column 2"
@@ -848,19 +665,12 @@ fn json_error_message_and_suffix_stripping_contract() {
 #[test]
 fn raw_output0_renders_nul_delimited_outputs() {
     let (out, err) = render_raw_output0(
-        &[
-            serde_json::json!("a"),
-            serde_json::json!(1),
-            serde_json::json!({"b": 2}),
-        ],
+        &[serde_json::json!("a"), serde_json::json!(1), serde_json::json!({"b": 2})],
         true,
     )
     .expect("raw output0");
     assert!(err.is_none());
-    assert_eq!(
-        out,
-        vec![b'a', 0, b'1', 0, b'{', b'"', b'b', b'"', b':', b'2', b'}', 0]
-    );
+    assert_eq!(out, vec![b'a', 0, b'1', 0, b'{', b'"', b'b', b'"', b':', b'2', b'}', 0]);
 
     let native_values = vec![
         zq::NativeValue::from_json(serde_json::json!("a")),
@@ -875,11 +685,9 @@ fn raw_output0_renders_nul_delimited_outputs() {
 
 #[test]
 fn raw_output0_rejects_strings_with_nul() {
-    let (out, err) = render_raw_output0(
-        &[serde_json::json!("a"), serde_json::json!("a\u{0000}b")],
-        false,
-    )
-    .expect("render");
+    let (out, err) =
+        render_raw_output0(&[serde_json::json!("a"), serde_json::json!("a\u{0000}b")], false)
+            .expect("render");
     assert_eq!(out, vec![b'a', 0]);
     let err = err.expect("must fail");
     assert!(format!("{err}").contains("Cannot dump a string containing NUL"));
@@ -907,11 +715,7 @@ fn render_json_line_supports_raw_and_compact_modes() {
 #[test]
 fn render_json_output_join_output_omits_newlines() {
     let out = render_json_output(
-        &[
-            serde_json::json!("hello"),
-            serde_json::json!(1),
-            serde_json::json!({"a": true}),
-        ],
+        &[serde_json::json!("hello"), serde_json::json!(1), serde_json::json!({"a": true})],
         true,
         true,
         true,
@@ -922,13 +726,9 @@ fn render_json_output_join_output_omits_newlines() {
 
 #[test]
 fn render_json_output_default_mode_keeps_line_breaks() {
-    let out = render_json_output(
-        &[serde_json::json!("a"), serde_json::json!("b")],
-        true,
-        true,
-        false,
-    )
-    .expect("line output");
+    let out =
+        render_json_output(&[serde_json::json!("a"), serde_json::json!("b")], true, true, false)
+            .expect("line output");
     assert_eq!(out, "a\nb\n");
 }
 
@@ -942,20 +742,14 @@ fn render_json_line_escapes_del_like_jq() {
 fn run_tests_error_normalization_strips_location_and_number_payload() {
     let got = "jq: error: Cannot index object with number (1) at <top-level>, line 1, column 7:";
     let expected = "jq: error: Cannot index object with number";
-    assert_eq!(
-        normalize_run_tests_error_line(got),
-        normalize_run_tests_error_line(expected)
-    );
+    assert_eq!(normalize_run_tests_error_line(got), normalize_run_tests_error_line(expected));
 }
 
 #[test]
 fn run_tests_error_normalization_strips_line_only_location_suffix() {
     let got = "jq: error: Module metadata must be constant at <top-level>, line 1:";
     let expected = "jq: error: Module metadata must be constant";
-    assert_eq!(
-        normalize_run_tests_error_line(got),
-        normalize_run_tests_error_line(expected)
-    );
+    assert_eq!(normalize_run_tests_error_line(got), normalize_run_tests_error_line(expected));
 }
 
 #[test]
@@ -976,10 +770,7 @@ fn run_tests_values_equal_normalizes_nested_error_strings() {
 fn run_tests_values_equal_accepts_equivalent_number_lexemes() {
     assert!(run_tests_values_equal("20e-1", "2.0"));
     assert!(run_tests_values_equal("[20e-1, 100e-2]", "[2.0, 1.0]"));
-    assert!(run_tests_values_equal(
-        "9.999999999e+999999999",
-        "9999999999e+999999990"
-    ));
+    assert!(run_tests_values_equal("9.999999999e+999999999", "9999999999e+999999990"));
 }
 
 #[test]
@@ -993,20 +784,25 @@ fn run_tests_values_equal_accepts_zero_length_unnamed_capture_variants() {
 fn run_tests_error_normalization_base64_message_variants() {
     let got = "string (\"Not base64 data\") is not valid base64 data";
     let expected = "string (\"Not base64...\") is not valid base64 data";
-    assert_eq!(
-        normalize_run_tests_error_line(got),
-        normalize_run_tests_error_line(expected)
-    );
+    assert_eq!(normalize_run_tests_error_line(got), normalize_run_tests_error_line(expected));
 }
 
 #[test]
 fn run_tests_error_normalization_added_object_payload_variants() {
     let got = "string (\"1,2,\") and object ({\"a\":{\"b\":{\"c\":33}}}) cannot be added";
     let expected = "string (\"1,2,\") and object ({\"a\":{\"b\":{...) cannot be added";
-    assert_eq!(
-        normalize_run_tests_error_line(got),
-        normalize_run_tests_error_line(expected)
-    );
+    assert_eq!(normalize_run_tests_error_line(got), normalize_run_tests_error_line(expected));
+}
+
+#[test]
+fn run_tests_error_normalization_handles_unicode_and_emoji_fragments() {
+    let got = "jq: error: Нельзя индексировать 👩‍💻 with number (42) и потом сложить and object ({\"ключ\":\"знач\"}) cannot be added";
+    let normalized = normalize_run_tests_error_line(got);
+    assert!(normalized.contains("Нельзя индексировать 👩‍💻"));
+    assert!(normalized.contains("with number"));
+    assert!(!normalized.contains("with number (42)"));
+    assert!(normalized.contains("and object cannot be added"));
+    assert!(!normalized.contains("and object ({"));
 }
 
 #[test]
@@ -1177,27 +973,13 @@ fn semantic_diff_summary_counts_by_kind() {
 fn semantic_diff_report_jsonl_emits_only_summary_for_equal_inputs() {
     let mut out = Vec::new();
     let summary = SemanticDiffSummary::from_diffs(&[]);
-    write_semantic_diff_report(
-        &mut out,
-        &[],
-        summary,
-        DiffOutputFormat::Jsonl,
-        false,
-        false,
-    )
-    .expect("jsonl report");
+    write_semantic_diff_report(&mut out, &[], summary, DiffOutputFormat::Jsonl, false, false)
+        .expect("jsonl report");
     let text = String::from_utf8(out).expect("utf8 report");
-    let lines = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
+    let lines = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>();
     assert_eq!(lines.len(), 1, "report:\n{text}");
     let payload: serde_json::Value = serde_json::from_str(lines[0]).expect("valid summary json");
-    assert_eq!(
-        payload["type"],
-        serde_json::Value::String("summary".to_string())
-    );
+    assert_eq!(payload["type"], serde_json::Value::String("summary".to_string()));
     assert_eq!(payload["equal"], serde_json::Value::Bool(true));
     assert_eq!(payload["total"], serde_json::Value::from(0u64));
 }
@@ -1212,15 +994,8 @@ fn semantic_diff_report_diff_uses_color_codes_when_enabled() {
     }];
     let summary = SemanticDiffSummary::from_diffs(&diffs);
     let mut out = Vec::new();
-    write_semantic_diff_report(
-        &mut out,
-        &diffs,
-        summary,
-        DiffOutputFormat::Diff,
-        false,
-        true,
-    )
-    .expect("diff report");
+    write_semantic_diff_report(&mut out, &diffs, summary, DiffOutputFormat::Diff, false, true)
+        .expect("diff report");
     let text = String::from_utf8(out).expect("utf8 report");
     assert!(text.contains("\u{1b}[33m~\u{1b}[0m"), "report:\n{text}");
     assert!(text.contains("\u{1b}[36m$.a\u{1b}[0m"), "report:\n{text}");
@@ -1244,15 +1019,8 @@ fn semantic_diff_report_patch_writes_unified_hunks() {
     ];
     let summary = SemanticDiffSummary::from_diffs(&diffs);
     let mut out = Vec::new();
-    write_semantic_diff_report(
-        &mut out,
-        &diffs,
-        summary,
-        DiffOutputFormat::Patch,
-        false,
-        false,
-    )
-    .expect("patch report");
+    write_semantic_diff_report(&mut out, &diffs, summary, DiffOutputFormat::Patch, false, false)
+        .expect("patch report");
     let text = String::from_utf8(out).expect("utf8 report");
     assert!(text.contains("--- left"), "report:\n{text}");
     assert!(text.contains("+++ right"), "report:\n{text}");
@@ -1273,24 +1041,11 @@ fn semantic_diff_report_patch_uses_color_codes_when_enabled() {
     }];
     let summary = SemanticDiffSummary::from_diffs(&diffs);
     let mut out = Vec::new();
-    write_semantic_diff_report(
-        &mut out,
-        &diffs,
-        summary,
-        DiffOutputFormat::Patch,
-        false,
-        true,
-    )
-    .expect("patch report");
+    write_semantic_diff_report(&mut out, &diffs, summary, DiffOutputFormat::Patch, false, true)
+        .expect("patch report");
     let text = String::from_utf8(out).expect("utf8 report");
-    assert!(
-        text.contains("\u{1b}[31m--- left\u{1b}[0m"),
-        "report:\n{text}"
-    );
-    assert!(
-        text.contains("\u{1b}[36m@@ $.a @@\u{1b}[0m"),
-        "report:\n{text}"
-    );
+    assert!(text.contains("\u{1b}[31m--- left\u{1b}[0m"), "report:\n{text}");
+    assert!(text.contains("\u{1b}[36m@@ $.a @@\u{1b}[0m"), "report:\n{text}");
     assert!(text.contains("\u{1b}[32m+2\u{1b}[0m"), "report:\n{text}");
 }
 
@@ -1337,10 +1092,7 @@ fn resolve_query_input_and_library_paths_contract() {
     );
 
     let cli = parse_cli_for_test(&[".foo", "--input", "legacy.json"]);
-    assert_eq!(
-        resolve_input_path(&cli, None).expect("legacy input"),
-        "legacy.json"
-    );
+    assert_eq!(resolve_input_path(&cli, None).expect("legacy input"), "legacy.json");
 
     let mut cli = parse_cli_for_test(&[".foo", "file.json"]);
     cli.input_legacy = Some("legacy.json".to_string());
@@ -1350,15 +1102,9 @@ fn resolve_query_input_and_library_paths_contract() {
     let td = tempfile::TempDir::new().expect("tempdir");
     let query_file = td.path().join("q.jq");
     std::fs::write(&query_file, ".a").expect("write query file");
-    let cli = parse_cli_for_test(&[
-        "-f",
-        query_file.to_str().expect("utf8 query file"),
-        "input.json",
-    ]);
-    assert_eq!(
-        resolve_base_query(&cli).expect("query from file"),
-        ".a".to_string()
-    );
+    let cli =
+        parse_cli_for_test(&["-f", query_file.to_str().expect("utf8 query file"), "input.json"]);
+    assert_eq!(resolve_base_query(&cli).expect("query from file"), ".a".to_string());
     assert_eq!(
         resolve_positional_input(&cli).expect("file positional with -f"),
         Some("input.json".to_string())
@@ -1377,10 +1123,7 @@ fn resolve_query_input_and_library_paths_contract() {
     std::fs::create_dir_all(test_dir.join("modules")).expect("create modules dir");
     let discovered = resolve_run_tests_library_paths(
         &parse_cli_for_test(&["--run-tests", "x.test"]),
-        test_dir
-            .join("cases.test")
-            .to_str()
-            .expect("utf8 test path"),
+        test_dir.join("cases.test").to_str().expect("utf8 test path"),
     );
     assert_eq!(discovered.len(), 1);
     assert!(discovered[0].ends_with("/modules"));
@@ -1399,16 +1142,10 @@ fn requires_filter_for_interactive_stdin_contract() {
     assert!(!requires_filter_for_interactive_stdin(&null_input, true));
 
     let with_input_file = parse_cli_for_test(&[".", "input.json"]);
-    assert!(!requires_filter_for_interactive_stdin(
-        &with_input_file,
-        true
-    ));
+    assert!(!requires_filter_for_interactive_stdin(&with_input_file, true));
 
     let with_input_legacy = parse_cli_for_test(&[".", "--input", "input.json"]);
-    assert!(!requires_filter_for_interactive_stdin(
-        &with_input_legacy,
-        true
-    ));
+    assert!(!requires_filter_for_interactive_stdin(&with_input_legacy, true));
 }
 
 #[test]
@@ -1462,10 +1199,7 @@ fn custom_input_format_contract() {
         zq::DocMode::First,
     )
     .expect("csv json-cells parse");
-    assert_eq!(
-        csv_json_cells,
-        vec![serde_json::json!({"cases": [{"id": "jq_identity"}]})]
-    );
+    assert_eq!(csv_json_cells, vec![serde_json::json!({"cases": [{"id": "jq_identity"}]})]);
 
     let xml_cli = parse_cli_for_test(&["--input-format", "xml", ".catalog.book.title"]);
     let xml = build_custom_input_stream(
@@ -1474,10 +1208,7 @@ fn custom_input_format_contract() {
         zq::DocMode::First,
     )
     .expect("xml parse");
-    assert_eq!(
-        xml,
-        vec![serde_json::json!({"catalog":{"book":{"title":"Rust"}}})]
-    );
+    assert_eq!(xml, vec![serde_json::json!({"catalog":{"book":{"title":"Rust"}}})]);
 }
 
 #[test]
@@ -1498,10 +1229,7 @@ fn input_format_resolution_contract() {
         resolve_effective_input_format(InputFormat::Auto, "a.xml"),
         zq::NativeInputFormat::Xml
     );
-    assert_eq!(
-        resolve_effective_input_format(InputFormat::Auto, "-"),
-        zq::NativeInputFormat::Auto
-    );
+    assert_eq!(resolve_effective_input_format(InputFormat::Auto, "-"), zq::NativeInputFormat::Auto);
     assert_eq!(
         resolve_effective_input_format(InputFormat::Json, "a.csv"),
         zq::NativeInputFormat::Json
@@ -1544,35 +1272,20 @@ fn extra_output_formats_contract() {
         "catalog": {"book": {"title": "Rust", "price": 10}}
     }))])
     .expect("xml render");
-    assert_eq!(
-        xml,
-        "<catalog><book><title>Rust</title><price>10</price></book></catalog>"
-    );
+    assert_eq!(xml, "<catalog><book><title>Rust</title><price>10</price></book></catalog>");
 }
 
 #[test]
 fn structured_color_output_contract() {
     let yaml_colored =
         colorize_structured_output(OutputFormat::Yaml, "name: \"svc\" # note\n", true, None);
-    assert!(
-        yaml_colored.contains("\u{1b}[1;34mname"),
-        "yaml:\n{yaml_colored}"
-    );
-    assert!(
-        yaml_colored.contains("\u{1b}[0;32m\"svc\""),
-        "yaml:\n{yaml_colored}"
-    );
-    assert!(
-        yaml_colored.contains("\u{1b}[0;90m# note"),
-        "yaml:\n{yaml_colored}"
-    );
+    assert!(yaml_colored.contains("\u{1b}[1;34mname"), "yaml:\n{yaml_colored}");
+    assert!(yaml_colored.contains("\u{1b}[0;32m\"svc\""), "yaml:\n{yaml_colored}");
+    assert!(yaml_colored.contains("\u{1b}[0;90m# note"), "yaml:\n{yaml_colored}");
 
     let toml_colored =
         colorize_structured_output(OutputFormat::Toml, "[svc.api]\nport = 8080\n", true, None);
-    assert!(
-        toml_colored.contains("\u{1b}[1;34msvc.api"),
-        "toml:\n{toml_colored}"
-    );
+    assert!(toml_colored.contains("\u{1b}[1;34msvc.api"), "toml:\n{toml_colored}");
 
     let csv_colored = colorize_structured_output(OutputFormat::Csv, "a,b\nx,2\n", true, None);
     assert_eq!(csv_colored, "a,b\nx,2\n");
@@ -1580,6 +1293,21 @@ fn structured_color_output_contract() {
     let xml_colored =
         colorize_structured_output(OutputFormat::Xml, "<root><a>1</a></root>\n", true, None);
     assert_eq!(xml_colored, "<root><a>1</a></root>\n");
+}
+
+#[test]
+fn structured_color_output_handles_utf8_weird_sequences() {
+    let yaml = "ключ🙂: \"👩‍💻 café e\u{0301} 🇺🇳\"\n- имя: \"⚙️\"\n";
+    let yaml_colored = colorize_structured_output(OutputFormat::Yaml, yaml, true, None);
+    assert!(yaml_colored.contains("ключ🙂"), "yaml:\n{yaml_colored}");
+    assert!(yaml_colored.contains("👩‍💻"), "yaml:\n{yaml_colored}");
+    assert!(yaml_colored.contains("\u{1b}["), "yaml:\n{yaml_colored}");
+
+    let toml = "[секция.👩‍💻]\nзначение = \"e\u{0301}🙂\"\n";
+    let toml_colored = colorize_structured_output(OutputFormat::Toml, toml, true, None);
+    assert!(toml_colored.contains("секция.👩‍💻"), "toml:\n{toml_colored}");
+    assert!(toml_colored.contains("значение"), "toml:\n{toml_colored}");
+    assert!(toml_colored.contains("\u{1b}["), "toml:\n{toml_colored}");
 }
 
 #[test]
@@ -1637,26 +1365,14 @@ fn native_json_output_escapes_del_like_jq() {
 fn native_json_output_normalizes_non_finite_numbers_like_jq() {
     let nan = zq::NativeValue::Number(serde_json::Number::from_string_unchecked("nan".to_string()));
     let inf = zq::NativeValue::Number(serde_json::Number::from_string_unchecked("inf".to_string()));
-    let ninf = zq::NativeValue::Number(serde_json::Number::from_string_unchecked(
-        "-inf".to_string(),
-    ));
-    let values = vec![
-        nan.clone(),
-        inf.clone(),
-        ninf.clone(),
-        zq::NativeValue::Array(vec![nan, inf, ninf]),
-    ];
+    let ninf =
+        zq::NativeValue::Number(serde_json::Number::from_string_unchecked("-inf".to_string()));
+    let values =
+        vec![nan.clone(), inf.clone(), ninf.clone(), zq::NativeValue::Array(vec![nan, inf, ninf])];
 
     let mut buf = Vec::new();
-    write_json_output_native(
-        &mut buf,
-        &values,
-        true,
-        false,
-        false,
-        &JsonColorOptions::default(),
-    )
-    .expect("write native output");
+    write_json_output_native(&mut buf, &values, true, false, false, &JsonColorOptions::default())
+        .expect("write native output");
     assert_eq!(
             String::from_utf8(buf).expect("utf8"),
             "null\n1.7976931348623157e+308\n-1.7976931348623157e+308\n[null,1.7976931348623157e+308,-1.7976931348623157e+308]\n"
@@ -1719,9 +1435,7 @@ fn colored_rendering_and_engine_error_contract() {
 
 #[test]
 fn validate_jq_colors_accepts_valid_palette() {
-    assert!(validate_jq_colors(
-        "0;90:0;39:0;39:0;39:0;32:1;39:1;39:1;31"
-    ));
+    assert!(validate_jq_colors("0;90:0;39:0;39:0;39:0;32:1;39:1;39:1;31"));
     assert!(validate_jq_colors("4;31"));
     assert!(validate_jq_colors(":"));
     assert!(validate_jq_colors("::::::::"));
@@ -1732,15 +1446,9 @@ fn validate_jq_colors_accepts_valid_palette() {
 
 #[test]
 fn validate_jq_colors_rejects_invalid_palette() {
-    assert!(!validate_jq_colors(
-        "garbage;30:*;31:,;3^:0;$%:0;34:1;35:1;36"
-    ));
-    assert!(!validate_jq_colors(
-        "1234567890123456789;30:0;31:0;32:0;33:0;34:1;35:1;36"
-    ));
-    assert!(!validate_jq_colors(
-        "1234567890123456;1234567890123456:0;39:0;39:0;39:0;32:1;39:1;39"
-    ));
+    assert!(!validate_jq_colors("garbage;30:*;31:,;3^:0;$%:0;34:1;35:1;36"));
+    assert!(!validate_jq_colors("1234567890123456789;30:0;31:0;32:0;33:0;34:1;35:1;36"));
+    assert!(!validate_jq_colors("1234567890123456;1234567890123456:0;39:0;39:0;39:0;32:1;39:1;39"));
     assert!(!validate_jq_colors(
             "0123456789123:0123456789123:0123456789123:0123456789123:0123456789123:0123456789123:0123456789123:0123456789123:"
         ));
@@ -1769,19 +1477,11 @@ fn spool_cleanup_removes_stale_run_dirs_and_keeps_locked_ones() {
         .write(true)
         .open(locked_dir.join("run.lock"))
         .expect("create live lock");
-    live_lock
-        .try_lock_exclusive()
-        .expect("lock live run as active");
+    live_lock.try_lock_exclusive().expect("lock live run as active");
 
     SpoolManager::sweep_stale_runs(&root).expect("sweep stale runs");
-    assert!(
-        !stale_dir.exists(),
-        "stale run dir should be removed by startup cleanup"
-    );
-    assert!(
-        locked_dir.exists(),
-        "locked run dir must not be removed while process is active"
-    );
+    assert!(!stale_dir.exists(), "stale run dir should be removed by startup cleanup");
+    assert!(locked_dir.exists(), "locked run dir must not be removed while process is active");
     live_lock.unlock().expect("unlock live run");
 }
 
@@ -1819,10 +1519,7 @@ fn spool_manager_drop_cleans_its_run_dir() {
     let run_dir = {
         let manager = SpoolManager::new().expect("create spool manager");
         assert!(manager.run_dir.exists(), "run dir must exist while active");
-        assert!(
-            manager.run_dir.join("run.lock").exists(),
-            "run lock must exist"
-        );
+        assert!(manager.run_dir.join("run.lock").exists(), "run lock must exist");
         manager.run_dir.clone()
     };
 
@@ -1832,10 +1529,7 @@ fn spool_manager_drop_cleans_its_run_dir() {
         std::env::remove_var("ZQ_SPOOL_DIR");
     }
 
-    assert!(
-        !run_dir.exists(),
-        "run dir should be removed when manager is dropped"
-    );
+    assert!(!run_dir.exists(), "run dir should be removed when manager is dropped");
 }
 
 #[test]
@@ -1849,9 +1543,29 @@ fn resolve_spool_root_dir_uses_trimmed_env_or_temp_default() {
     assert_eq!(resolve_spool_root_dir(), custom.join("v1"));
 
     std::env::set_var("ZQ_SPOOL_DIR", "   ");
-    assert_eq!(
-        resolve_spool_root_dir(),
-        std::env::temp_dir().join("zq-spool/v1")
+    assert_eq!(resolve_spool_root_dir(), std::env::temp_dir().join("zq-spool/v1"));
+
+    if let Some(v) = prev {
+        std::env::set_var("ZQ_SPOOL_DIR", v);
+    } else {
+        std::env::remove_var("ZQ_SPOOL_DIR");
+    }
+}
+
+#[test]
+fn query_mode_without_stdin_keeps_spool_uninitialized() {
+    let _guard = env_lock();
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let spool_root = td.path().join("spool-root");
+    let prev = std::env::var_os("ZQ_SPOOL_DIR");
+    std::env::set_var("ZQ_SPOOL_DIR", &spool_root);
+
+    let cli = parse_cli_for_test(&["-n", ".", "--monochrome-output"]);
+    let status = run_with(cli, CliCompatArgs::default()).expect("run query mode");
+    assert_eq!(status, 0);
+    assert!(
+        !spool_root.join("v1").exists(),
+        "spool directory must stay absent when input is not read"
     );
 
     if let Some(v) = prev {
@@ -1899,10 +1613,7 @@ fn run_tests_mode_many_aggregates_statuses_for_multiple_files() {
     ]);
     let status = run_tests_mode_many(
         &cli,
-        &[
-            pass.to_string_lossy().to_string(),
-            fail.to_string_lossy().to_string(),
-        ],
+        &[pass.to_string_lossy().to_string(), fail.to_string_lossy().to_string()],
         &spool,
     )
     .expect("run-tests mode");
@@ -1928,12 +1639,8 @@ fn run_tests_mode_many_single_file_can_return_skip_overflow_status() {
     let pass = td.path().join("pass.test");
     std::fs::write(&pass, ".\n1\n1\n\n").expect("write pass suite");
 
-    let cli = parse_cli_for_test(&[
-        "--run-tests",
-        pass.to_str().expect("utf8 path"),
-        "--skip",
-        "10",
-    ]);
+    let cli =
+        parse_cli_for_test(&["--run-tests", pass.to_str().expect("utf8 path"), "--skip", "10"]);
     let status = run_tests_mode_many(&cli, &[pass.to_string_lossy().to_string()], &spool)
         .expect("run-tests mode");
     assert_eq!(status, 2, "skip past EOF must return status 2");
@@ -1983,14 +1690,8 @@ fn run_tests_helpers_cover_parsing_and_formatting_edges() {
     assert_eq!(trimmed, "abc");
     assert_eq!(strip_bom_prefix("abc"), "abc");
 
-    assert_eq!(
-        format_duration(std::time::Duration::from_millis(15)),
-        "15ms"
-    );
-    assert_eq!(
-        format_duration(std::time::Duration::from_millis(1200)),
-        "1.200s"
-    );
+    assert_eq!(format_duration(std::time::Duration::from_millis(15)), "15ms");
+    assert_eq!(format_duration(std::time::Duration::from_millis(1200)), "1.200s");
 
     let long = "x".repeat(500);
     let short = shorten_for_report(&long);
@@ -2000,18 +1701,12 @@ fn run_tests_helpers_cover_parsing_and_formatting_edges() {
 
 #[test]
 fn run_tests_number_lexeme_canonicalization_rejects_invalid_forms() {
-    assert_eq!(
-        canonicalize_run_tests_number_lexeme("20e-1"),
-        Some((false, "20".to_string(), -1))
-    );
+    assert_eq!(canonicalize_run_tests_number_lexeme("20e-1"), Some((false, "20".to_string(), -1)));
     assert_eq!(
         canonicalize_run_tests_number_lexeme("-001.2300"),
         Some((true, "12300".to_string(), -4))
     );
-    assert_eq!(
-        canonicalize_run_tests_number_lexeme("0.000"),
-        Some((false, "0".to_string(), 0))
-    );
+    assert_eq!(canonicalize_run_tests_number_lexeme("0.000"), Some((false, "0".to_string(), 0)));
 
     assert_eq!(canonicalize_run_tests_number_lexeme(""), None);
     assert_eq!(canonicalize_run_tests_number_lexeme("-"), None);

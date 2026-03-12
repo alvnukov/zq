@@ -34,12 +34,7 @@ fn parse_csv_native_rows_with_delimiter(input: &str, delimiter: u8) -> Result<Ve
         .delimiter(delimiter)
         .from_reader(input.as_bytes());
     let headers = if has_headers {
-        Some(
-            reader
-                .headers()
-                .map_err(|e| Error::Runtime(format!("csv: {e}")))?
-                .clone(),
-        )
+        Some(reader.headers().map_err(|e| Error::Runtime(format!("csv: {e}")))?.clone())
     } else {
         None
     };
@@ -55,10 +50,8 @@ fn parse_csv_native_rows_with_delimiter(input: &str, delimiter: u8) -> Result<Ve
             }
             out.push(ZqValue::from_json(JsonValue::Object(obj)));
         } else {
-            let arr = record
-                .iter()
-                .map(|value| JsonValue::String(value.to_string()))
-                .collect::<Vec<_>>();
+            let arr =
+                record.iter().map(|value| JsonValue::String(value.to_string())).collect::<Vec<_>>();
             out.push(ZqValue::from_json(JsonValue::Array(arr)));
         }
     }
@@ -85,12 +78,8 @@ fn csv_rows_look_like_header(rows: &[csv::StringRecord]) -> bool {
 }
 
 fn detect_csv_delimiter(input: &str, require_multiple_lines: bool) -> Option<u8> {
-    let lines = input
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .take(8)
-        .collect::<Vec<_>>();
+    let lines =
+        input.lines().map(str::trim).filter(|line| !line.is_empty()).take(8).collect::<Vec<_>>();
     if lines.is_empty() || (require_multiple_lines && lines.len() < 2) {
         return None;
     }
@@ -99,10 +88,7 @@ fn detect_csv_delimiter(input: &str, require_multiple_lines: bool) -> Option<u8>
     let mut best: Option<(u8, usize)> = None;
     for delimiter in candidates {
         let split_count = |line: &str| line.split(delimiter as char).count();
-        let counts = lines
-            .iter()
-            .map(|line| split_count(line))
-            .collect::<Vec<_>>();
+        let counts = lines.iter().map(|line| split_count(line)).collect::<Vec<_>>();
         let max_fields = counts.iter().copied().max().unwrap_or(1);
         if max_fields < 2 {
             continue;
@@ -115,10 +101,7 @@ fn detect_csv_delimiter(input: &str, require_multiple_lines: bool) -> Option<u8>
             continue;
         }
         let score = max_fields * matching_lines;
-        if best
-            .map(|(_, best_score)| score > best_score)
-            .unwrap_or(true)
-        {
+        if best.map(|(_, best_score)| score > best_score).unwrap_or(true) {
             best = Some((delimiter, score));
         }
     }

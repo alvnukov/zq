@@ -128,9 +128,7 @@ pub(super) fn extract_cli_compat_args(
                 )?;
                 let name = name_raw.to_string();
                 let values = read_slurpfile_values(path_raw)?;
-                compat
-                    .named_vars
-                    .insert(name, zq::NativeValue::Array(values));
+                compat.named_vars.insert(name, zq::NativeValue::Array(values));
                 i += 3;
             }
             "--rawfile" => {
@@ -138,9 +136,7 @@ pub(super) fn extract_cli_compat_args(
                     parse_named_arg_pair(&args, i, "--rawfile requires two arguments: NAME FILE")?;
                 let name = name_raw.to_string();
                 let value = fs::read_to_string(path_raw)?;
-                compat
-                    .named_vars
-                    .insert(name, zq::NativeValue::String(value));
+                compat.named_vars.insert(name, zq::NativeValue::String(value));
                 i += 3;
             }
             "--args" => {

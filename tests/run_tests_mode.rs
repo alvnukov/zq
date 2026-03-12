@@ -92,11 +92,7 @@ fn run_tests_mode_multiple_files_repeated_flag() {
     let text = stdout_text(&out);
     assert!(text.contains("== run-tests [1/2]:"), "stdout:\n{text}");
     assert!(text.contains("== run-tests [2/2]:"), "stdout:\n{text}");
-    assert_eq!(
-        text.matches("1 of 1 tests passed").count(),
-        2,
-        "stdout:\n{text}"
-    );
+    assert_eq!(text.matches("1 of 1 tests passed").count(), 2, "stdout:\n{text}");
 }
 
 #[test]
@@ -111,11 +107,7 @@ fn run_tests_mode_multiple_files_comma_list() {
     let out = run_zq(&["--run-tests", &list_arg]);
     assert_success(&out);
     let text = stdout_text(&out);
-    assert_eq!(
-        text.matches("1 of 1 tests passed").count(),
-        2,
-        "stdout:\n{text}"
-    );
+    assert_eq!(text.matches("1 of 1 tests passed").count(), 2, "stdout:\n{text}");
 }
 
 #[test]

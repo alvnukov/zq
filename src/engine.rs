@@ -71,10 +71,7 @@ pub enum YamlAnchorNameMode {
 
 impl Default for QueryOptions {
     fn default() -> Self {
-        Self {
-            doc_mode: DocMode::First,
-            library_path: Vec::new(),
-        }
+        Self { doc_mode: DocMode::First, library_path: Vec::new() }
     }
 }
 
@@ -87,11 +84,7 @@ pub enum Error {
     #[error("invalid --doc-mode '{0}' (expected first|all|index)")]
     InvalidDocMode(String),
     #[error("{tool}: --doc-index={index} is out of range for {total} document(s)")]
-    DocIndexOutOfRange {
-        tool: &'static str,
-        index: usize,
-        total: usize,
-    },
+    DocIndexOutOfRange { tool: &'static str, index: usize, total: usize },
     #[error("encode json: {0}")]
     OutputEncode(String),
     #[error("encode yaml: {0}")]
@@ -120,11 +113,7 @@ pub fn run_jq_native(
     options: QueryOptions,
 ) -> Result<Vec<ZqValue>, Error> {
     let stream = parse_jq_input_values_native(input, options.doc_mode, "jq")?;
-    Ok(crate::query::run_query_stream_native_with_paths(
-        query,
-        stream,
-        &options.library_path,
-    )?)
+    Ok(crate::query::run_query_stream_native_with_paths(query, stream, &options.library_path)?)
 }
 
 pub fn run_jq_stream_with_paths_options(
@@ -134,16 +123,12 @@ pub fn run_jq_stream_with_paths_options(
     run_options: RunOptions,
 ) -> Result<Vec<JsonValue>, Error> {
     let native_inputs = json_values_to_native(input_stream);
-    Ok(native_values_to_json(
-        crate::query::run_query_stream_native_with_paths_and_options(
-            query,
-            native_inputs,
-            library_path,
-            crate::query::RunOptions {
-                null_input: run_options.null_input,
-            },
-        )?,
-    ))
+    Ok(native_values_to_json(crate::query::run_query_stream_native_with_paths_and_options(
+        query,
+        native_inputs,
+        library_path,
+        crate::query::RunOptions { null_input: run_options.null_input },
+    )?))
 }
 
 pub fn run_jq_stream_with_paths_options_native(
@@ -152,16 +137,12 @@ pub fn run_jq_stream_with_paths_options_native(
     library_path: &[String],
     run_options: RunOptions,
 ) -> Result<Vec<ZqValue>, Error> {
-    Ok(
-        crate::query::run_query_stream_native_with_paths_and_options(
-            query,
-            input_stream,
-            library_path,
-            crate::query::RunOptions {
-                null_input: run_options.null_input,
-            },
-        )?,
-    )
+    Ok(crate::query::run_query_stream_native_with_paths_and_options(
+        query,
+        input_stream,
+        library_path,
+        crate::query::RunOptions { null_input: run_options.null_input },
+    )?)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,9 +181,7 @@ where
     match crate::native_engine::try_execute_stream_native(
         query,
         input_stream,
-        crate::native_engine::RunOptions {
-            null_input: run_options.null_input,
-        },
+        crate::native_engine::RunOptions { null_input: run_options.null_input },
         emit,
     ) {
         crate::native_engine::TryExecuteStream::Unsupported => {
@@ -327,9 +306,12 @@ pub fn parse_jq_input_values_with_format(
     tool: &'static str,
     input_format: crate::query::InputFormat,
 ) -> Result<Vec<JsonValue>, Error> {
-    Ok(native_values_to_json(
-        parse_jq_input_values_with_format_native(input, doc_mode, tool, input_format)?,
-    ))
+    Ok(native_values_to_json(parse_jq_input_values_with_format_native(
+        input,
+        doc_mode,
+        tool,
+        input_format,
+    )?))
 }
 
 fn json_values_to_native(values: Vec<JsonValue>) -> Vec<ZqValue> {
@@ -366,9 +348,7 @@ pub fn parse_jq_input_values_with_format_native(
 }
 
 pub fn parse_jq_json_values_only(input: &str) -> Result<Vec<JsonValue>, Error> {
-    Ok(native_values_to_json(parse_jq_json_values_only_native(
-        input,
-    )?))
+    Ok(native_values_to_json(parse_jq_json_values_only_native(input)?))
 }
 
 pub fn parse_jq_json_values_only_native(input: &str) -> Result<Vec<ZqValue>, Error> {
@@ -615,10 +595,7 @@ fn find_keyword_location(query: &str, keyword: &str) -> Option<KeywordLocation> 
                     .next()
                     .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
             if before_ok && after_ok {
-                return Some(KeywordLocation {
-                    line: line_idx + 1,
-                    col: col + 1,
-                });
+                return Some(KeywordLocation { line: line_idx + 1, col: col + 1 });
             }
             start = after_idx;
         }
@@ -631,21 +608,15 @@ fn render_jq_keyword_context(
     location: KeywordLocation,
     caret_len: usize,
 ) -> Option<String> {
-    let line = query
-        .lines()
-        .nth(location.line.saturating_sub(1))?
-        .trim_end_matches('\r');
+    let line = query.lines().nth(location.line.saturating_sub(1))?.trim_end_matches('\r');
     let pointer_pad = " ".repeat(location.col.saturating_sub(1));
     let carets = "^".repeat(caret_len);
     Some(format!("    {line}\n    {pointer_pad}{carets}"))
 }
 
 fn format_unsupported_compile_error(tool: &str, query: &str, input: &str, msg: &str) -> String {
-    let (source_name, source_text) = if !query.is_empty() {
-        ("<query>", query)
-    } else {
-        ("<stdin>", input)
-    };
+    let (source_name, source_text) =
+        if !query.is_empty() { ("<query>", query) } else { ("<stdin>", input) };
     let display_msg = normalize_unsupported_message(msg);
     let (line, col) = find_error_start(msg, source_text).unwrap_or((1, 1));
     let ctx = render_cargo_like_context(source_name, source_text, line, col);
@@ -749,10 +720,7 @@ fn render_cargo_like_context(
         return String::new();
     }
     let lines: Vec<&str> = source_text.lines().collect();
-    let line_text = lines
-        .get(line.saturating_sub(1))
-        .copied()
-        .unwrap_or_default();
+    let line_text = lines.get(line.saturating_sub(1)).copied().unwrap_or_default();
     let width = line.to_string().len().max(1);
     let caret_pad = col.saturating_sub(1);
     format!(
@@ -784,10 +752,7 @@ fn format_json_parse_error(tool: &str, input: &str, err: &serde_json::Error) -> 
         strip_serde_line_col_suffix(&raw).to_string()
     };
 
-    format!(
-        "{tool}: parse error: {message} at line {}, column {col}",
-        err.line()
-    )
+    format!("{tool}: parse error: {message} at line {}, column {col}", err.line())
 }
 
 fn format_object_key_parse_error(input: &str, err: &serde_json::Error) -> Option<String> {
@@ -796,9 +761,7 @@ fn format_object_key_parse_error(input: &str, err: &serde_json::Error) -> Option
     let offending = offending.to_string();
     match prev {
         '{' => Some(format!("Expected string key after '{{', not '{offending}'")),
-        ',' => Some(format!(
-            "Expected string key after ',' in object, not '{offending}'"
-        )),
+        ',' => Some(format!("Expected string key after ',' in object, not '{offending}'")),
         _ => None,
     }
 }
@@ -859,11 +822,7 @@ fn select_docs_native(
         DocMode::First => Ok(docs.into_iter().next().into_iter().collect()),
         DocMode::Index(i) => {
             if i >= docs.len() {
-                return Err(Error::DocIndexOutOfRange {
-                    tool,
-                    index: i,
-                    total: docs.len(),
-                });
+                return Err(Error::DocIndexOutOfRange { tool, index: i, total: docs.len() });
             }
             Ok(vec![docs.swap_remove(i)])
         }

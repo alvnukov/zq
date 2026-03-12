@@ -11,45 +11,18 @@ struct BenchCase {
 }
 
 const CASES: &[BenchCase] = &[
-    BenchCase {
-        name: "id",
-        query: ".id",
-    },
-    BenchCase {
-        name: "mod",
-        query: ".value % 7",
-    },
-    BenchCase {
-        name: "gsub",
-        query: r#".text | gsub("[aeiou]";"")"#,
-    },
-    BenchCase {
-        name: "pick",
-        query: "{id,group,value}",
-    },
-    BenchCase {
-        name: "add",
-        query: ".a + .b",
-    },
-    BenchCase {
-        name: "length",
-        query: ".tags | length",
-    },
-    BenchCase {
-        name: "filter_gt",
-        query: "select(.id > 2) | .id",
-    },
-    BenchCase {
-        name: "filter_pick",
-        query: "select(.id > 2) | {id,group,value}",
-    },
+    BenchCase { name: "id", query: ".id" },
+    BenchCase { name: "mod", query: ".value % 7" },
+    BenchCase { name: "gsub", query: r#".text | gsub("[aeiou]";"")"# },
+    BenchCase { name: "pick", query: "{id,group,value}" },
+    BenchCase { name: "add", query: ".a + .b" },
+    BenchCase { name: "length", query: ".tags | length" },
+    BenchCase { name: "filter_gt", query: "select(.id > 2) | .id" },
+    BenchCase { name: "filter_pick", query: "select(.id > 2) | {id,group,value}" },
 ];
 
 fn bench_rows() -> usize {
-    env::var("BENCH_ROWS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(200_000)
+    env::var("BENCH_ROWS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(200_000)
 }
 
 fn dataset() -> &'static Vec<JsonValue> {
@@ -114,32 +87,20 @@ fn bench_native_engine(c: &mut Criterion) {
         );
         let seq_count = run_native_count_with_mode("0", case.query, inputs).expect("seq count");
         let par_count = run_native_count_with_mode("1", case.query, inputs).expect("par count");
-        assert_eq!(
-            seq_count, par_count,
-            "seq/par count mismatch for case={}",
-            case.name
-        );
+        assert_eq!(seq_count, par_count, "seq/par count mismatch for case={}", case.name);
 
-        group.bench_with_input(
-            BenchmarkId::new("seq", case.name),
-            &case.query,
-            |b, query| {
-                b.iter(|| {
-                    let n = run_native_count_with_mode("0", query, inputs).expect("seq bench run");
-                    black_box(n)
-                })
-            },
-        );
-        group.bench_with_input(
-            BenchmarkId::new("par", case.name),
-            &case.query,
-            |b, query| {
-                b.iter(|| {
-                    let n = run_native_count_with_mode("1", query, inputs).expect("par bench run");
-                    black_box(n)
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("seq", case.name), &case.query, |b, query| {
+            b.iter(|| {
+                let n = run_native_count_with_mode("0", query, inputs).expect("seq bench run");
+                black_box(n)
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("par", case.name), &case.query, |b, query| {
+            b.iter(|| {
+                let n = run_native_count_with_mode("1", query, inputs).expect("par bench run");
+                black_box(n)
+            })
+        });
     }
 
     env::remove_var("ZQ_NATIVE_PAR");

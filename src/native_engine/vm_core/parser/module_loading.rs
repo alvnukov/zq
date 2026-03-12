@@ -30,9 +30,7 @@ impl Parser {
             self.module_query_cache.clone(),
         );
         let parsed = parser.parse_query()?;
-        self.module_query_cache
-            .borrow_mut()
-            .insert(module_path, parsed.clone());
+        self.module_query_cache.borrow_mut().insert(module_path, parsed.clone());
         Ok(parsed)
     }
 

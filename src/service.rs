@@ -106,6 +106,19 @@ pub fn run() -> Result<i32, Error> {
     run_with(cli, compat_args)
 }
 
+pub(super) fn cli_error_tool_name() -> &'static str {
+    if std::env::var("ZQ_COMPAT_TOOL")
+        .ok()
+        .is_some_and(|value| value.eq_ignore_ascii_case("jq"))
+    {
+        return "jq";
+    }
+    if std::env::var("ZQ_COLOR_COMPAT").ok().as_deref() == Some("jq171") {
+        return "jq";
+    }
+    "zq"
+}
+
 fn run_cli_command(command: &CliCommand) -> Result<i32, Error> {
     match command {
         CliCommand::Completion { shell } => {
@@ -196,14 +209,12 @@ impl InputData {
 }
 
 fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
-    let spool = SpoolManager::new()?;
-
+    let tool = cli_error_tool_name();
     if cli.diff && !cli.run_tests.is_empty() {
-        return Err(Error::Query(
-            "--diff mode cannot be combined with --run-tests".to_string(),
-        ));
+        return Err(Error::Query("--diff mode cannot be combined with --run-tests".to_string()));
     }
     if !cli.run_tests.is_empty() {
+        let spool = SpoolManager::new()?;
         let mut paths: Vec<String> = cli
             .run_tests
             .iter()
@@ -217,6 +228,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         return run_tests_mode_many(&cli, &paths, &spool);
     }
     if cli.diff {
+        let spool = SpoolManager::new()?;
         return run_diff_mode(&cli, &spool);
     }
 
@@ -259,14 +271,10 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         ));
     }
     if !cli.yaml_anchors && !matches!(cli.yaml_anchor_name_mode, CliYamlAnchorNameMode::Friendly) {
-        return Err(Error::Query(
-            "--yaml-anchor-name-mode requires --yaml-anchors".to_string(),
-        ));
+        return Err(Error::Query("--yaml-anchor-name-mode requires --yaml-anchors".to_string()));
     }
     if cli.raw_output0 && cli.join_output {
-        return Err(Error::Query(
-            "--raw-output0 is incompatible with --join-output".to_string(),
-        ));
+        return Err(Error::Query("--raw-output0 is incompatible with --join-output".to_string()));
     }
 
     let color_opts = resolve_json_color_options(&cli);
@@ -277,7 +285,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
 
     if cli.debug_dump_disasm {
         let labels = zq::debug_dump_disasm_function_labels(query.as_str(), &cli.library_path)
-            .map_err(|e| Error::Query(render_engine_error("zq", query.as_str(), "", e)))?;
+            .map_err(|e| Error::Query(render_engine_error(tool, query.as_str(), "", e)))?;
         if !labels.is_empty() {
             let stdout = io::stdout();
             let mut writer = io::BufWriter::new(stdout.lock());
@@ -291,6 +299,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
 
     let can_native_stream_direct = matches!(cli.output_format, OutputFormat::Json)
         && matches!(effective_input_format, zq::NativeInputFormat::Auto)
+        && tool == "zq"
         && !cli.raw_output0
         && !cli.exit_status
         && !cli.raw_input
@@ -301,10 +310,13 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         && !cli.stream_errors;
 
     if can_native_stream_direct {
+        const IO_BUFFER_CAP: usize = 64 * 1024;
         let stdout = io::stdout();
-        let mut writer = io::BufWriter::new(stdout.lock());
+        let mut writer = io::BufWriter::with_capacity(IO_BUFFER_CAP, stdout.lock());
         let mut wrote_any = false;
         let mut json_scratch = Vec::new();
+        let mut recycle_ctx = zq::NativeValueRecycleContext::default();
+        let _active_recycle_ctx = zq::install_active_native_value_recycle_context(&mut recycle_ctx);
         let native_pretty_indent = if cli.compact || color_opts.enabled {
             None
         } else {
@@ -312,9 +324,9 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         };
 
         let reader: Box<dyn io::Read + Send> = if input_path == "-" {
-            Box::new(io::stdin())
+            Box::new(io::BufReader::with_capacity(IO_BUFFER_CAP, io::stdin()))
         } else {
-            Box::new(fs::File::open(&input_path)?)
+            Box::new(io::BufReader::with_capacity(IO_BUFFER_CAP, fs::File::open(&input_path)?))
         };
 
         zq::try_run_jq_native_stream_json_reader_options_native(
@@ -335,11 +347,12 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                     &color_opts,
                 )
                 .map_err(|e| e.to_string())?;
+                recycle_ctx.recycle(value);
                 wrote_any = true;
                 Ok(())
             },
         )
-        .map_err(|e| Error::Query(render_engine_error("zq", query.as_str(), "", e)))?;
+        .map_err(|e| Error::Query(render_engine_error(tool, query.as_str(), "", e)))?;
 
         if wrote_any {
             if !cli.join_output {
@@ -357,10 +370,11 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         && !cli.stream
         && !cli.stream_errors
         && !query_uses_inputs_builtin(base_query.as_str());
+    let mut spool = None;
     let input_data = if skip_input_read {
         InputData::Owned(String::new())
     } else {
-        read_input(&input_path, &spool)?
+        read_input_lazy(&input_path, &mut spool)?
     };
     let input_text = input_data.as_str_lossy();
     let input = input_text.as_ref();
@@ -393,28 +407,20 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                     vec![stream_error_value_from_json_error_native(input, &json_err)]
                 }
                 Err(err) => {
-                    return Err(Error::Query(render_engine_error(
-                        "zq",
-                        query.as_str(),
-                        input,
-                        err,
-                    )))
+                    return Err(Error::Query(render_engine_error(tool, query.as_str(), input, err)))
                 }
             }
         } else {
             build_custom_input_stream_native(&cli, input, doc_mode, effective_input_format)
-                .map_err(|e| Error::Query(render_engine_error("zq", query.as_str(), input, e)))?
+                .map_err(|e| Error::Query(render_engine_error(tool, query.as_str(), input, e)))?
         };
 
         if cli.seq && cli.null_input && query_uses_inputs_builtin(&query) && !seq_errors.is_empty()
         {
-            return Err(Error::Query(format!(
-                "zq: error (at <stdin>:1): {}",
-                seq_errors[0]
-            )));
+            return Err(Error::Query(format!("{tool}: error (at <stdin>:1): {}", seq_errors[0])));
         }
         for err in &seq_errors {
-            eprintln!("zq: ignoring parse error: {err}");
+            eprintln!("{tool}: ignoring parse error: {err}");
         }
 
         if cli.slurp && !cli.raw_input {
@@ -424,19 +430,14 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
             query.as_str(),
             inputs,
             &cli.library_path,
-            zq::EngineRunOptions {
-                null_input: cli.null_input,
-            },
+            zq::EngineRunOptions { null_input: cli.null_input },
         )
-        .map_err(|e| Error::Query(render_engine_error("zq", query.as_str(), input, e)))?;
+        .map_err(|e| Error::Query(render_engine_error(tool, query.as_str(), input, e)))?;
         native_out
     } else {
-        let options = zq::QueryOptions {
-            doc_mode,
-            library_path: cli.library_path.clone(),
-        };
+        let options = zq::QueryOptions { doc_mode, library_path: cli.library_path.clone() };
         let native_out = zq::run_jq_native(query.as_str(), input, options)
-            .map_err(|e| Error::Query(render_engine_error("zq", query.as_str(), input, e)))?;
+            .map_err(|e| Error::Query(render_engine_error(tool, query.as_str(), input, e)))?;
         native_out
     };
     if cli.raw_output0 {
@@ -570,9 +571,26 @@ fn exit_status_from_outputs(outputs: &[JsonValue]) -> i32 {
     }
 }
 
+fn ensure_spool_manager(spool: &mut Option<SpoolManager>) -> Result<&SpoolManager, Error> {
+    if spool.is_none() {
+        *spool = Some(SpoolManager::new()?);
+    }
+    Ok(spool.as_ref().expect("spool manager must be initialized"))
+}
+
 fn read_input(path: &str, spool: &SpoolManager) -> Result<InputData, Error> {
     if path == "-" {
         return spool.read_stdin_into_mmap();
+    }
+    let file = fs::File::open(path)?;
+    // Memory-map regular files to avoid a full read+copy before parsing.
+    let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
+    Ok(InputData::Mapped(mmap))
+}
+
+fn read_input_lazy(path: &str, spool: &mut Option<SpoolManager>) -> Result<InputData, Error> {
+    if path == "-" {
+        return ensure_spool_manager(spool)?.read_stdin_into_mmap();
     }
     let file = fs::File::open(path)?;
     // Memory-map regular files to avoid a full read+copy before parsing.

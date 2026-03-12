@@ -118,18 +118,12 @@ mod fixture_support {
                         })
                     })
                     .collect::<Vec<_>>();
-                PreparedFixtureCase {
-                    expected_input,
-                    outputs,
-                }
+                PreparedFixtureCase { expected_input, outputs }
             })
             .collect::<Vec<_>>();
 
         let prepared = Arc::new(prepared);
-        cache
-            .lock()
-            .expect("fixture cache lock poisoned")
-            .insert(key, prepared.clone());
+        cache.lock().expect("fixture cache lock poisoned").insert(key, prepared.clone());
         Some(prepared)
     }
 
@@ -498,10 +492,7 @@ mod legacy_compat {
 
     fn parse_fold_source(source: &str) -> Option<FoldSource> {
         let trimmed = source.trim();
-        let compact = trimmed
-            .chars()
-            .filter(|c| !c.is_ascii_whitespace())
-            .collect::<String>();
+        let compact = trimmed.chars().filter(|c| !c.is_ascii_whitespace()).collect::<String>();
 
         if compact == "inputs" {
             return Some(FoldSource::Inputs);
@@ -510,9 +501,7 @@ mod legacy_compat {
             return Some(FoldSource::InputSelf);
         }
         if compact == ".[]" {
-            return Some(FoldSource::InputEach {
-                negate_items: false,
-            });
+            return Some(FoldSource::InputEach { negate_items: false });
         }
         if compact == "-.[]" {
             return Some(FoldSource::InputEach { negate_items: true });
@@ -520,10 +509,7 @@ mod legacy_compat {
         if compact == ".[]/.[]" {
             return Some(FoldSource::InputDivCross);
         }
-        if let Some(arg) = compact
-            .strip_prefix("range(")
-            .and_then(|rest| rest.strip_suffix(')'))
-        {
+        if let Some(arg) = compact.strip_prefix("range(").and_then(|rest| rest.strip_suffix(')')) {
             if let Ok(end) = arg.parse::<i64>() {
                 return Some(FoldSource::Range(end));
             }
@@ -722,9 +708,7 @@ mod legacy_compat {
                 return Some(expr);
             }
             if self.peek_char() == Some('"') {
-                return Some(FoldExpr::Literal(JsonValue::String(
-                    self.parse_json_string()?,
-                )));
+                return Some(FoldExpr::Literal(JsonValue::String(self.parse_json_string()?)));
             }
             if self.peek_char() == Some('[') {
                 return Some(FoldExpr::Literal(self.parse_balanced_json('[', ']')?));
@@ -1069,10 +1053,9 @@ mod legacy_compat {
             FoldAccessor::Field(key) => match value {
                 JsonValue::Object(map) => Ok(map.get(key).cloned().unwrap_or(JsonValue::Null)),
                 JsonValue::Null => Ok(JsonValue::Null),
-                other => Err(Error::Runtime(format!(
-                    "Cannot index {} with string",
-                    kind_name(&other)
-                ))),
+                other => {
+                    Err(Error::Runtime(format!("Cannot index {} with string", kind_name(&other))))
+                }
             },
             FoldAccessor::Index(index) => match value {
                 JsonValue::Array(items) => {
@@ -1085,10 +1068,9 @@ mod legacy_compat {
                     }
                 }
                 JsonValue::Null => Ok(JsonValue::Null),
-                other => Err(Error::Runtime(format!(
-                    "Cannot index {} with number",
-                    kind_name(&other)
-                ))),
+                other => {
+                    Err(Error::Runtime(format!("Cannot index {} with number", kind_name(&other))))
+                }
             },
         }
     }
@@ -1110,34 +1092,17 @@ mod legacy_compat {
     enum IterHelperExpr {
         Array(Vec<IterHelperExpr>),
         TryCatch(Box<IterHelperExpr>),
-        Limit {
-            counts: Vec<i64>,
-            generator: IterGenerator,
-        },
-        Skip {
-            counts: Vec<i64>,
-            generator: IterGenerator,
-        },
-        Nth {
-            indices: Vec<i64>,
-            generator: IterGenerator,
-        },
-        First {
-            generator: IterGenerator,
-        },
-        Last {
-            generator: IterGenerator,
-        },
+        Limit { counts: Vec<i64>, generator: IterGenerator },
+        Skip { counts: Vec<i64>, generator: IterGenerator },
+        Nth { indices: Vec<i64>, generator: IterGenerator },
+        First { generator: IterGenerator },
+        Last { generator: IterGenerator },
     }
 
     #[derive(Debug, Clone, PartialEq)]
     enum IterGenerator {
         InputValues,
-        Range {
-            start: IterRangeArg,
-            stop: IterRangeArg,
-            step: IterRangeArg,
-        },
+        Range { start: IterRangeArg, stop: IterRangeArg, step: IterRangeArg },
         Sequence(Vec<IterGenTerm>),
     }
 
@@ -1195,9 +1160,7 @@ mod legacy_compat {
         let source = query.trim();
 
         if let Some(inner) = parse_try_catch_dot(source) {
-            return Some(IterHelperExpr::TryCatch(Box::new(
-                parse_iterator_helper_expr(inner)?,
-            )));
+            return Some(IterHelperExpr::TryCatch(Box::new(parse_iterator_helper_expr(inner)?)));
         }
 
         if let Some(inner) = strip_outer_brackets(source) {
@@ -1243,15 +1206,11 @@ mod legacy_compat {
         }
 
         if let Some(args) = parse_named_call(source, "first") {
-            return Some(IterHelperExpr::First {
-                generator: parse_iter_generator(args)?,
-            });
+            return Some(IterHelperExpr::First { generator: parse_iter_generator(args)? });
         }
 
         if let Some(args) = parse_named_call(source, "last") {
-            return Some(IterHelperExpr::Last {
-                generator: parse_iter_generator(args)?,
-            });
+            return Some(IterHelperExpr::Last { generator: parse_iter_generator(args)? });
         }
 
         None
@@ -1408,9 +1367,7 @@ mod legacy_compat {
         let mut out = Vec::new();
         for &count in counts {
             if count < 0 {
-                return Err(Error::Runtime(
-                    "limit doesn't support negative count".to_string(),
-                ));
+                return Err(Error::Runtime("limit doesn't support negative count".to_string()));
             }
             if count == 0 {
                 continue;
@@ -1439,9 +1396,7 @@ mod legacy_compat {
         let mut out = Vec::new();
         for &count in counts {
             if count < 0 {
-                return Err(Error::Runtime(
-                    "skip doesn't support negative count".to_string(),
-                ));
+                return Err(Error::Runtime("skip doesn't support negative count".to_string()));
             }
             let mut cursor = build_iter_cursor(generator, input)?;
             let mut remaining = count;
@@ -1464,9 +1419,7 @@ mod legacy_compat {
         let mut out = Vec::new();
         for &idx in indices {
             if idx < 0 {
-                return Err(Error::Runtime(
-                    "nth doesn't support negative indices".to_string(),
-                ));
+                return Err(Error::Runtime("nth doesn't support negative indices".to_string()));
             }
             let mut cursor = build_iter_cursor(generator, input)?;
             let mut remaining = idx;
@@ -1511,10 +1464,9 @@ mod legacy_compat {
         input: &JsonValue,
     ) -> Result<IterCursor, Error> {
         let items = match generator {
-            IterGenerator::InputValues => iter_values(input)?
-                .into_iter()
-                .map(IterCursorItem::Value)
-                .collect(),
+            IterGenerator::InputValues => {
+                iter_values(input)?.into_iter().map(IterCursorItem::Value).collect()
+            }
             IterGenerator::Range { start, stop, step } => {
                 let start = eval_iter_range_arg(start, input)?;
                 let stop = eval_iter_range_arg(stop, input)?;
@@ -1620,10 +1572,7 @@ mod legacy_compat {
         let threshold_value = parse_jsonish_value(captures.get(2)?.as_str()).ok()?;
         let threshold = threshold_value.as_f64()?;
         let tail_value = parse_jsonish_value(captures.get(4)?.as_str()).ok()?;
-        Some(LabelBreakCollectSpec {
-            threshold,
-            tail_value,
-        })
+        Some(LabelBreakCollectSpec { threshold, tail_value })
     }
 
     fn execute_label_break_collect(
@@ -1660,12 +1609,8 @@ mod legacy_compat {
                 .expect("valid while collect regex")
         });
         let captures = re.captures(query.trim())?;
-        let limit = parse_jsonish_value(captures.get(1)?.as_str())
-            .ok()?
-            .as_f64()?;
-        let factor = parse_jsonish_value(captures.get(2)?.as_str())
-            .ok()?
-            .as_f64()?;
+        let limit = parse_jsonish_value(captures.get(1)?.as_str()).ok()?.as_f64()?;
+        let factor = parse_jsonish_value(captures.get(2)?.as_str()).ok()?.as_f64()?;
         Some(NumericWhileCollectSpec { limit, factor })
     }
 
@@ -1706,20 +1651,10 @@ mod legacy_compat {
             .expect("valid until/mul collect regex")
     });
         let captures = re.captures(query.trim())?;
-        let init_acc = parse_jsonish_value(captures.get(1)?.as_str())
-            .ok()?
-            .as_f64()?;
-        let stop_threshold = parse_jsonish_value(captures.get(2)?.as_str())
-            .ok()?
-            .as_f64()?;
-        let decrement = parse_jsonish_value(captures.get(3)?.as_str())
-            .ok()?
-            .as_f64()?;
-        Some(UntilMulCollectSpec {
-            init_acc,
-            stop_threshold,
-            decrement,
-        })
+        let init_acc = parse_jsonish_value(captures.get(1)?.as_str()).ok()?.as_f64()?;
+        let stop_threshold = parse_jsonish_value(captures.get(2)?.as_str()).ok()?.as_f64()?;
+        let decrement = parse_jsonish_value(captures.get(3)?.as_str()).ok()?.as_f64()?;
+        Some(UntilMulCollectSpec { init_acc, stop_threshold, decrement })
     }
 
     fn execute_until_mul_collect(
@@ -1752,18 +1687,9 @@ mod legacy_compat {
 
     #[derive(Debug, Clone, PartialEq)]
     enum ModuleStubSpec {
-        IncludeEmpty {
-            module: String,
-        },
-        ImportCheckTrue {
-            module: String,
-            alias: String,
-            symbol: String,
-        },
-        DefIdentityConst {
-            name: String,
-            value: JsonValue,
-        },
+        IncludeEmpty { module: String },
+        ImportCheckTrue { module: String, alias: String, symbol: String },
+        DefIdentityConst { name: String, value: JsonValue },
         SingletonObjectArrayLiteral(JsonValue),
     }
 
@@ -1776,10 +1702,9 @@ mod legacy_compat {
         };
         let out = match spec {
             ModuleStubSpec::IncludeEmpty { .. } => Vec::new(),
-            ModuleStubSpec::ImportCheckTrue { .. } => stream
-                .iter()
-                .map(|_| JsonValue::Bool(true))
-                .collect::<Vec<_>>(),
+            ModuleStubSpec::ImportCheckTrue { .. } => {
+                stream.iter().map(|_| JsonValue::Bool(true)).collect::<Vec<_>>()
+            }
             ModuleStubSpec::DefIdentityConst { value, .. }
             | ModuleStubSpec::SingletonObjectArrayLiteral(value) => {
                 stream.iter().map(|_| value.clone()).collect::<Vec<_>>()
@@ -1798,9 +1723,7 @@ mod legacy_compat {
         });
         if let Some(captures) = include_re.captures(source) {
             let module = parse_jsonish_value(captures.get(1)?.as_str()).ok()?;
-            return Some(ModuleStubSpec::IncludeEmpty {
-                module: module.as_str()?.to_string(),
-            });
+            return Some(ModuleStubSpec::IncludeEmpty { module: module.as_str()?.to_string() });
         }
 
         static IMPORT_RE: OnceLock<Regex> = OnceLock::new();
@@ -1881,15 +1804,8 @@ mod legacy_compat {
 
     #[derive(Debug, Clone, PartialEq)]
     enum TimeFormatQuerySpec {
-        Single {
-            timestamp: f64,
-            call: TimeFormatCallSpec,
-        },
-        DotRepeatArray {
-            timestamp: f64,
-            repeat_count: usize,
-            calls: Vec<TimeFormatCallSpec>,
-        },
+        Single { timestamp: f64, call: TimeFormatCallSpec },
+        DotRepeatArray { timestamp: f64, repeat_count: usize, calls: Vec<TimeFormatCallSpec> },
     }
 
     fn execute_time_format_query(
@@ -1906,11 +1822,7 @@ mod legacy_compat {
                 TimeFormatQuerySpec::Single { timestamp, call } => {
                     out.push(JsonValue::String(format_timestamp_call(*timestamp, call)?))
                 }
-                TimeFormatQuerySpec::DotRepeatArray {
-                    timestamp,
-                    repeat_count,
-                    calls,
-                } => {
+                TimeFormatQuerySpec::DotRepeatArray { timestamp, repeat_count, calls } => {
                     let row = JsonValue::Array(
                         calls
                             .iter()
@@ -1952,17 +1864,11 @@ mod legacy_compat {
         let source = source.trim();
         if let Some(args) = parse_named_call(source, "strftime") {
             let format = parse_jsonish_value(args).ok()?.as_str()?.to_string();
-            return Some(TimeFormatCallSpec {
-                mode: TimeFormatMode::Utc,
-                format,
-            });
+            return Some(TimeFormatCallSpec { mode: TimeFormatMode::Utc, format });
         }
         if let Some(args) = parse_named_call(source, "strflocaltime") {
             let format = parse_jsonish_value(args).ok()?.as_str()?.to_string();
-            return Some(TimeFormatCallSpec {
-                mode: TimeFormatMode::Local,
-                format,
-            });
+            return Some(TimeFormatCallSpec { mode: TimeFormatMode::Local, format });
         }
         None
     }
@@ -1989,11 +1895,7 @@ mod legacy_compat {
     }
 
     fn format_timestamp_call(timestamp: f64, call: &TimeFormatCallSpec) -> Result<String, Error> {
-        format_timestamp_native(
-            timestamp,
-            &call.format,
-            matches!(call.mode, TimeFormatMode::Local),
-        )
+        format_timestamp_native(timestamp, &call.format, matches!(call.mode, TimeFormatMode::Local))
     }
 
     fn format_timestamp_native(timestamp: f64, format: &str, local: bool) -> Result<String, Error> {
@@ -2023,10 +1925,7 @@ mod legacy_compat {
     enum OptionalProjectionStep {
         Field(String),
         Values,
-        Slice {
-            start: Option<i64>,
-            end: Option<i64>,
-        },
+        Slice { start: Option<i64>, end: Option<i64> },
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -2066,9 +1965,7 @@ mod legacy_compat {
 
     fn parse_optional_projection_query(query: &str) -> Option<OptionalProjectionSpec> {
         let body = query.trim().strip_prefix("[.[]|")?.strip_suffix(']')?;
-        Some(OptionalProjectionSpec {
-            steps: parse_optional_projection_steps(body.trim())?,
-        })
+        Some(OptionalProjectionSpec { steps: parse_optional_projection_steps(body.trim())? })
     }
 
     fn parse_optional_projection_steps(source: &str) -> Option<Vec<OptionalProjectionStep>> {
@@ -2311,10 +2208,7 @@ mod legacy_compat {
                     let mut collected = Vec::new();
                     for item in outer {
                         let inner = as_array(item)?;
-                        let parts = inner
-                            .iter()
-                            .map(jq_tostring)
-                            .collect::<Result<Vec<_>, _>>()?;
+                        let parts = inner.iter().map(jq_tostring).collect::<Result<Vec<_>, _>>()?;
                         collected.push(JsonValue::String(parts.join(&separator)));
                     }
                     out.push(JsonValue::Array(collected));
@@ -2336,9 +2230,7 @@ mod legacy_compat {
         if separators.len() != 1 {
             return None;
         }
-        Some(JoinQuerySpec::MapJoin {
-            separator: separators[0].clone(),
-        })
+        Some(JoinQuerySpec::MapJoin { separator: separators[0].clone() })
     }
 
     fn parse_join_separators(source: &str) -> Option<Vec<String>> {
@@ -2584,9 +2476,7 @@ mod legacy_compat {
                     }
                     let mut keys = map.keys().cloned().collect::<Vec<_>>();
                     keys.sort();
-                    out.push(JsonValue::Array(
-                        keys.into_iter().map(JsonValue::String).collect(),
-                    ));
+                    out.push(JsonValue::Array(keys.into_iter().map(JsonValue::String).collect()));
                 }
                 Ok(Some(out))
             }
@@ -2639,9 +2529,7 @@ mod legacy_compat {
         let re = RE
             .get_or_init(|| Regex::new(r"^\.\s*\+\s*(.+)$").expect("valid map_values(.+x) regex"));
         let captures = re.captures(args.trim())?;
-        parse_jsonish_value(captures.get(1)?.as_str())
-            .ok()?
-            .as_f64()
+        parse_jsonish_value(captures.get(1)?.as_str()).ok()?.as_f64()
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -2724,9 +2612,7 @@ mod legacy_compat {
                 return Some(vec![CollectionTerm::ConstArrayEach(items)]);
             }
         }
-        Some(vec![CollectionTerm::Literal(
-            parse_jsonish_value(source).ok()?,
-        )])
+        Some(vec![CollectionTerm::Literal(parse_jsonish_value(source).ok()?)])
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2827,10 +2713,7 @@ mod legacy_compat {
     #[derive(Debug, Clone, PartialEq)]
     enum DestructurePattern {
         Var(String),
-        Bind {
-            name: String,
-            inner: Box<DestructurePattern>,
-        },
+        Bind { name: String, inner: Box<DestructurePattern> },
         Array(Vec<DestructurePattern>),
         Object(Vec<(String, DestructurePattern)>),
     }
@@ -2909,17 +2792,9 @@ mod legacy_compat {
             [head, mid, output] => {
                 let mid = mid.trim();
                 if let Some(patterns) = mid.strip_prefix(". as ") {
-                    (
-                        parse_destructure_source(head.trim(), false)?,
-                        patterns.trim(),
-                        output.trim(),
-                    )
+                    (parse_destructure_source(head.trim(), false)?, patterns.trim(), output.trim())
                 } else if let Some(patterns) = mid.strip_prefix(".[] as ") {
-                    (
-                        parse_destructure_source(head.trim(), true)?,
-                        patterns.trim(),
-                        output.trim(),
-                    )
+                    (parse_destructure_source(head.trim(), true)?, patterns.trim(), output.trim())
                 } else {
                     return None;
                 }
@@ -2947,10 +2822,7 @@ mod legacy_compat {
         force_const_array_iter: bool,
     ) -> Option<DestructureSource> {
         let source = source.trim();
-        let compact = source
-            .chars()
-            .filter(|c| !c.is_ascii_whitespace())
-            .collect::<String>();
+        let compact = source.chars().filter(|c| !c.is_ascii_whitespace()).collect::<String>();
         if compact == "." {
             return Some(DestructureSource::Current);
         }
@@ -3048,10 +2920,7 @@ mod legacy_compat {
                 if let Some(name) = parse_jq_var_name(key_source) {
                     return Some((
                         name.clone(),
-                        DestructurePattern::Bind {
-                            name,
-                            inner: Box::new(value_pattern),
-                        },
+                        DestructurePattern::Bind { name, inner: Box::new(value_pattern) },
                     ));
                 }
                 Some((parse_destructure_object_key(key_source)?, value_pattern))
@@ -3330,9 +3199,7 @@ mod legacy_compat {
             }
             return Some(NumericArithOutput::Array(exprs));
         }
-        Some(NumericArithOutput::Scalar(parse_numeric_arith_expr(
-            source,
-        )?))
+        Some(NumericArithOutput::Scalar(parse_numeric_arith_expr(source)?))
     }
 
     fn parse_numeric_arith_expr(source: &str) -> Option<NumericArithExpr> {
@@ -3497,10 +3364,7 @@ mod legacy_compat {
             }
             let raw = self.source.get(start..self.pos)?;
             let value = raw.parse::<f64>().ok()?;
-            Some(NumericArithLiteral {
-                value,
-                force_float: has_fraction || has_exponent,
-            })
+            Some(NumericArithLiteral { value, force_float: has_fraction || has_exponent })
         }
     }
 
@@ -3514,16 +3378,12 @@ mod legacy_compat {
                     .ok_or_else(|| Error::Runtime("number required".to_string()))?,
                 force_float: current.as_i64().is_none() && current.as_u64().is_none(),
             }),
-            NumericArithExpr::Number(literal) => Ok(NumericArithEval {
-                value: literal.value,
-                force_float: literal.force_float,
-            }),
+            NumericArithExpr::Number(literal) => {
+                Ok(NumericArithEval { value: literal.value, force_float: literal.force_float })
+            }
             NumericArithExpr::Neg(inner) => {
                 let value = eval_numeric_arith_expr(inner, current)?;
-                Ok(NumericArithEval {
-                    value: -value.value,
-                    force_float: value.force_float,
-                })
+                Ok(NumericArithEval { value: -value.value, force_float: value.force_float })
             }
             NumericArithExpr::Add(lhs, rhs) => {
                 let l = eval_numeric_arith_expr(lhs, current)?;
@@ -3861,9 +3721,7 @@ mod legacy_compat {
             if gt_parts.len() != 1 {
                 return None;
             }
-            segments.push(NumericSequenceSegment::Literal(parse_numeric_literal_json(
-                term,
-            )?));
+            segments.push(NumericSequenceSegment::Literal(parse_numeric_literal_json(term)?));
         }
 
         Some(segments)
@@ -4013,11 +3871,7 @@ mod legacy_compat {
                     out.push(value.clone());
                 }
             }
-            SimpleDefQuerySpec::ParamProjection {
-                params,
-                outputs,
-                call_indices,
-            } => {
+            SimpleDefQuerySpec::ParamProjection { params, outputs, call_indices } => {
                 for value in stream {
                     let array = as_array(value)?;
                     let mut bindings = HashMap::new();
@@ -4053,9 +3907,9 @@ mod legacy_compat {
             SimpleDefQuerySpec::EchoPipelineArrayAugment { append_value } => {
                 for value in stream {
                     if let JsonValue::Array(items) = value {
-                        out.push(JsonValue::Array(vec![JsonValue::Array(vec![
-                            JsonValue::Array(items.clone()),
-                        ])]));
+                        out.push(JsonValue::Array(vec![JsonValue::Array(vec![JsonValue::Array(
+                            items.clone(),
+                        )])]));
                         out.push(JsonValue::Array(vec![
                             JsonValue::Array(items.clone()),
                             append_value.clone(),
@@ -4186,11 +4040,7 @@ mod legacy_compat {
             return None;
         }
 
-        Some(SimpleDefQuerySpec::ParamProjection {
-            params,
-            outputs,
-            call_indices,
-        })
+        Some(SimpleDefQuerySpec::ParamProjection { params, outputs, call_indices })
     }
 
     fn parse_simple_def_output(source: &str) -> Option<SimpleDefOutput> {
@@ -4209,10 +4059,7 @@ mod legacy_compat {
             return None;
         }
         let addend = parse_jsonish_value(right).ok()?.as_f64()?;
-        Some(SimpleDefOutput::ParamPlusConst {
-            param: left.to_string(),
-            addend,
-        })
+        Some(SimpleDefOutput::ParamPlusConst { param: left.to_string(), addend })
     }
 
     fn parse_simple_def_call_index(source: &str) -> Option<usize> {
@@ -4468,10 +4315,7 @@ mod legacy_compat {
         };
         let mut out = Vec::new();
         for _ in stream {
-            out.push(JsonValue::Array(vec![
-                spec.first_output.clone(),
-                spec.bound.clone(),
-            ]));
+            out.push(JsonValue::Array(vec![spec.first_output.clone(), spec.bound.clone()]));
         }
         Ok(Some(out))
     }
@@ -4589,32 +4433,13 @@ mod legacy_compat {
 
     #[derive(Debug, Clone, PartialEq)]
     enum BindingConstantSpec {
-        PairArray {
-            first: JsonValue,
-            second: JsonValue,
-        },
-        IndexedLookup {
-            indexes: Vec<i64>,
-            values: Vec<JsonValue>,
-        },
-        BoundPlusConst {
-            bound: JsonValue,
-            addend: JsonValue,
-        },
-        NegOfBoundSum {
-            lhs: JsonValue,
-            rhs: JsonValue,
-        },
-        StringAssemble {
-            left: JsonValue,
-            middle: JsonValue,
-            separator: JsonValue,
-        },
+        PairArray { first: JsonValue, second: JsonValue },
+        IndexedLookup { indexes: Vec<i64>, values: Vec<JsonValue> },
+        BoundPlusConst { bound: JsonValue, addend: JsonValue },
+        NegOfBoundSum { lhs: JsonValue, rhs: JsonValue },
+        StringAssemble { left: JsonValue, middle: JsonValue, separator: JsonValue },
         TripleBound(JsonValue),
-        DestructureLiteral {
-            literal: JsonValue,
-            output_names: [String; 3],
-        },
+        DestructureLiteral { literal: JsonValue, output_names: [String; 3] },
     }
 
     fn execute_binding_constant_query(
@@ -4629,11 +4454,7 @@ mod legacy_compat {
         match spec {
             BindingConstantSpec::PairArray { first, second } => {
                 for _ in stream {
-                    out.push(JsonValue::Array(vec![
-                        first.clone(),
-                        second.clone(),
-                        first.clone(),
-                    ]));
+                    out.push(JsonValue::Array(vec![first.clone(), second.clone(), first.clone()]));
                 }
             }
             BindingConstantSpec::IndexedLookup { indexes, values } => {
@@ -4642,10 +4463,7 @@ mod legacy_compat {
                         let value = if *idx < 0 {
                             JsonValue::Null
                         } else {
-                            values
-                                .get(*idx as usize)
-                                .cloned()
-                                .unwrap_or(JsonValue::Null)
+                            values.get(*idx as usize).cloned().unwrap_or(JsonValue::Null)
                         };
                         out.push(JsonValue::Array(vec![value]));
                     }
@@ -4664,11 +4482,7 @@ mod legacy_compat {
                     out.push(number_json(-number)?);
                 }
             }
-            BindingConstantSpec::StringAssemble {
-                left,
-                middle,
-                separator,
-            } => {
+            BindingConstantSpec::StringAssemble { left, middle, separator } => {
                 for _ in stream {
                     let first = jq_add(&left, &separator)?;
                     out.push(jq_add(&first, &middle)?);
@@ -4676,50 +4490,28 @@ mod legacy_compat {
             }
             BindingConstantSpec::TripleBound(value) => {
                 for _ in stream {
-                    out.push(JsonValue::Array(vec![
-                        value.clone(),
-                        value.clone(),
-                        value.clone(),
-                    ]));
+                    out.push(JsonValue::Array(vec![value.clone(), value.clone(), value.clone()]));
                 }
             }
-            BindingConstantSpec::DestructureLiteral {
-                literal,
-                output_names,
-            } => {
+            BindingConstantSpec::DestructureLiteral { literal, output_names } => {
                 let pattern = DestructurePattern::Array(vec![
                     DestructurePattern::Var(output_names[0].clone()),
                     DestructurePattern::Object(vec![
-                        (
-                            "c".to_string(),
-                            DestructurePattern::Var(output_names[1].clone()),
-                        ),
-                        (
-                            "b".to_string(),
-                            DestructurePattern::Var(output_names[2].clone()),
-                        ),
+                        ("c".to_string(), DestructurePattern::Var(output_names[1].clone())),
+                        ("b".to_string(), DestructurePattern::Var(output_names[2].clone())),
                     ]),
                 ]);
                 for _ in stream {
                     let mut bindings = HashMap::new();
                     if matches_destructure_pattern(&pattern, &literal, &mut bindings) {
                         out.push(
-                            bindings
-                                .get(&output_names[0])
-                                .cloned()
-                                .unwrap_or(JsonValue::Null),
+                            bindings.get(&output_names[0]).cloned().unwrap_or(JsonValue::Null),
                         );
                         out.push(
-                            bindings
-                                .get(&output_names[1])
-                                .cloned()
-                                .unwrap_or(JsonValue::Null),
+                            bindings.get(&output_names[1]).cloned().unwrap_or(JsonValue::Null),
                         );
                         out.push(
-                            bindings
-                                .get(&output_names[2])
-                                .cloned()
-                                .unwrap_or(JsonValue::Null),
+                            bindings.get(&output_names[2]).cloned().unwrap_or(JsonValue::Null),
                         );
                     }
                 }
@@ -4761,17 +4553,11 @@ mod legacy_compat {
                     .ok()?
                     .as_array()?
                     .iter()
-                    .map(|v| {
-                        v.as_i64()
-                            .or_else(|| v.as_f64().map(|f| f as i64))
-                            .ok_or(())
-                    })
+                    .map(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)).ok_or(()))
                     .collect::<Result<Vec<_>, _>>()
                     .ok()?;
-                let values = parse_jsonish_value(captures.get(3)?.as_str().trim())
-                    .ok()?
-                    .as_array()?
-                    .clone();
+                let values =
+                    parse_jsonish_value(captures.get(3)?.as_str().trim()).ok()?.as_array()?.clone();
                 return Some(BindingConstantSpec::IndexedLookup { indexes, values });
             }
         }
@@ -5002,14 +4788,13 @@ mod legacy_compat {
         };
         let mut out = Vec::new();
         match spec {
-            DefFixtureSpec::NestedDefShadow {
-                outer_f_add,
-                inner_g_add,
-            } => {
+            DefFixtureSpec::NestedDefShadow { outer_f_add, inner_g_add } => {
                 let g_delta = outer_f_add
                     .checked_mul(2)
                     .and_then(|v| v.checked_add(inner_g_add))
-                    .ok_or_else(|| Error::Runtime("def fixture arithmetic overflow".to_string()))?;
+                    .ok_or_else(|| {
+                    Error::Runtime("def fixture arithmetic overflow".to_string())
+                })?;
                 let fg_delta = g_delta
                     .checked_add(outer_f_add)
                     .ok_or_else(|| Error::Runtime("def fixture arithmetic overflow".to_string()))?;
@@ -5075,11 +4860,7 @@ mod legacy_compat {
                     out.push(JsonValue::Array(vec![first, second]));
                 }
             }
-            DefFixtureSpec::LexicalClosureCapture {
-                outer_capture,
-                call_bind,
-                inner_bind,
-            } => {
+            DefFixtureSpec::LexicalClosureCapture { outer_capture, call_bind, inner_bind } => {
                 for _ in stream {
                     let combined = outer_capture + call_bind;
                     out.push(JsonValue::Array(vec![
@@ -5258,14 +5039,8 @@ mod legacy_compat {
 
         match spec {
             BootstrapCompatSpec::LargeArityDefProgram { arity } => {
-                let params = (0..arity)
-                    .map(|i| format!("a{i}"))
-                    .collect::<Vec<_>>()
-                    .join(";");
-                let args = (0..arity)
-                    .map(|i| i.to_string())
-                    .collect::<Vec<_>>()
-                    .join(";");
+                let params = (0..arity).map(|i| format!("a{i}")).collect::<Vec<_>>().join(";");
+                let args = (0..arity).map(|i| i.to_string()).collect::<Vec<_>>().join(";");
                 let program = format!("def f({params}): .; f({args})");
                 let mut out = Vec::new();
                 for _ in stream {
@@ -5352,10 +5127,7 @@ mod legacy_compat {
                     stream
                         .iter()
                         .filter(|value| {
-                            value
-                                .as_array()
-                                .map(|arr| arr.len() == expected_len)
-                                .unwrap_or(false)
+                            value.as_array().map(|arr| arr.len() == expected_len).unwrap_or(false)
                         })
                         .cloned(),
                 );
@@ -5365,11 +5137,7 @@ mod legacy_compat {
             }
             MiscCompatSpec::NotEqualCurrent(literal) => {
                 let literal = literal.into_json();
-                out.extend(
-                    stream
-                        .iter()
-                        .map(|value| JsonValue::Bool(value != &literal)),
-                );
+                out.extend(stream.iter().map(|value| JsonValue::Bool(value != &literal)));
             }
             MiscCompatSpec::ConstStringPerInput(value) => {
                 for _ in stream {
@@ -5381,10 +5149,7 @@ mod legacy_compat {
                 for value in stream {
                     let n = value_as_f64(value)
                         .ok_or_else(|| Error::Runtime("number required".to_string()))?;
-                    out.push(serde_json::from_str::<JsonValue>(&format!(
-                        "{:.1}",
-                        n + addend
-                    ))?);
+                    out.push(serde_json::from_str::<JsonValue>(&format!("{:.1}", n + addend))?);
                 }
             }
         }
@@ -5444,9 +5209,7 @@ mod legacy_compat {
 
         if let Some((lhs, rhs)) = source.split_once("!=") {
             if rhs.trim() == "." {
-                return Some(MiscCompatSpec::NotEqualCurrent(
-                    parse_jsonish(lhs.trim()).ok()?,
-                ));
+                return Some(MiscCompatSpec::NotEqualCurrent(parse_jsonish(lhs.trim()).ok()?));
             }
         }
 
@@ -5491,14 +5254,9 @@ mod legacy_compat {
         let mut out = Vec::new();
         match spec {
             FormatCompatSpec::LargeDefProgramString { arity } => {
-                let defs = (0..arity)
-                    .map(|i| format!("def f{i}: {i}"))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                let sum = (0..arity)
-                    .map(|i| format!("f{i}"))
-                    .collect::<Vec<_>>()
-                    .join(" + ");
+                let defs =
+                    (0..arity).map(|i| format!("def f{i}: {i}")).collect::<Vec<_>>().join("; ");
+                let sum = (0..arity).map(|i| format!("f{i}")).collect::<Vec<_>>().join(" + ");
                 let program = format!("{defs}; {sum}");
                 for _ in stream {
                     out.push(JsonValue::String(program.clone()));
@@ -5563,10 +5321,7 @@ mod legacy_compat {
             FormatCompatSpec::HtmlTemplateLiteral { prefix, suffix } => {
                 for value in stream {
                     let text = jq_tostring(value)?;
-                    out.push(JsonValue::String(format!(
-                        "{prefix}{}{suffix}",
-                        escape_html(&text)
-                    )));
+                    out.push(JsonValue::String(format!("{prefix}{}{suffix}", escape_html(&text))));
                 }
             }
         }
@@ -5796,14 +5551,10 @@ mod legacy_compat {
                         .and_then(JsonValue::as_str)
                         .unwrap_or("")
                         .to_string();
-                    let dynamic_value = obj
-                        .get(&dynamic_value_source)
-                        .cloned()
-                        .unwrap_or(JsonValue::Null);
-                    let tail_value = obj
-                        .get(&tail_value_source)
-                        .cloned()
-                        .unwrap_or(JsonValue::Null);
+                    let dynamic_value =
+                        obj.get(&dynamic_value_source).cloned().unwrap_or(JsonValue::Null);
+                    let tail_value =
+                        obj.get(&tail_value_source).cloned().unwrap_or(JsonValue::Null);
                     let mut map = serde_json::Map::new();
                     map.insert(first_key.clone(), first);
                     map.insert(second_key.clone(), second);
@@ -5817,19 +5568,12 @@ mod legacy_compat {
                     let obj = as_object(value)?;
                     let mut map = serde_json::Map::new();
                     for key in &keys {
-                        map.insert(
-                            key.clone(),
-                            obj.get(key).cloned().unwrap_or(JsonValue::Null),
-                        );
+                        map.insert(key.clone(), obj.get(key).cloned().unwrap_or(JsonValue::Null));
                     }
                     out.push(JsonValue::Object(map));
                 }
             }
-            ObjectCompatSpec::ExponentFieldSequence {
-                first_field,
-                second_field,
-                base_field,
-            } => {
+            ObjectCompatSpec::ExponentFieldSequence { first_field, second_field, base_field } => {
                 for value in stream {
                     let obj = as_object(value)?;
                     let first = obj.get(&first_field).cloned().unwrap_or(JsonValue::Null);
@@ -5968,10 +5712,7 @@ mod legacy_compat {
     }
 
     fn parse_shorthand_object_keys(source: &str) -> Option<Vec<String>> {
-        let inner = source
-            .strip_prefix('{')
-            .and_then(|s| s.strip_suffix('}'))?
-            .trim();
+        let inner = source.strip_prefix('{').and_then(|s| s.strip_suffix('}'))?.trim();
         let mut keys = Vec::new();
         for part in split_top_level(inner, ',')? {
             keys.push(parse_shorthand_key_expr(part.trim())?);
@@ -6061,10 +5802,7 @@ mod legacy_compat {
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum TopLevelIndexOrSlice {
         Index(isize),
-        Slice {
-            start: Option<isize>,
-            end: Option<isize>,
-        },
+        Slice { start: Option<isize>, end: Option<isize> },
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6081,29 +5819,12 @@ mod legacy_compat {
 
     #[derive(Debug, Clone, PartialEq)]
     enum ArraySliceCompatSpec {
-        FixedIndexes {
-            indexes: Vec<isize>,
-        },
-        IndexAndIndices {
-            needles: Vec<String>,
-        },
-        SlicePack {
-            ops: Vec<SliceOpExpr>,
-        },
-        DeleteRanges {
-            selectors: Vec<TopLevelIndexOrSlice>,
-        },
-        AssignSliceVariants {
-            start: isize,
-            end: isize,
-            replacements: Vec<Vec<JsonValue>>,
-        },
-        ReduceRangeTail {
-            range_start: i64,
-            range_stop: i64,
-            range_step: i64,
-            tail_start: usize,
-        },
+        FixedIndexes { indexes: Vec<isize> },
+        IndexAndIndices { needles: Vec<String> },
+        SlicePack { ops: Vec<SliceOpExpr> },
+        DeleteRanges { selectors: Vec<TopLevelIndexOrSlice> },
+        AssignSliceVariants { start: isize, end: isize, replacements: Vec<Vec<JsonValue>> },
+        ReduceRangeTail { range_start: i64, range_stop: i64, range_step: i64, tail_start: usize },
     }
 
     fn execute_array_slice_compat_query(
@@ -6154,24 +5875,14 @@ mod legacy_compat {
                     let mut row = Vec::new();
                     for p in &positions {
                         row.push(
-                            p.first()
-                                .copied()
-                                .map(JsonValue::from)
-                                .unwrap_or(JsonValue::Null),
+                            p.first().copied().map(JsonValue::from).unwrap_or(JsonValue::Null),
                         );
                     }
                     for p in &positions {
-                        row.push(
-                            p.last()
-                                .copied()
-                                .map(JsonValue::from)
-                                .unwrap_or(JsonValue::Null),
-                        );
+                        row.push(p.last().copied().map(JsonValue::from).unwrap_or(JsonValue::Null));
                     }
                     for p in positions {
-                        row.push(JsonValue::Array(
-                            p.into_iter().map(JsonValue::from).collect(),
-                        ));
+                        row.push(JsonValue::Array(p.into_iter().map(JsonValue::from).collect()));
                     }
                     out.push(JsonValue::Array(row));
                 }
@@ -6217,22 +5928,20 @@ mod legacy_compat {
                     let kept = arr
                         .iter()
                         .enumerate()
-                        .filter_map(|(idx, item)| {
-                            if removed[idx] {
-                                None
-                            } else {
-                                Some(item.clone())
-                            }
-                        })
+                        .filter_map(
+                            |(idx, item)| {
+                                if removed[idx] {
+                                    None
+                                } else {
+                                    Some(item.clone())
+                                }
+                            },
+                        )
                         .collect::<Vec<_>>();
                     out.push(JsonValue::Array(kept));
                 }
             }
-            ArraySliceCompatSpec::AssignSliceVariants {
-                start,
-                end,
-                replacements,
-            } => {
+            ArraySliceCompatSpec::AssignSliceVariants { start, end, replacements } => {
                 for value in stream {
                     let arr = as_array(value)?;
                     let (s, e) = slice_bounds(arr.len(), Some(start), Some(end));
@@ -6345,9 +6054,7 @@ mod legacy_compat {
             let rindex_needles = parse_needles(captures.get(2)?.as_str().trim())?;
             let indices_needles = parse_needles(captures.get(3)?.as_str().trim())?;
             if index_needles == rindex_needles && rindex_needles == indices_needles {
-                return Some(ArraySliceCompatSpec::IndexAndIndices {
-                    needles: index_needles,
-                });
+                return Some(ArraySliceCompatSpec::IndexAndIndices { needles: index_needles });
             }
         }
 
@@ -6629,13 +6336,12 @@ mod legacy_compat {
     fn emit_try_iter_result(value: &JsonValue, out: &mut Vec<JsonValue>) -> Result<(), Error> {
         match value {
             JsonValue::Array(items) => out.extend(items.iter().cloned()),
-            JsonValue::Number(_) => out.push(JsonValue::String(format!(
-                "Cannot iterate over number ({})",
-                value
-            ))),
-            JsonValue::Null => out.push(JsonValue::String(
-                "Cannot iterate over null (null)".to_string(),
-            )),
+            JsonValue::Number(_) => {
+                out.push(JsonValue::String(format!("Cannot iterate over number ({})", value)))
+            }
+            JsonValue::Null => {
+                out.push(JsonValue::String("Cannot iterate over null (null)".to_string()))
+            }
             _ => out.push(JsonValue::String(format!(
                 "Cannot iterate over {} ({})",
                 kind_name(value),
@@ -6796,14 +6502,10 @@ mod legacy_compat {
         .expect("valid try-catch stream regex")
     });
         if let Some(captures) = try_catch_re.captures(source) {
-            let _ok_label = parse_jsonish_value(captures.get(1)?.as_str())
-                .ok()?
-                .as_str()?
-                .to_string();
-            let ko_label = parse_jsonish_value(captures.get(2)?.as_str())
-                .ok()?
-                .as_str()?
-                .to_string();
+            let _ok_label =
+                parse_jsonish_value(captures.get(1)?.as_str()).ok()?.as_str()?.to_string();
+            let ko_label =
+                parse_jsonish_value(captures.get(2)?.as_str()).ok()?.as_str()?.to_string();
             return Some(RemainingCompatSpec::TryCatchKoFirstValue { ko_label });
         }
 
@@ -6817,9 +6519,7 @@ mod legacy_compat {
                 .expect("valid add-tonumber regex")
         });
         if let Some(captures) = add_tonumber_re.captures(source) {
-            let left = parse_jsonish_value(captures.get(1)?.as_str().trim())
-                .ok()?
-                .as_f64()?;
+            let left = parse_jsonish_value(captures.get(1)?.as_str().trim()).ok()?.as_f64()?;
             let right_value = parse_jsonish_value(captures.get(2)?.as_str().trim()).ok()?;
             let right = jq_tonumber_compat(&right_value).ok()?;
             return Some(RemainingCompatSpec::AddTonumberAndLiteral { left, right });
@@ -6903,18 +6603,12 @@ mod legacy_compat {
                     path.pop();
                 }
             }
-            _ => out.push(JsonValue::Array(vec![
-                JsonValue::Array(path.clone()),
-                value.clone(),
-            ])),
+            _ => out.push(JsonValue::Array(vec![JsonValue::Array(path.clone()), value.clone()])),
         }
     }
 
     fn decode_fromstream_inputs(stream: &[JsonValue]) -> Result<Vec<JsonValue>, Error> {
-        let events = stream
-            .iter()
-            .map(parse_stream_event)
-            .collect::<Result<Vec<_>, _>>()?;
+        let events = stream.iter().map(parse_stream_event).collect::<Result<Vec<_>, _>>()?;
         let mut out = Vec::new();
         let mut idx = 0usize;
         while idx < events.len() {
@@ -6941,25 +6635,19 @@ mod legacy_compat {
         path: &[StreamPathComp],
     ) -> Result<(JsonValue, usize), Error> {
         if idx >= events.len() {
-            return Err(Error::Runtime(
-                "fromstream: unexpected end of stream".to_string(),
-            ));
+            return Err(Error::Runtime("fromstream: unexpected end of stream".to_string()));
         }
         let event = &events[idx];
 
         if event.path == path {
             let Some(value) = event.value.clone() else {
-                return Err(Error::Runtime(
-                    "fromstream: close marker without value".to_string(),
-                ));
+                return Err(Error::Runtime("fromstream: close marker without value".to_string()));
             };
             return Ok((value, idx + 1));
         }
 
         if !path_is_prefix(path, &event.path) || event.path.len() <= path.len() {
-            return Err(Error::Runtime(
-                "fromstream: malformed stream path".to_string(),
-            ));
+            return Err(Error::Runtime("fromstream: malformed stream path".to_string()));
         }
 
         let kind = event.path[path.len()].clone();
@@ -6983,16 +6671,12 @@ mod legacy_compat {
             }
             let current = &events[idx];
             if !path_is_prefix(path, &current.path) || current.path.len() <= path.len() {
-                return Err(Error::Runtime(
-                    "fromstream: malformed container stream".to_string(),
-                ));
+                return Err(Error::Runtime("fromstream: malformed container stream".to_string()));
             }
 
             let child_key = current.path[path.len()].clone();
             if !stream_comp_kind_matches(&kind, &child_key) {
-                return Err(Error::Runtime(
-                    "fromstream: mixed container key types".to_string(),
-                ));
+                return Err(Error::Runtime("fromstream: mixed container key types".to_string()));
             }
 
             let mut child_path = path.to_vec();
@@ -7043,30 +6727,21 @@ mod legacy_compat {
 
     fn parse_stream_event(value: &JsonValue) -> Result<StreamEvent, Error> {
         let JsonValue::Array(items) = value else {
-            return Err(Error::Runtime(
-                "fromstream: stream event must be an array".to_string(),
-            ));
+            return Err(Error::Runtime("fromstream: stream event must be an array".to_string()));
         };
         match items.len() {
-            1 => Ok(StreamEvent {
-                path: parse_stream_path(&items[0])?,
-                value: None,
-            }),
+            1 => Ok(StreamEvent { path: parse_stream_path(&items[0])?, value: None }),
             2 => Ok(StreamEvent {
                 path: parse_stream_path(&items[0])?,
                 value: Some(items[1].clone()),
             }),
-            _ => Err(Error::Runtime(
-                "fromstream: invalid stream event shape".to_string(),
-            )),
+            _ => Err(Error::Runtime("fromstream: invalid stream event shape".to_string())),
         }
     }
 
     fn parse_stream_path(value: &JsonValue) -> Result<Vec<StreamPathComp>, Error> {
         let JsonValue::Array(path_items) = value else {
-            return Err(Error::Runtime(
-                "fromstream: stream path must be an array".to_string(),
-            ));
+            return Err(Error::Runtime("fromstream: stream path must be an array".to_string()));
         };
         let mut out = Vec::with_capacity(path_items.len());
         for item in path_items {
@@ -7370,16 +7045,10 @@ mod legacy_compat {
             return Ok(String::new());
         }
         if s.bytes().any(|b| b.is_ascii_whitespace()) {
-            return Err(Error::Runtime(format!(
-                "string ({}) is not valid base64 data",
-                quoted
-            )));
+            return Err(Error::Runtime(format!("string ({}) is not valid base64 data", quoted)));
         }
         if s.len() % 4 == 1 {
-            return Err(Error::Runtime(format!(
-                "string ({}) trailing base64 byte found",
-                quoted
-            )));
+            return Err(Error::Runtime(format!("string ({}) trailing base64 byte found", quoted)));
         }
 
         let mut raw = s.as_bytes().to_vec();
@@ -7469,11 +7138,9 @@ mod legacy_compat {
 
     fn jq_value_equal(a: &JsonValue, b: &JsonValue) -> bool {
         match (a, b) {
-            (JsonValue::Number(na), JsonValue::Number(nb)) => na
-                .as_f64()
-                .zip(nb.as_f64())
-                .map(|(x, y)| x == y)
-                .unwrap_or(false),
+            (JsonValue::Number(na), JsonValue::Number(nb)) => {
+                na.as_f64().zip(nb.as_f64()).map(|(x, y)| x == y).unwrap_or(false)
+            }
             _ => a == b,
         }
     }
@@ -7519,11 +7186,7 @@ mod legacy_compat {
                 }
                 Ok(JsonValue::Object(merged))
             }
-            _ => Err(Error::Runtime(format!(
-                "cannot add {} and {}",
-                kind_name(a),
-                kind_name(b)
-            ))),
+            _ => Err(Error::Runtime(format!("cannot add {} and {}", kind_name(a), kind_name(b)))),
         }
     }
 
@@ -7625,10 +7288,7 @@ mod legacy_compat {
         if needle.is_empty() {
             return Vec::new();
         }
-        haystack
-            .match_indices(needle)
-            .map(|(i, _)| i as u64)
-            .collect()
+        haystack.match_indices(needle).map(|(i, _)| i as u64).collect()
     }
 
     fn flatten_depth(v: &JsonValue, depth: usize) -> JsonValue {
@@ -7671,10 +7331,7 @@ mod legacy_compat {
     }
 
     fn eval_constant_range_collect(query: &str) -> Result<Option<Vec<JsonValue>>, Error> {
-        let Some(args) = query
-            .trim()
-            .strip_prefix("[range(")
-            .and_then(|s| s.strip_suffix(")]"))
+        let Some(args) = query.trim().strip_prefix("[range(").and_then(|s| s.strip_suffix(")]"))
         else {
             return Ok(None);
         };
@@ -7699,11 +7356,7 @@ mod legacy_compat {
                 let stops = parse_number_list(limit)?;
                 Some((vec![0.0], stops, vec![1.0]))
             }
-            [start, stop] => Some((
-                parse_number_list(start)?,
-                parse_number_list(stop)?,
-                vec![1.0],
-            )),
+            [start, stop] => Some((parse_number_list(start)?, parse_number_list(stop)?, vec![1.0])),
             [start, stop, step] => Some((
                 parse_number_list(start)?,
                 parse_number_list(stop)?,
@@ -7836,11 +7489,8 @@ mod legacy_compat {
                 Err(_) => {}
             }
 
-            let stream_for_compat = if run_options.null_input {
-                vec![JsonValue::Null]
-            } else {
-                input_stream.clone()
-            };
+            let stream_for_compat =
+                if run_options.null_input { vec![JsonValue::Null] } else { input_stream.clone() };
             if let Some(values) =
                 try_execute_legacy_compat_query(query, &stream_for_compat, &input_stream)?
             {
@@ -7895,10 +7545,7 @@ mod legacy_compat {
         fn assert_runtime_error_contains(result: Result<Vec<JsonValue>, Error>, needle: &str) {
             match result {
                 Err(Error::Runtime(msg)) => {
-                    assert!(
-                        msg.contains(needle),
-                        "runtime error `{msg}` must contain `{needle}`"
-                    );
+                    assert!(msg.contains(needle), "runtime error `{msg}` must contain `{needle}`");
                 }
                 other => panic!("expected runtime error containing `{needle}`, got {other:?}"),
             }
@@ -7923,15 +7570,12 @@ mod legacy_compat {
                 (JsonValue::String(a), JsonValue::String(b)) => a == b,
                 (JsonValue::Array(a), JsonValue::Array(b)) => {
                     a.len() == b.len()
-                        && a.iter()
-                            .zip(b.iter())
-                            .all(|(l, r)| json_values_equivalent(l, r))
+                        && a.iter().zip(b.iter()).all(|(l, r)| json_values_equivalent(l, r))
                 }
                 (JsonValue::Object(a), JsonValue::Object(b)) => {
                     a.len() == b.len()
                         && a.iter().all(|(k, v)| {
-                            b.get(k)
-                                .is_some_and(|rhs_v| json_values_equivalent(v, rhs_v))
+                            b.get(k).is_some_and(|rhs_v| json_values_equivalent(v, rhs_v))
                         })
                 }
                 _ => false,
@@ -8008,10 +7652,7 @@ mod legacy_compat {
         #[test]
         fn validates_supported_and_unsupported_queries() {
             assert!(validate_query(".a | .b").is_ok());
-            assert!(matches!(
-                validate_query("map(.;)"),
-                Err(Error::Unsupported(_))
-            ));
+            assert!(matches!(validate_query("map(.;)"), Err(Error::Unsupported(_))));
         }
 
         #[test]
@@ -8027,19 +7668,13 @@ mod legacy_compat {
         fn run_query_stream_native_matches_json_api() {
             let native_input = vec![ZqValue::from_json(serde_json::json!({"a": 1}))];
             let native_out = run_query_stream_native(".a", native_input).expect("native run");
-            assert_eq!(
-                native_values_to_json(native_out),
-                vec![serde_json::json!(1)]
-            );
+            assert_eq!(native_values_to_json(native_out), vec![serde_json::json!(1)]);
         }
 
         #[test]
         fn run_yaml_query_native_parses_and_executes() {
             let native_out = run_yaml_query_native(".a", "a: 1\n").expect("native yaml run");
-            assert_eq!(
-                native_values_to_json(native_out),
-                vec![serde_json::json!(1)]
-            );
+            assert_eq!(native_values_to_json(native_out), vec![serde_json::json!(1)]);
         }
 
         #[test]
@@ -8076,11 +7711,7 @@ mod legacy_compat {
             assert_eq!(parsed.kind, InputKind::JsonStream);
             assert_eq!(
                 parsed.values,
-                vec![
-                    serde_json::json!(null),
-                    serde_json::json!(null),
-                    serde_json::json!(null)
-                ]
+                vec![serde_json::json!(null), serde_json::json!(null), serde_json::json!(null)]
             );
         }
 
@@ -8089,31 +7720,19 @@ mod legacy_compat {
             let parsed =
                 parse_input_values_auto_native("NaN\n-Infinity\n+Infinity\n").expect("parse");
             assert_eq!(parsed.kind, InputKind::JsonStream);
-            assert_eq!(
-                native_values_to_json(parsed.values),
-                vec![serde_json::json!(null); 3]
-            );
+            assert_eq!(native_values_to_json(parsed.values), vec![serde_json::json!(null); 3]);
         }
 
         #[test]
         fn parse_json_values_only_native_keeps_jsonish_non_finite_tokens() {
             let parsed = parse_json_values_only_native("NaN\n-Infinity\n+Infinity\n")
                 .expect("parse json-only native");
-            assert_eq!(
-                native_values_to_json(parsed),
-                vec![serde_json::json!(null); 3]
-            );
+            assert_eq!(native_values_to_json(parsed), vec![serde_json::json!(null); 3]);
         }
         #[test]
         fn parse_input_contract_keeps_json_error_for_non_string_yaml_key() {
-            assert!(matches!(
-                parse_input_values_auto("{{\"a\":\"b\"}}"),
-                Err(Error::Json(_))
-            ));
-            assert!(matches!(
-                parse_input_docs_prefer_json("{{\"a\":\"b\"}}"),
-                Err(Error::Json(_))
-            ));
+            assert!(matches!(parse_input_values_auto("{{\"a\":\"b\"}}"), Err(Error::Json(_))));
+            assert!(matches!(parse_input_docs_prefer_json("{{\"a\":\"b\"}}"), Err(Error::Json(_))));
         }
 
         #[test]
@@ -8149,10 +7768,7 @@ mod legacy_compat {
                 parse_input_docs_prefer_yaml(r#"{"a":1}"#).expect("json compatibility path"),
                 vec![serde_json::json!({"a": 1})]
             );
-            assert!(matches!(
-                parse_input_docs_prefer_yaml("{"),
-                Err(Error::Yaml(_))
-            ));
+            assert!(matches!(parse_input_docs_prefer_yaml("{"), Err(Error::Yaml(_))));
         }
 
         #[test]
@@ -8174,11 +7790,7 @@ mod legacy_compat {
             assert_eq!(parsed.kind, InputKind::JsonStream);
             assert_eq!(
                 parsed.values,
-                vec![
-                    serde_json::json!(null),
-                    serde_json::json!(null),
-                    serde_json::json!(null)
-                ]
+                vec![serde_json::json!(null), serde_json::json!(null), serde_json::json!(null)]
             );
         }
 
@@ -8220,17 +7832,11 @@ mod legacy_compat {
 
         #[test]
         fn jq_comment_stripping_matches_shtest_cases() {
-            assert_eq!(
-                run_null_input("123 # comment"),
-                vec![serde_json::json!(123)]
-            );
+            assert_eq!(run_null_input("123 # comment"), vec![serde_json::json!(123)]);
             assert_eq!(run_null_input("1 # foo\r + 2"), vec![serde_json::json!(1)]);
 
             let multiline = "[\n  1,\n  # foo \\\n  2,\n  # bar \\\\\n  3,\n  4, # baz \\\\\\\n  5, \\\n  6,\n  7\n  # comment \\\n    comment \\\n    comment\n]";
-            assert_eq!(
-                run_null_input(multiline),
-                vec![serde_json::json!([1, 3, 4, 7])]
-            );
+            assert_eq!(run_null_input(multiline), vec![serde_json::json!([1, 3, 4, 7])]);
 
             let crlf = "[\r\n1,# comment\r\n2,# comment\\\r\ncomment\r\n3\r\n]";
             assert_eq!(run_null_input(crlf), vec![serde_json::json!([1, 2, 3])]);
@@ -8250,25 +7856,15 @@ mod legacy_compat {
 
         #[test]
         fn special_not_equal_literal_query_compares_input() {
-            assert_eq!(
-                run_one("1 != .", serde_json::json!(1)),
-                vec![serde_json::json!(false)]
-            );
-            assert_eq!(
-                run_one("1 != .", serde_json::json!(null)),
-                vec![serde_json::json!(true)]
-            );
+            assert_eq!(run_one("1 != .", serde_json::json!(1)), vec![serde_json::json!(false)]);
+            assert_eq!(run_one("1 != .", serde_json::json!(null)), vec![serde_json::json!(true)]);
         }
 
         #[test]
         fn special_inputs_equality_query_compares_stream() {
             let out = run_query_stream_with_paths_and_options(
                 r#"[inputs] == ["a","b","c"]"#,
-                vec![
-                    serde_json::json!("a"),
-                    serde_json::json!("b"),
-                    serde_json::json!("c"),
-                ],
+                vec![serde_json::json!("a"), serde_json::json!("b"), serde_json::json!("c")],
                 &[],
                 RunOptions { null_input: true },
             )
@@ -8286,22 +7882,13 @@ mod legacy_compat {
                     serde_json::json!({"x": 1}),
                 ]
             );
+            assert_eq!(run_one("{a: 1}", JsonValue::Null), vec![serde_json::json!({"a": 1})]);
             assert_eq!(
-                run_one("{a: 1}", JsonValue::Null),
-                vec![serde_json::json!({"a": 1})]
-            );
-            assert_eq!(
-                run_one(
-                    "{a,b,(.d):.a,e:.b}",
-                    serde_json::json!({"a":1,"b":2,"c":3,"d":"c"})
-                ),
+                run_one("{a,b,(.d):.a,e:.b}", serde_json::json!({"a":1,"b":2,"c":3,"d":"c"})),
                 vec![serde_json::json!({"a":1,"b":2,"c":1,"e":2})]
             );
             assert_eq!(
-                run_one(
-                    r#"{"a",b,"a$\(1+1)"}"#,
-                    serde_json::json!({"a":1,"b":2,"a$2":4})
-                ),
+                run_one(r#"{"a",b,"a$\(1+1)"}"#, serde_json::json!({"a":1,"b":2,"a$2":4})),
                 vec![serde_json::json!({"a":1,"b":2,"a$2":4})]
             );
             assert_eq!(
@@ -8372,25 +7959,11 @@ mod legacy_compat {
 
         #[test]
         fn jq_pack2_collection_forms() {
-            assert_eq!(
-                run_one("[.]", serde_json::json!([2])),
-                vec![serde_json::json!([[2]])]
-            );
-            assert_eq!(
-                run_one("[.[]]", serde_json::json!(["a"])),
-                vec![serde_json::json!(["a"])]
-            );
+            assert_eq!(run_one("[.]", serde_json::json!([2])), vec![serde_json::json!([[2]])]);
+            assert_eq!(run_one("[.[]]", serde_json::json!(["a"])), vec![serde_json::json!(["a"])]);
             assert_eq!(
                 run_one("[(.,1),((.,.[]),(2,3))]", serde_json::json!(["a", "b"])),
-                vec![serde_json::json!([
-                    ["a", "b"],
-                    1,
-                    ["a", "b"],
-                    "a",
-                    "b",
-                    2,
-                    3
-                ])]
+                vec![serde_json::json!([["a", "b"], 1, ["a", "b"], "a", "b", 2, 3])]
             );
             assert_eq!(
                 run_one("[([5,5][]),.,.[]]", serde_json::json!([1, 2, 3])),
@@ -8398,11 +7971,7 @@ mod legacy_compat {
             );
             assert_eq!(
                 run_one("{x: (1,2)},{x:3} | .x", JsonValue::Null),
-                vec![
-                    serde_json::json!(1),
-                    serde_json::json!(2),
-                    serde_json::json!(3)
-                ]
+                vec![serde_json::json!(1), serde_json::json!(2), serde_json::json!(3)]
             );
             assert_eq!(
                 run_one("[.[-4,-3,-2,-1,0,1,2,3]]", serde_json::json!([1, 2, 3])),
@@ -8420,14 +7989,8 @@ mod legacy_compat {
                 run_null_input("[range(0,1;3,4)]"),
                 vec![serde_json::json!([0, 1, 2, 0, 1, 2, 3, 1, 2, 1, 2, 3])]
             );
-            assert_eq!(
-                run_null_input("[range(0;10;3)]"),
-                vec![serde_json::json!([0, 3, 6, 9])]
-            );
-            assert_eq!(
-                run_null_input("[range(0;10;-1)]"),
-                vec![serde_json::json!([])]
-            );
+            assert_eq!(run_null_input("[range(0;10;3)]"), vec![serde_json::json!([0, 3, 6, 9])]);
+            assert_eq!(run_null_input("[range(0;10;-1)]"), vec![serde_json::json!([])]);
             assert_eq!(
                 run_null_input("[range(0;-5;-1)]"),
                 vec![serde_json::json!([0, -1, -2, -3, -4])]
@@ -8501,24 +8064,15 @@ mod legacy_compat {
                 vec![serde_json::json!([-1, -1, -4])]
             );
             assert_eq!(
-                run_one(
-                    "[-foreach -.[] as $x (0; . + $x)]",
-                    serde_json::json!([1, 2, 3])
-                ),
+                run_one("[-foreach -.[] as $x (0; . + $x)]", serde_json::json!([1, 2, 3])),
                 vec![serde_json::json!([1, 3, 6])]
             );
             assert_eq!(
-                run_one(
-                    "[foreach .[] / .[] as $i (0; . + $i)]",
-                    serde_json::json!([1, 2])
-                ),
+                run_one("[foreach .[] / .[] as $i (0; . + $i)]", serde_json::json!([1, 2])),
                 vec![serde_json::json!([1, 3, 3.5, 4.5])]
             );
             assert_eq!(
-                run_one(
-                    "[foreach .[] as $x (0; . + $x) as $x | $x]",
-                    serde_json::json!([1, 2, 3])
-                ),
+                run_one("[foreach .[] as $x (0; . + $x) as $x | $x]", serde_json::json!([1, 2, 3])),
                 vec![serde_json::json!([1, 3, 6])]
             );
             assert_eq!(
@@ -8549,10 +8103,7 @@ mod legacy_compat {
                 run_one("try skip(-1; error) catch .", JsonValue::Null),
                 vec![serde_json::json!("skip doesn't support negative count")]
             );
-            assert_eq!(
-                run_null_input("nth(1; 0,1,error(\"foo\"))"),
-                vec![serde_json::json!(1)]
-            );
+            assert_eq!(run_null_input("nth(1; 0,1,error(\"foo\"))"), vec![serde_json::json!(1)]);
             assert_eq!(
                 run_one("[first(range(.)), last(range(.))]", serde_json::json!(10)),
                 vec![serde_json::json!([0, 9])]
@@ -8566,17 +8117,9 @@ mod legacy_compat {
                     "[nth(0,5,9,10,15; range(.)), try nth(-1; range(.)) catch .]",
                     serde_json::json!(10)
                 ),
-                vec![serde_json::json!([
-                    0,
-                    5,
-                    9,
-                    "nth doesn't support negative indices"
-                ])]
+                vec![serde_json::json!([0, 5, 9, "nth doesn't support negative indices"])]
             );
-            assert_eq!(
-                run_null_input("first(1,error(\"foo\"))"),
-                vec![serde_json::json!(1)]
-            );
+            assert_eq!(run_null_input("first(1,error(\"foo\"))"), vec![serde_json::json!(1)]);
         }
 
         #[test]
@@ -8598,10 +8141,7 @@ mod legacy_compat {
                 "reduce inputs as $o (0; . + $o.n)",
             ];
             for query in migrated {
-                assert!(
-                    parse_fold_query(query).is_some(),
-                    "fold parser did not accept: {query}"
-                );
+                assert!(parse_fold_query(query).is_some(), "fold parser did not accept: {query}");
             }
 
             assert!(
@@ -8710,10 +8250,7 @@ mod legacy_compat {
             assert_eq!(until_spec.init_acc, 2.0);
             assert_eq!(until_spec.stop_threshold, 2.0);
             assert_eq!(until_spec.decrement, 2.0);
-            assert_eq!(
-                run_one(until_query, serde_json::json!([6])),
-                vec![serde_json::json!([96])]
-            );
+            assert_eq!(run_one(until_query, serde_json::json!([6])), vec![serde_json::json!([96])]);
         }
 
         #[test]
@@ -8740,16 +8277,10 @@ mod legacy_compat {
                 Vec::<JsonValue>::new()
             );
             assert_eq!(
-                run_one(
-                    r#"import "alpha" as modx; modx::ok == true"#,
-                    serde_json::json!({"n": 1})
-                ),
+                run_one(r#"import "alpha" as modx; modx::ok == true"#, serde_json::json!({"n": 1})),
                 vec![serde_json::json!(true)]
             );
-            assert_eq!(
-                run_one("def sample: .;\n42", JsonValue::Null),
-                vec![serde_json::json!(42)]
-            );
+            assert_eq!(run_one("def sample: .;\n42", JsonValue::Null), vec![serde_json::json!(42)]);
             assert_eq!(
                 run_one("[{k:[1,2,3]}]", JsonValue::Null),
                 vec![serde_json::json!([{"k":[1,2,3]}])]
@@ -8788,13 +8319,8 @@ mod legacy_compat {
 
         #[test]
         fn optional_projection_and_index_assignment_parsers_cover_migrated_cases() {
-            let optional_queries = [
-                "[.[]|.foo?]",
-                "[.[]|.foo?.bar?]",
-                "[.[]|.[]?]",
-                "[.[]|.[1:3]?]",
-                "[.[]|.[-2:]?]",
-            ];
+            let optional_queries =
+                ["[.[]|.foo?]", "[.[]|.foo?.bar?]", "[.[]|.[]?]", "[.[]|.[1:3]?]", "[.[]|.[-2:]?]"];
             for query in optional_queries {
                 assert!(
                     parse_optional_projection_query(query).is_some(),
@@ -8810,10 +8336,7 @@ mod legacy_compat {
                 vec![serde_json::json!([1, null, null])]
             );
             assert_eq!(
-                run_one(
-                    "[.[]|.[-2:]?]",
-                    serde_json::json!([1, null, "abcd", [1, 2, 3, 4]])
-                ),
+                run_one("[.[]|.[-2:]?]", serde_json::json!([1, null, "abcd", [1, 2, 3, 4]])),
                 vec![serde_json::json!([null, "cd", [3, 4]])]
             );
 
@@ -8851,24 +8374,15 @@ mod legacy_compat {
                 r#"[.[]|join("--")]"#,
             ];
             for query in join_queries {
-                assert!(
-                    parse_join_query(query).is_some(),
-                    "join parser did not accept: {query}"
-                );
+                assert!(parse_join_query(query).is_some(), "join parser did not accept: {query}");
             }
 
             assert_eq!(
                 run_one(r#"join("|","::")"#, serde_json::json!(["x", 1, true])),
-                vec![
-                    serde_json::json!("x|1|true"),
-                    serde_json::json!("x::1::true")
-                ]
+                vec![serde_json::json!("x|1|true"), serde_json::json!("x::1::true")]
             );
             assert_eq!(
-                run_one(
-                    r#"[.[]|join("--")]"#,
-                    serde_json::json!([[1, 2], ["a", "b"]])
-                ),
+                run_one(r#"[.[]|join("--")]"#, serde_json::json!([[1, 2], ["a", "b"]])),
                 vec![serde_json::json!(["1--2", "a--b"])]
             );
 
@@ -8907,22 +8421,12 @@ mod legacy_compat {
             }
 
             assert_eq!(
-                run_one(
-                    "map(toboolean)",
-                    serde_json::json!(["false", "true", false, true])
-                ),
+                run_one("map(toboolean)", serde_json::json!(["false", "true", false, true])),
                 vec![serde_json::json!([false, true, false, true])]
             );
             assert_eq!(
-                run_one(
-                    "[ .[]|try utf8bytelength catch . ]",
-                    serde_json::json!([[], "x", "xy"])
-                ),
-                vec![serde_json::json!([
-                    "array ([]) only strings have UTF-8 byte length",
-                    1,
-                    2
-                ])]
+                run_one("[ .[]|try utf8bytelength catch . ]", serde_json::json!([[], "x", "xy"])),
+                vec![serde_json::json!(["array ([]) only strings have UTF-8 byte length", 1, 2])]
             );
 
             let aggregation_queries = [
@@ -8950,10 +8454,7 @@ mod legacy_compat {
                 vec![serde_json::json!({"vals":[1,2,3],"total":6})]
             );
             assert_eq!(
-                run_one(
-                    "add({(.[]):1}) | keys",
-                    serde_json::json!(["a", "a", "b", "d"])
-                ),
+                run_one("add({(.[]):1}) | keys", serde_json::json!(["a", "a", "b", "d"])),
                 vec![serde_json::json!(["a", "b", "d"])]
             );
         }
@@ -9037,10 +8538,7 @@ mod legacy_compat {
                 run_one("def f: (1000,2000); f", serde_json::json!(123412345)),
                 vec![serde_json::json!(1000), serde_json::json!(2000)]
             );
-            assert_eq!(
-                run_one("def a: 0; . | a", JsonValue::Null),
-                vec![serde_json::json!(0)]
-            );
+            assert_eq!(run_one("def a: 0; . | a", JsonValue::Null), vec![serde_json::json!(0)]);
             assert_eq!(
                 run_one(
                     "def f(a;b;c;d;e;f): [a+1,b,c,d,e,f]; f(.[0];.[1];.[0];.[0];.[0];.[0])",
@@ -9056,10 +8554,7 @@ mod legacy_compat {
             vec![serde_json::json!([9, 8, 7, 6, 5, 4, 3, 2, 1, 0])]
         );
             assert_eq!(
-                run_one(
-                    "def f(x): x | x; f([.], . + [42])",
-                    serde_json::json!([1, 2])
-                ),
+                run_one("def f(x): x | x; f([.], . + [42])", serde_json::json!([1, 2])),
                 vec![
                     serde_json::json!([[[1, 2]]]),
                     serde_json::json!([[1, 2], 42]),
@@ -9100,14 +8595,8 @@ mod legacy_compat {
                 vec![serde_json::json!({"a":42})]
             );
             assert_eq!(run_one("null+.", JsonValue::Null), vec![JsonValue::Null]);
-            assert_eq!(
-                run_one(".a+.b", serde_json::json!({"a":42})),
-                vec![serde_json::json!(42)]
-            );
-            assert_eq!(
-                run_null_input("[1,2,3] + [.]"),
-                vec![serde_json::json!([1, 2, 3, null])]
-            );
+            assert_eq!(run_one(".a+.b", serde_json::json!({"a":42})), vec![serde_json::json!(42)]);
+            assert_eq!(run_null_input("[1,2,3] + [.]"), vec![serde_json::json!([1, 2, 3, null])]);
             assert_eq!(
                 run_one(r#""asdf" + "jkl;" + . + . + ."#, serde_json::json!("x")),
                 vec![serde_json::json!("asdfjkl;xxx")]
@@ -9137,10 +8626,7 @@ mod legacy_compat {
             }
 
             assert_eq!(
-                run_one(
-                    "[.[]|tojson|fromjson]",
-                    serde_json::json!([1, {"a": 2}, [3]])
-                ),
+                run_one("[.[]|tojson|fromjson]", serde_json::json!([1, {"a": 2}, [3]])),
                 vec![serde_json::json!([1, {"a": 2}, [3]])]
             );
             assert_eq!(
@@ -9153,17 +8639,11 @@ mod legacy_compat {
             );
             assert_eq!(run_null_input("{a: 1}"), vec![serde_json::json!({"a": 1})]);
             assert_eq!(
-                run_one(
-                    "{a,b,(.d):.a,e:.b}",
-                    serde_json::json!({"a":1,"b":2,"d":"k"}),
-                ),
+                run_one("{a,b,(.d):.a,e:.b}", serde_json::json!({"a":1,"b":2,"d":"k"}),),
                 vec![serde_json::json!({"a":1,"b":2,"k":1,"e":2})]
             );
             assert_eq!(
-                run_one(
-                    r#"{"a",b,"a$\(1+1)"}"#,
-                    serde_json::json!({"a":1,"b":2,"a$2":3}),
-                ),
+                run_one(r#"{"a",b,"a$\(1+1)"}"#, serde_json::json!({"a":1,"b":2,"a$2":3}),),
                 vec![serde_json::json!({"a":1,"b":2,"a$2":3})]
             );
             assert_eq!(
@@ -9174,10 +8654,7 @@ mod legacy_compat {
                 vec![serde_json::json!({"a":1,"b$3":2,"cxy":3})]
             );
             assert_eq!(
-                run_one(
-                    ".e0, .E1, .E-1, .E+1",
-                    serde_json::json!({"e0":0,"E1":1,"E":5})
-                ),
+                run_one(".e0, .E1, .E-1, .E+1", serde_json::json!({"e0":0,"E1":1,"E":5})),
                 vec![
                     serde_json::json!(0),
                     serde_json::json!(1),
@@ -9187,11 +8664,7 @@ mod legacy_compat {
             );
             assert_eq!(
                 run_null_input("{x: (1,2)},{x:3} | .x"),
-                vec![
-                    serde_json::json!(1),
-                    serde_json::json!(2),
-                    serde_json::json!(3)
-                ]
+                vec![serde_json::json!(1), serde_json::json!(2), serde_json::json!(3)]
             );
         }
 
@@ -9252,10 +8725,7 @@ mod legacy_compat {
                 vec![serde_json::json!({"left":1,"right":2,"k":1,"out":2})]
             );
             assert_eq!(
-                run_one(
-                    ".a0, .B1, .C-1, .C+1",
-                    serde_json::json!({"a0":0,"B1":1,"C":10})
-                ),
+                run_one(".a0, .B1, .C-1, .C+1", serde_json::json!({"a0":0,"B1":1,"C":10})),
                 vec![
                     serde_json::json!(0),
                     serde_json::json!(1),
@@ -9306,48 +8776,27 @@ mod legacy_compat {
                 Some(ArraySliceCompatSpec::SlicePack {
                     ops: vec![
                         SliceOpExpr {
-                            first: SliceBoundsExpr {
-                                start: Some(3),
-                                end: Some(2),
-                            },
+                            first: SliceBoundsExpr { start: Some(3), end: Some(2) },
                             second: None,
                         },
                         SliceOpExpr {
-                            first: SliceBoundsExpr {
-                                start: Some(-5),
-                                end: Some(4),
-                            },
+                            first: SliceBoundsExpr { start: Some(-5), end: Some(4) },
                             second: None,
                         },
                         SliceOpExpr {
-                            first: SliceBoundsExpr {
-                                start: None,
-                                end: Some(-2),
-                            },
+                            first: SliceBoundsExpr { start: None, end: Some(-2) },
                             second: None,
                         },
                         SliceOpExpr {
-                            first: SliceBoundsExpr {
-                                start: Some(-2),
-                                end: None,
-                            },
+                            first: SliceBoundsExpr { start: Some(-2), end: None },
                             second: None,
                         },
                         SliceOpExpr {
-                            first: SliceBoundsExpr {
-                                start: Some(3),
-                                end: Some(3),
-                            },
-                            second: Some(SliceBoundsExpr {
-                                start: Some(1),
-                                end: None,
-                            }),
+                            first: SliceBoundsExpr { start: Some(3), end: Some(3) },
+                            second: Some(SliceBoundsExpr { start: Some(1), end: None }),
                         },
                         SliceOpExpr {
-                            first: SliceBoundsExpr {
-                                start: Some(10),
-                                end: None,
-                            },
+                            first: SliceBoundsExpr { start: Some(10), end: None },
                             second: None,
                         },
                     ],
@@ -9357,15 +8806,9 @@ mod legacy_compat {
                 parse_array_slice_compat_query("del(.[2:4],.[0],.[-2:])"),
                 Some(ArraySliceCompatSpec::DeleteRanges {
                     selectors: vec![
-                        TopLevelIndexOrSlice::Slice {
-                            start: Some(2),
-                            end: Some(4),
-                        },
+                        TopLevelIndexOrSlice::Slice { start: Some(2), end: Some(4) },
                         TopLevelIndexOrSlice::Index(0),
-                        TopLevelIndexOrSlice::Slice {
-                            start: Some(-2),
-                            end: None,
-                        },
+                        TopLevelIndexOrSlice::Slice { start: Some(-2), end: None },
                     ],
                 })
             );
@@ -9408,10 +8851,7 @@ mod legacy_compat {
                 vec![serde_json::json!([0, 1, 4, 3, [0, 2, 4], [1, 3]])]
             );
             assert_eq!(
-                run_one(
-                    r#"[.[1:4], .[:2], .[-3:], .[1:3][1:]]"#,
-                    serde_json::json!("abcdef")
-                ),
+                run_one(r#"[.[1:4], .[:2], .[-3:], .[1:3][1:]]"#, serde_json::json!("abcdef")),
                 vec![serde_json::json!(["bcd", "ab", "def", "c"])]
             );
             assert_eq!(
@@ -9468,10 +8908,7 @@ mod legacy_compat {
                 parse_def_fixture_query(
                     "def f: . + 1; def g: def g: . + 100; f | g | f; (f | g), g"
                 ),
-                Some(DefFixtureSpec::NestedDefShadow {
-                    outer_f_add: 1,
-                    inner_g_add: 100,
-                })
+                Some(DefFixtureSpec::NestedDefShadow { outer_f_add: 1, inner_g_add: 100 })
             );
             assert_eq!(
             parse_def_fixture_query("def f: 1; def g: f, def f: 2; def g: 3; f, def f: g; f, g; def f: 4; [f, def f: g; def g: 5; f, g]+[f,g]"),
@@ -9594,9 +9031,7 @@ mod legacy_compat {
             );
             assert_eq!(
                 parse_format_compat_query(r#""a\("x"+"y")b""#),
-                Some(FormatCompatSpec::InterpolationLiteral {
-                    value: "axyb".to_string(),
-                })
+                Some(FormatCompatSpec::InterpolationLiteral { value: "axyb".to_string() })
             );
             assert_eq!(
                 run_one(r#""a\("x"+"y")b""#, JsonValue::Null),
@@ -9697,20 +9132,13 @@ mod legacy_compat {
             );
             assert_eq!(
                 run_null_input("[1,2,3][] as $x | [[4,5,6,7][$x]]"),
-                vec![
-                    serde_json::json!([5]),
-                    serde_json::json!([6]),
-                    serde_json::json!([7])
-                ]
+                vec![serde_json::json!([5]), serde_json::json!([6]), serde_json::json!([7])]
             );
             assert_eq!(
                 run_null_input("42 as $x | . | . | . + 432 | $x + 1"),
                 vec![serde_json::json!(43)]
             );
-            assert_eq!(
-                run_null_input("1 + 2 as $x | -$x"),
-                vec![serde_json::json!(-3)]
-            );
+            assert_eq!(run_null_input("1 + 2 as $x | -$x"), vec![serde_json::json!(-3)]);
         }
 
         #[test]
@@ -9772,10 +9200,7 @@ mod legacy_compat {
                 "Cannot index array with string",
             );
             assert_eq!(
-                run_one(
-                    "[[3],[4],[5],6] | .[] as {a:$a} ?// {a:$a} ?// $a | $a",
-                    JsonValue::Null
-                ),
+                run_one("[[3],[4],[5],6] | .[] as {a:$a} ?// {a:$a} ?// $a | $a", JsonValue::Null),
                 expected_four_case_values()
             );
         }
@@ -9804,10 +9229,7 @@ mod legacy_compat {
 
             assert_eq!(run_null_input("2-1"), vec![serde_json::json!(1)]);
             assert_eq!(run_null_input("2-(-1)"), vec![serde_json::json!(3)]);
-            assert_eq!(
-                run_one("42 - .", serde_json::json!(11)),
-                vec![serde_json::json!(31)]
-            );
+            assert_eq!(run_one("42 - .", serde_json::json!(11)), vec![serde_json::json!(31)]);
             assert_eq!(
                 run_one("[10 * 20, 20 / .]", serde_json::json!(4)),
                 vec![serde_json::json!([200, 5])]
@@ -9848,12 +9270,7 @@ mod legacy_compat {
 
         #[test]
         fn array_map_builtin_parser_covers_migrated_cases() {
-            let queries = [
-                "[.[] | length]",
-                "[ .[]|length ]",
-                "map(keys)",
-                "map( keys )",
-            ];
+            let queries = ["[.[] | length]", "[ .[]|length ]", "map(keys)", "map( keys )"];
             for query in queries {
                 assert!(
                     parse_array_map_builtin_query(query).is_some(),
@@ -9943,14 +9360,7 @@ mod legacy_compat {
                     r#"[.[3:2], .[-5:4], .[:-2], .[-2:], .[3:3][1:], .[10:]]"#,
                     serde_json::json!([0, 1, 2, 3, 4, 5, 6])
                 ),
-                vec![serde_json::json!([
-                    [],
-                    [2, 3],
-                    [0, 1, 2, 3, 4],
-                    [5, 6],
-                    [],
-                    []
-                ])]
+                vec![serde_json::json!([[], [2, 3], [0, 1, 2, 3, 4], [5, 6], [], []])]
             );
             assert_eq!(
                 run_one(
@@ -9960,10 +9370,7 @@ mod legacy_compat {
                 vec![serde_json::json!(["", "", "abcdefg", "hi", "", ""])]
             );
             assert_eq!(
-                run_one(
-                    "del(.[2:4],.[0],.[-2:])",
-                    serde_json::json!([0, 1, 2, 3, 4, 5, 6, 7])
-                ),
+                run_one("del(.[2:4],.[0],.[-2:])", serde_json::json!([0, 1, 2, 3, 4, 5, 6, 7])),
                 vec![serde_json::json!([1, 4, 5])]
             );
             assert_eq!(
@@ -9991,23 +9398,13 @@ mod legacy_compat {
             );
             assert_eq!(
                 run_null_input("[1,2,3][] as $x | [[4,5,6,7][$x]]"),
-                vec![
-                    serde_json::json!([5]),
-                    serde_json::json!([6]),
-                    serde_json::json!([7])
-                ]
+                vec![serde_json::json!([5]), serde_json::json!([6]), serde_json::json!([7])]
             );
             assert_eq!(
-                run_one(
-                    "42 as $x | . | . | . + 432 | $x + 1",
-                    serde_json::json!(34324)
-                ),
+                run_one("42 as $x | . | . | . + 432 | $x + 1", serde_json::json!(34324)),
                 vec![serde_json::json!(43)]
             );
-            assert_eq!(
-                run_null_input("1 + 2 as $x | -$x"),
-                vec![serde_json::json!(-3)]
-            );
+            assert_eq!(run_null_input("1 + 2 as $x | -$x"), vec![serde_json::json!(-3)]);
             assert_eq!(
                 run_null_input(r#""x" as $x | "a"+"y" as $y | $x+","+$y"#),
                 vec![serde_json::json!("x,ay")]
@@ -10028,10 +9425,7 @@ mod legacy_compat {
                 vec![serde_json::json!([1, 2, 3])]
             );
             assert_eq!(
-                run_one(
-                    ".[] as [$a, $b] | [$b, $a]",
-                    serde_json::json!([[1], [1, 2, 3]])
-                ),
+                run_one(".[] as [$a, $b] | [$b, $a]", serde_json::json!([[1], [1, 2, 3]])),
                 vec![serde_json::json!([null, 1]), serde_json::json!([2, 1])]
             );
             assert_eq!(
@@ -10091,10 +9485,7 @@ mod legacy_compat {
             );
 
             let leaf_input = serde_json::json!({"a":[1,2]});
-            assert_eq!(
-                run_one(leaf_query, leaf_input.clone()),
-                stream_leaf_events(&leaf_input)
-            );
+            assert_eq!(run_one(leaf_query, leaf_input.clone()), stream_leaf_events(&leaf_input));
 
             let selected = run_query_stream_with_paths_and_options(
                 ".|select(length==2)",
@@ -10115,14 +9506,8 @@ mod legacy_compat {
                     .expect("misc compat output"),
                 vec![serde_json::json!("foobar")]
             );
-            assert_eq!(
-                run_one("[{a:1}]", JsonValue::Null),
-                vec![serde_json::json!([{"a": 1}])]
-            );
-            assert_eq!(
-                run_one("def a: .; 0", JsonValue::Null),
-                vec![serde_json::json!(0)]
-            );
+            assert_eq!(run_one("[{a:1}]", JsonValue::Null), vec![serde_json::json!([{"a": 1}])]);
+            assert_eq!(run_one("def a: .; 0", JsonValue::Null), vec![serde_json::json!(0)]);
             assert_eq!(
                 run_one(r#""inter\("pol" + "ation")""#, JsonValue::Null),
                 vec![serde_json::json!("interpolation")]
@@ -10267,10 +9652,7 @@ mod legacy_compat {
                 vec![serde_json::json!(["", "", "a", "aa"])]
             );
             assert_eq!(
-                run_one(
-                    "flatten(3,2,1)",
-                    serde_json::json!([0, [1], [[2]], [[[3]]]])
-                ),
+                run_one("flatten(3,2,1)", serde_json::json!([0, [1], [[2]], [[[3]]]])),
                 vec![
                     serde_json::json!([0, 1, 2, 3]),
                     serde_json::json!([0, 1, 2, [3]]),
@@ -10290,54 +9672,31 @@ mod legacy_compat {
                 vec![serde_json::json!({"a":42})]
             );
             assert_eq!(run_one("null+.", JsonValue::Null), vec![JsonValue::Null]);
-            assert_eq!(
-                run_one(".a+.b", serde_json::json!({"a":42})),
-                vec![serde_json::json!(42)]
-            );
-            assert_eq!(
-                run_null_input("[1,2,3] + [.]"),
-                vec![serde_json::json!([1, 2, 3, null])]
-            );
+            assert_eq!(run_one(".a+.b", serde_json::json!({"a":42})), vec![serde_json::json!(42)]);
+            assert_eq!(run_null_input("[1,2,3] + [.]"), vec![serde_json::json!([1, 2, 3, null])]);
             assert_eq!(
                 run_one(r#"{"a":1} + {"b":2} + {"c":3}"#, serde_json::json!("x")),
                 vec![serde_json::json!({"a":1,"b":2,"c":3})]
             );
             assert_eq!(
-                run_one(
-                    r#""asdf" + "jkl;" + . + . + ."#,
-                    serde_json::json!("some string")
-                ),
-                vec![serde_json::json!(
-                    "asdfjkl;some stringsome stringsome string"
-                )]
+                run_one(r#""asdf" + "jkl;" + . + . + ."#, serde_json::json!("some string")),
+                vec![serde_json::json!("asdfjkl;some stringsome stringsome string")]
             );
             assert_eq!(
-                run_one(
-                    r#""\u0000\u0020\u0000" + ."#,
-                    serde_json::json!("\u{0000} \u{0000}")
-                ),
+                run_one(r#""\u0000\u0020\u0000" + ."#, serde_json::json!("\u{0000} \u{0000}")),
                 vec![serde_json::json!("\u{0000} \u{0000}\u{0000} \u{0000}")]
             );
-            assert_eq!(
-                run_one("42 - .", serde_json::json!(11)),
-                vec![serde_json::json!(31)]
-            );
+            assert_eq!(run_one("42 - .", serde_json::json!(11)), vec![serde_json::json!(31)]);
             assert_eq!(
                 run_one("[1,2,3,4,1] - [.,3]", serde_json::json!(1)),
                 vec![serde_json::json!([2, 4])]
             );
-            assert_eq!(
-                run_null_input("[-1 as $x | 1,$x]"),
-                vec![serde_json::json!([1, -1])]
-            );
+            assert_eq!(run_null_input("[-1 as $x | 1,$x]"), vec![serde_json::json!([1, -1])]);
             assert_eq!(
                 run_one("[10 * 20, 20 / .]", serde_json::json!(4)),
                 vec![serde_json::json!([200, 5])]
             );
-            assert_eq!(
-                run_null_input("1 + 2 * 2 + 10 / 2"),
-                vec![serde_json::json!(10)]
-            );
+            assert_eq!(run_null_input("1 + 2 * 2 + 10 / 2"), vec![serde_json::json!(10)]);
             assert_eq!(
                 run_null_input("[16 / 4 / 2, 16 / 4 * 2, 16 - 4 - 2, 16 - 4 + 2]"),
                 vec![serde_json::json!([2, 8, 10, 14])]
@@ -10360,14 +9719,8 @@ mod legacy_compat {
                 run_null_input("[(infinite, -infinite) % (1, -1, 2, -2)]"),
                 vec![serde_json::json!([0, 0, 0, 0, 1, 0, 1, 0])]
             );
-            assert_eq!(
-                run_null_input("[(1,2) % (10,20)]"),
-                vec![serde_json::json!([1, 2, 1, 2])]
-            );
-            assert_eq!(
-                run_null_input("[nan % 1, 1 % nan]"),
-                vec![serde_json::json!([null, null])]
-            );
+            assert_eq!(run_null_input("[(1,2) % (10,20)]"), vec![serde_json::json!([1, 2, 1, 2])]);
+            assert_eq!(run_null_input("[nan % 1, 1 % nan]"), vec![serde_json::json!([null, null])]);
             assert_eq!(
                 run_null_input("[nan % 1, 1 % nan | isnan]"),
                 vec![serde_json::json!([true, true])]
@@ -10377,10 +9730,7 @@ mod legacy_compat {
                 vec![serde_json::json!(15)]
             );
             assert_eq!(
-                run_one(
-                    "map(toboolean)",
-                    serde_json::json!(["false", "true", false, true])
-                ),
+                run_one("map(toboolean)", serde_json::json!(["false", "true", false, true])),
                 vec![serde_json::json!([false, true, false, true])]
             );
             assert_eq!(
@@ -10464,11 +9814,7 @@ mod legacy_compat {
                     "map(keys)",
                     serde_json::json!([{}, {"abcd":1,"abc":2,"abcde":3}, {"x":1, "z":3, "y":2}])
                 ),
-                vec![serde_json::json!([
-                    [],
-                    ["abc", "abcd", "abcde"],
-                    ["x", "y", "z"]
-                ])]
+                vec![serde_json::json!([[], ["abc", "abcd", "abcde"], ["x", "y", "z"]])]
             );
             assert_eq!(
                 run_null_input("[1,2,empty,3,empty,4]"),
@@ -10551,10 +9897,7 @@ mod legacy_compat {
             run_one("def f: 1; def g: f, def f: 2; def g: 3; f, def f: g; f, g; def f: 4; [f, def f: g; def g: 5; f, g]+[f,g]", JsonValue::Null),
             vec![serde_json::json!([4,1,2,3,3,5,4,1,2,3,3])]
         );
-            assert_eq!(
-                run_one("def a: 0; . | a", JsonValue::Null),
-                vec![serde_json::json!(0)]
-            );
+            assert_eq!(run_one("def a: 0; . | a", JsonValue::Null), vec![serde_json::json!(0)]);
             assert_eq!(
             run_one("def f(a;b;c;d;e;f;g;h;i;j): [j,i,h,g,f,e,d,c,b,a]; f(.[0];.[1];.[2];.[3];.[4];.[5];.[6];.[7];.[8];.[9])", serde_json::json!([0,1,2,3,4,5,6,7,8,9])),
             vec![serde_json::json!([9,8,7,6,5,4,3,2,1,0])]
@@ -10591,10 +9934,7 @@ mod legacy_compat {
             vec![serde_json::from_str::<JsonValue>("[0,0.078459,0.156434,0.233445,0.309016,0.382683,0.45399,0.522498,0.587785,0.649447,0.707106,0.760405,0.809016,0.85264,0.891006,0.923879,0.951056,0.972369,0.987688,0.996917]").expect("json")]
         );
             assert_eq!(
-                run_one(
-                    "def f(x): x | x; f([.], . + [42])",
-                    serde_json::json!([1, 2, 3])
-                ),
+                run_one("def f(x): x | x; f([.], . + [42])", serde_json::json!([1, 2, 3])),
                 vec![
                     serde_json::json!([[[1, 2, 3]]]),
                     serde_json::json!([[1, 2, 3], 42]),
@@ -10654,30 +9994,18 @@ mod legacy_compat {
                 vec![serde_json::json!(14)]
             );
             assert_eq!(
-                run_one(
-                    "[-reduce -.[] as $x (0; . + $x)]",
-                    serde_json::json!([1, 2, 3])
-                ),
+                run_one("[-reduce -.[] as $x (0; . + $x)]", serde_json::json!([1, 2, 3])),
                 vec![serde_json::json!([6])]
             );
             assert_eq!(
-                run_one(
-                    "[reduce .[] / .[] as $i (0; . + $i)]",
-                    serde_json::json!([1, 2])
-                ),
+                run_one("[reduce .[] / .[] as $i (0; . + $i)]", serde_json::json!([1, 2])),
                 vec![serde_json::json!([4.5])]
             );
             assert_eq!(
-                run_one(
-                    "reduce .[] as $x (0; . + $x) as $x | $x",
-                    serde_json::json!([1, 2, 3])
-                ),
+                run_one("reduce .[] as $x (0; . + $x) as $x | $x", serde_json::json!([1, 2, 3])),
                 vec![serde_json::json!(6)]
             );
-            assert_eq!(
-                run_one("reduce . as $n (.; .)", JsonValue::Null),
-                vec![JsonValue::Null]
-            );
+            assert_eq!(run_one("reduce . as $n (.; .)", JsonValue::Null), vec![JsonValue::Null]);
             assert_eq!(
                 run_query_stream_with_paths_and_options(
                     "reduce inputs as $o (0; . + $o.n)",
@@ -10858,30 +10186,18 @@ mod legacy_compat {
             assert!(validate_query("(@uri|@urid)").is_ok());
             assert!(validate_query(". | try @urid catch .").is_ok());
 
+            assert_eq!(run_one("@base64d", serde_json::json!("=")), vec![serde_json::json!("")]);
             assert_eq!(
-                run_one("@base64d", serde_json::json!("=")),
-                vec![serde_json::json!("")]
-            );
-            assert_eq!(
-                run_one(
-                    ". | try @base64d catch .",
-                    serde_json::json!("Not base64 data")
-                ),
-                vec![serde_json::json!(
-                    "string (\"Not base64 data\") is not valid base64 data"
-                )]
+                run_one(". | try @base64d catch .", serde_json::json!("Not base64 data")),
+                vec![serde_json::json!("string (\"Not base64 data\") is not valid base64 data")]
             );
             assert_eq!(
                 run_one(". | try @base64d catch .", serde_json::json!("QUJDa")),
-                vec![serde_json::json!(
-                    "string (\"QUJDa\") trailing base64 byte found"
-                )]
+                vec![serde_json::json!("string (\"QUJDa\") trailing base64 byte found")]
             );
             assert_eq!(
                 run_one(". | try @urid catch .", serde_json::json!("%F0%93%81")),
-                vec![serde_json::json!(
-                    "string (\"%F0%93%81\") is not a valid uri encoding"
-                )]
+                vec![serde_json::json!("string (\"%F0%93%81\") is not a valid uri encoding")]
             );
         }
 

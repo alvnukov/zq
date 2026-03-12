@@ -19,12 +19,7 @@ impl SpoolManager {
         fs::create_dir_all(&root_dir)?;
         Self::sweep_stale_runs(&root_dir)?;
         let (run_dir, run_lock) = Self::create_run_dir_with_lock(&root_dir)?;
-        Ok(Self {
-            root_dir,
-            run_dir,
-            run_lock: Some(run_lock),
-            next_file_id: AtomicU64::new(0),
-        })
+        Ok(Self { root_dir, run_dir, run_lock: Some(run_lock), next_file_id: AtomicU64::new(0) })
     }
 
     pub(super) fn read_stdin_into_mmap(&self) -> Result<InputData, Error> {
@@ -56,6 +51,7 @@ impl SpoolManager {
         let cleanup_lock_path = root_dir.join("cleanup.lock");
         let cleanup_lock = fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(cleanup_lock_path)?;
@@ -101,10 +97,7 @@ impl SpoolManager {
 
     fn create_run_dir_with_lock(root_dir: &Path) -> Result<(PathBuf, File), Error> {
         let pid = std::process::id();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
         for attempt in 0..64u32 {
             let run_dir = root_dir.join(format!("run-{pid}-{now}-{attempt}"));
             match fs::create_dir(&run_dir) {
@@ -127,9 +120,7 @@ impl SpoolManager {
                 Err(err) => return Err(err.into()),
             }
         }
-        Err(Error::Query(
-            "failed to allocate run spool directory".to_string(),
-        ))
+        Err(Error::Query("failed to allocate run spool directory".to_string()))
     }
 }
 
@@ -162,10 +153,7 @@ fn is_nonfatal_lock_error(err: &io::Error) -> bool {
 
 #[cfg(unix)]
 fn is_nonfatal_lock_errno(code: i32) -> bool {
-    matches!(
-        code,
-        libc::EINVAL | libc::ENOTSUP | libc::EOPNOTSUPP | libc::EACCES | libc::EAGAIN
-    )
+    matches!(code, libc::EINVAL | libc::ENOTSUP | libc::EOPNOTSUPP | libc::EACCES | libc::EAGAIN)
 }
 
 #[cfg(not(unix))]
@@ -204,6 +192,18 @@ pub(super) fn resolve_spool_root_dir() -> PathBuf {
     base.join("v1")
 }
 
+pub(super) fn remove_spool_run_dir_if_safe(root_dir: &Path, run_dir: &Path) -> io::Result<()> {
+    if !run_dir.exists() {
+        return Ok(());
+    }
+    let canonical_root = root_dir.canonicalize()?;
+    let canonical_run = run_dir.canonicalize()?;
+    if canonical_run.starts_with(&canonical_root) {
+        fs::remove_dir_all(canonical_run)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,18 +232,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn lock_error_classification_accepts_common_errno_forms() {
-        for code in [
-            libc::EINVAL,
-            libc::ENOTSUP,
-            libc::EOPNOTSUPP,
-            libc::EACCES,
-            libc::EAGAIN,
-        ] {
+        for code in [libc::EINVAL, libc::ENOTSUP, libc::EOPNOTSUPP, libc::EACCES, libc::EAGAIN] {
             let err = io::Error::from_raw_os_error(code);
-            assert!(
-                is_nonfatal_lock_error(&err),
-                "errno={code} must be nonfatal"
-            );
+            assert!(is_nonfatal_lock_error(&err), "errno={code} must be nonfatal");
         }
     }
 
@@ -253,16 +244,4 @@ mod tests {
         assert_eq!(parse_run_dir_pid(&path), Some(std::process::id()));
         assert_eq!(parse_run_dir_pid(Path::new("run-stale")), None);
     }
-}
-
-pub(super) fn remove_spool_run_dir_if_safe(root_dir: &Path, run_dir: &Path) -> io::Result<()> {
-    if !run_dir.exists() {
-        return Ok(());
-    }
-    let canonical_root = root_dir.canonicalize()?;
-    let canonical_run = run_dir.canonicalize()?;
-    if canonical_run.starts_with(&canonical_root) {
-        fs::remove_dir_all(canonical_run)?;
-    }
-    Ok(())
 }

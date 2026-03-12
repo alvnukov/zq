@@ -32,12 +32,7 @@ pub(super) struct SemanticDiffSummary {
 
 impl SemanticDiffSummary {
     pub(super) fn from_diffs(diffs: &[SemanticDiff]) -> Self {
-        let mut summary = Self {
-            total: diffs.len(),
-            changed: 0,
-            added: 0,
-            removed: 0,
-        };
+        let mut summary = Self { total: diffs.len(), changed: 0, added: 0, removed: 0 };
         for diff in diffs {
             match diff.kind {
                 SemanticDiffKind::Added => summary.added += 1,
@@ -224,10 +219,7 @@ fn write_semantic_diff_report_diff<W: Write>(
     for diff in diffs {
         match diff.kind {
             SemanticDiffKind::Added => {
-                let value = diff
-                    .right
-                    .as_ref()
-                    .expect("added diff always has right value");
+                let value = diff.right.as_ref().expect("added diff always has right value");
                 write_semantic_diff_line(
                     writer,
                     '+',
@@ -238,10 +230,7 @@ fn write_semantic_diff_report_diff<W: Write>(
                 )?;
             }
             SemanticDiffKind::Removed => {
-                let value = diff
-                    .left
-                    .as_ref()
-                    .expect("removed diff always has left value");
+                let value = diff.left.as_ref().expect("removed diff always has left value");
                 write_semantic_diff_line(
                     writer,
                     '-',
@@ -252,14 +241,8 @@ fn write_semantic_diff_report_diff<W: Write>(
                 )?;
             }
             SemanticDiffKind::Changed => {
-                let left = diff
-                    .left
-                    .as_ref()
-                    .expect("changed diff always has left value");
-                let right = diff
-                    .right
-                    .as_ref()
-                    .expect("changed diff always has right value");
+                let left = diff.left.as_ref().expect("changed diff always has left value");
+                let right = diff.right.as_ref().expect("changed diff always has right value");
                 let left_rendered = render_semantic_diff_value(left)?;
                 let right_rendered = render_semantic_diff_value(right)?;
                 write_semantic_diff_line(
@@ -301,28 +284,16 @@ fn write_semantic_diff_report_patch<W: Write>(
         write_patch_hunk_header(writer, &diff.path, color)?;
         match diff.kind {
             SemanticDiffKind::Added => {
-                let right = diff
-                    .right
-                    .as_ref()
-                    .expect("added diff always has right value");
+                let right = diff.right.as_ref().expect("added diff always has right value");
                 write_patch_value_line(writer, '+', &render_semantic_diff_value(right)?, color)?;
             }
             SemanticDiffKind::Removed => {
-                let left = diff
-                    .left
-                    .as_ref()
-                    .expect("removed diff always has left value");
+                let left = diff.left.as_ref().expect("removed diff always has left value");
                 write_patch_value_line(writer, '-', &render_semantic_diff_value(left)?, color)?;
             }
             SemanticDiffKind::Changed => {
-                let left = diff
-                    .left
-                    .as_ref()
-                    .expect("changed diff always has left value");
-                let right = diff
-                    .right
-                    .as_ref()
-                    .expect("changed diff always has right value");
+                let left = diff.left.as_ref().expect("changed diff always has left value");
+                let right = diff.right.as_ref().expect("changed diff always has right value");
                 write_patch_value_line(writer, '-', &render_semantic_diff_value(left)?, color)?;
                 write_patch_value_line(writer, '+', &render_semantic_diff_value(right)?, color)?;
             }
@@ -412,10 +383,7 @@ fn write_semantic_diff_line<W: Write>(
             "{marker_style}{marker}{reset} {path_style}{path}{reset}: {left} -> {right}"
         )?;
     } else {
-        writeln!(
-            writer,
-            "{marker_style}{marker}{reset} {path_style}{path}{reset}: {left}"
-        )?;
+        writeln!(writer, "{marker_style}{marker}{reset} {path_style}{path}{reset}: {left}")?;
     }
     Ok(())
 }

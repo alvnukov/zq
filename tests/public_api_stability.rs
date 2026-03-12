@@ -31,10 +31,7 @@ fn readme_public_api_example_contract() {
             .with_anchor_single_token_enrichment(true),
     )
     .expect("format yaml with options");
-    assert!(
-        yaml_docs_anchored.contains("prod"),
-        "yaml output must contain value"
-    );
+    assert!(yaml_docs_anchored.contains("prod"), "yaml output must contain value");
 }
 
 #[test]

@@ -6,8 +6,14 @@ on:
       - "v*"
   workflow_dispatch:
 
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
+  attestations: write
+  id-token: write
 
 env:
   RUST_TOOLCHAIN: "1.94.0"
@@ -35,7 +41,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Validate tag matches Cargo version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -54,13 +60,13 @@ jobs:
           fi
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5
 
       - name: Setup musl toolchain (Linux static build)
         if: runner.os == 'Linux'
@@ -128,7 +134,7 @@ jobs:
           "$($hash.Hash.ToLower())  $PkgDir.zip" | Out-File -Encoding ascii "$PkgDir.zip.sha256"
 
       - name: Upload packaged artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-${{ matrix.target }}
           path: |
@@ -151,7 +157,7 @@ jobs:
 
       - name: Upload DEB and RPM artifacts (Linux)
         if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-musl'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-linux-packages
           path: |
@@ -167,13 +173,18 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: dist
           merge-multiple: true
 
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: dist/*
+
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b
         with:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
@@ -212,7 +223,7 @@ jobs:
 
           cat > "$FORMULA_PATH" <<EOF
           class Zq < Formula
-            desc "Standalone jq-compatible query engine with JSON/YAML input and JSON/YAML output"
+            desc "Standalone jq-compatible query engine with JSON/YAML/TOML/CSV/XML input and output"
             homepage "https://github.com/${GITHUB_REPOSITORY}"
             url "${SOURCE_URL}"
             sha256 "${SHA256}"

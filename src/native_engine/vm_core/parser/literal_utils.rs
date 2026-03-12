@@ -5,31 +5,24 @@ use super::super::ast::{BinaryOp, Stage};
 
 pub(super) fn parse_number_literal(raw: &str) -> Result<ZqValue, String> {
     if parse_json_number(raw).is_some() {
-        return Ok(ZqValue::Number(serde_json::Number::from_string_unchecked(
-            raw.to_string(),
-        )));
+        return Ok(ZqValue::Number(serde_json::Number::from_string_unchecked(raw.to_string())));
     }
 
     if raw.starts_with('.') {
         let adjusted = format!("0{raw}");
         if parse_json_number(&adjusted).is_some() {
-            return Ok(ZqValue::Number(serde_json::Number::from_string_unchecked(
-                adjusted,
-            )));
+            return Ok(ZqValue::Number(serde_json::Number::from_string_unchecked(adjusted)));
         }
     }
 
     if let Some(adjusted) = normalize_jq_float_text(raw) {
         if parse_json_number(&adjusted).is_some() {
-            return Ok(ZqValue::Number(serde_json::Number::from_string_unchecked(
-                adjusted,
-            )));
+            return Ok(ZqValue::Number(serde_json::Number::from_string_unchecked(adjusted)));
         }
     }
 
-    let parsed = raw
-        .parse::<f64>()
-        .map_err(|_| format!("parse error: invalid number literal `{raw}`"))?;
+    let parsed =
+        raw.parse::<f64>().map_err(|_| format!("parse error: invalid number literal `{raw}`"))?;
     if parsed.is_nan() {
         return Err(format!("parse error: invalid number literal `{raw}`"));
     }
@@ -63,9 +56,7 @@ pub(super) fn fold_large_integer_literal_equality(
     let left_norm = left_raw.strip_prefix('+').unwrap_or(&left_raw);
     let right_norm = right_raw.strip_prefix('+').unwrap_or(&right_raw);
     let eq = left_norm == right_norm;
-    Some(Stage::Literal(ZqValue::Bool(
-        if matches!(op, BinaryOp::Eq) { eq } else { !eq },
-    )))
+    Some(Stage::Literal(ZqValue::Bool(if matches!(op, BinaryOp::Eq) { eq } else { !eq })))
 }
 
 fn is_large_plain_integer_text(raw: &str) -> bool {
@@ -100,19 +91,9 @@ pub(super) fn const_object_key_error(value: &ZqValue) -> Option<String> {
         return None;
     }
     let rendered = value.clone().into_json().to_string();
-    Some(format!(
-        "Cannot use {} ({rendered}) as object key",
-        zq_type_name(value)
-    ))
+    Some(format!("Cannot use {} ({rendered}) as object key", zq_type_name(value)))
 }
 
 pub(super) fn zq_type_name(value: &ZqValue) -> &'static str {
-    match value {
-        ZqValue::Null => "null",
-        ZqValue::Bool(_) => "boolean",
-        ZqValue::Number(_) => "number",
-        ZqValue::String(_) => "string",
-        ZqValue::Array(_) => "array",
-        ZqValue::Object(_) => "object",
-    }
+    value.jq_type_name()
 }

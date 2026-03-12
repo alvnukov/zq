@@ -11,10 +11,8 @@ use super::SeqParseResultNative;
 pub(super) fn parse_json_seq_input_native(input: &str) -> SeqParseResultNative {
     let mut result = SeqParseResultNative::default();
     let rs = '\u{1e}';
-    let rs_positions = input
-        .char_indices()
-        .filter_map(|(idx, ch)| (ch == rs).then_some(idx))
-        .collect::<Vec<_>>();
+    let rs_positions =
+        input.char_indices().filter_map(|(idx, ch)| (ch == rs).then_some(idx)).collect::<Vec<_>>();
 
     if rs_positions.is_empty() {
         if !input.trim().is_empty() {
@@ -46,14 +44,12 @@ pub(super) fn parse_json_seq_input_native(input: &str) -> SeqParseResultNative {
         if parse_error {
             if end == input.len() {
                 let (line, col) = index_to_line_col(input, end, true);
-                result.errors.push(format!(
-                    "Unfinished abandoned text at EOF at line {line}, column {col}"
-                ));
-            } else {
-                let (line, col) = index_to_line_col(input, end, false);
                 result
                     .errors
-                    .push(format!("Truncated value at line {line}, column {col}"));
+                    .push(format!("Unfinished abandoned text at EOF at line {line}, column {col}"));
+            } else {
+                let (line, col) = index_to_line_col(input, end, false);
+                result.errors.push(format!("Truncated value at line {line}, column {col}"));
             }
         }
     }
@@ -65,26 +61,17 @@ pub(super) fn parse_json_seq_input_native(input: &str) -> SeqParseResultNative {
 pub(super) fn parse_json_seq_input(input: &str) -> SeqParseResult {
     let parsed = parse_json_seq_input_native(input);
     SeqParseResult {
-        values: parsed
-            .values
-            .into_iter()
-            .map(zq::NativeValue::into_json)
-            .collect(),
+        values: parsed.values.into_iter().map(zq::NativeValue::into_json).collect(),
         errors: parsed.errors,
     }
 }
 
 #[cfg(test)]
 pub(super) fn stream_json_values(values: Vec<JsonValue>) -> Vec<JsonValue> {
-    stream_native_values(
-        values
-            .into_iter()
-            .map(zq::NativeValue::from_json)
-            .collect::<Vec<_>>(),
-    )
-    .into_iter()
-    .map(zq::NativeValue::into_json)
-    .collect()
+    stream_native_values(values.into_iter().map(zq::NativeValue::from_json).collect::<Vec<_>>())
+        .into_iter()
+        .map(zq::NativeValue::into_json)
+        .collect()
 }
 
 pub(super) fn stream_native_values(values: Vec<zq::NativeValue>) -> Vec<zq::NativeValue> {
@@ -117,9 +104,7 @@ fn append_stream_events_native(
             }
             let last = items.len() - 1;
             path.push(zq::NativeValue::from(last as i64));
-            out.push(zq::NativeValue::Array(vec![zq::NativeValue::Array(
-                path.clone(),
-            )]));
+            out.push(zq::NativeValue::Array(vec![zq::NativeValue::Array(path.clone())]));
             path.pop();
         }
         zq::NativeValue::Object(map) => {
@@ -139,9 +124,7 @@ fn append_stream_events_native(
             }
             if let Some(last_key) = last_key {
                 path.push(zq::NativeValue::String(last_key));
-                out.push(zq::NativeValue::Array(vec![zq::NativeValue::Array(
-                    path.clone(),
-                )]));
+                out.push(zq::NativeValue::Array(vec![zq::NativeValue::Array(path.clone())]));
                 path.pop();
             }
         }
@@ -170,14 +153,8 @@ pub(super) enum JsonObjectState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum JsonScanFrame {
-    Array {
-        index: usize,
-        state: JsonArrayState,
-    },
-    Object {
-        key: Option<String>,
-        state: JsonObjectState,
-    },
+    Array { index: usize, state: JsonArrayState },
+    Object { key: Option<String>, state: JsonObjectState },
 }
 
 #[cfg(test)]
@@ -339,10 +316,7 @@ pub(super) fn advance_json_scan(
                     close_json_container(frames, root_done);
                     true
                 } else if let Some(key) = scan_json_string(bytes, i, limit) {
-                    if let Some(JsonScanFrame::Object {
-                        key: frame_key,
-                        state,
-                    }) = frames.last_mut()
+                    if let Some(JsonScanFrame::Object { key: frame_key, state }) = frames.last_mut()
                     {
                         *frame_key = Some(key);
                         *state = JsonObjectState::Colon;
@@ -397,18 +371,12 @@ pub(super) fn scan_json_value(
 
     match bytes[*i] {
         b'{' => {
-            frames.push(JsonScanFrame::Object {
-                key: None,
-                state: JsonObjectState::KeyOrEnd,
-            });
+            frames.push(JsonScanFrame::Object { key: None, state: JsonObjectState::KeyOrEnd });
             *i += 1;
             true
         }
         b'[' => {
-            frames.push(JsonScanFrame::Array {
-                index: 0,
-                state: JsonArrayState::ValueOrEnd,
-            });
+            frames.push(JsonScanFrame::Array { index: 0, state: JsonArrayState::ValueOrEnd });
             *i += 1;
             true
         }

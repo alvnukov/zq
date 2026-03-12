@@ -19,10 +19,7 @@ impl Parser {
     }
 
     pub(super) fn push_function_binding(&mut self, signature: (String, usize), function_id: usize) {
-        self.function_bindings
-            .entry(signature.clone())
-            .or_default()
-            .push(function_id);
+        self.function_bindings.entry(signature.clone()).or_default().push(function_id);
         if let Some(scope) = self.def_scope_stack.last_mut() {
             scope.push(signature);
         }
@@ -33,10 +30,7 @@ impl Parser {
             return None;
         }
         let signature = (name.to_string(), arity);
-        self.local_param_scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(&signature).copied())
+        self.local_param_scopes.iter().rev().find_map(|scope| scope.get(&signature).copied())
     }
 
     pub(super) fn resolve_user_function(&self, name: &str, arity: usize) -> Option<usize> {

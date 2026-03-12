@@ -42,10 +42,7 @@ fn run_cli(query: &str, input_stream: &[JsonValue], null_input: bool) -> Output 
     if null_input {
         cmd.arg("-n");
     }
-    cmd.arg(query)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.arg(query).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd.spawn().expect("spawn zq");
     if !null_input {
@@ -81,9 +78,7 @@ fn jq_oracle_hardcode_baseline_contract() {
             &case.query,
             case.input_stream.clone(),
             &[],
-            EngineRunOptions {
-                null_input: case.null_input,
-            },
+            EngineRunOptions { null_input: case.null_input },
         );
         let cli_out = run_cli(&case.query, &case.input_stream, case.null_input);
 

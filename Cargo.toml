@@ -1,12 +1,15 @@
 [package]
 name = "zq"
-version = "1.4.2"
+version = "1.5.0"
 edition = "2021"
+rust-version = "1.94"
 license = "Apache-2.0"
 description = "Standalone jq-compatible query engine with JSON/YAML/TOML/CSV/XML input and output"
 repository = "https://github.com/alvnukov/zq"
 homepage = "https://github.com/alvnukov/zq"
 readme = "README.md"
+keywords = ["jq", "json", "yaml", "toml", "cli"]
+categories = ["command-line-utilities", "parser-implementations"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }

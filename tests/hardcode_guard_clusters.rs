@@ -26,11 +26,7 @@ fn run_cli(query: &str, input_stream: &[JsonValue], null_input: bool) -> Output 
         cmd.arg("-n");
     }
     // Ensure filters starting with '-' are not parsed as CLI flags.
-    cmd.arg("--")
-        .arg(query)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.arg("--").arg(query).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd.spawn().expect("spawn zq");
     if !null_input {
@@ -145,11 +141,7 @@ fn stream_expr(tokens: &[NumTok]) -> String {
     if tokens.len() == 1 {
         return tokens[0].as_query();
     }
-    let inner = tokens
-        .iter()
-        .map(|t| t.as_query())
-        .collect::<Vec<_>>()
-        .join(",");
+    let inner = tokens.iter().map(|t| t.as_query()).collect::<Vec<_>>().join(",");
     format!("({inner})")
 }
 
@@ -279,11 +271,7 @@ fn apply_delete_selectors(input: &[JsonValue], selectors: &[Selector]) -> Vec<Js
     for sel in selectors {
         match sel {
             Selector::Index(i) => {
-                let idx = if *i < 0 {
-                    input.len() as isize + *i
-                } else {
-                    *i
-                };
+                let idx = if *i < 0 { input.len() as isize + *i } else { *i };
                 if idx >= 0 {
                     let idx = idx as usize;
                     if idx < removed.len() {
@@ -315,12 +303,7 @@ fn hardcode_guard_cluster_modulo_matrix() {
         vec![NumTok::Int(42)],
     ];
     let rhs_cases = vec![
-        vec![
-            NumTok::Int(1),
-            NumTok::Int(-1),
-            NumTok::Int(2),
-            NumTok::Int(-2),
-        ],
+        vec![NumTok::Int(1), NumTok::Int(-1), NumTok::Int(2), NumTok::Int(-2)],
         vec![NumTok::Int(3), NumTok::Int(-3), NumTok::PosInf],
         vec![NumTok::Nan, NumTok::Int(7)],
         vec![NumTok::Int(5)],
@@ -338,12 +321,7 @@ fn hardcode_guard_cluster_modulo_matrix() {
         }
     }
 
-    assert_error_contains(
-        "[(infinite,-infinite)%(0)]",
-        Vec::new(),
-        true,
-        "divisor is zero",
-    );
+    assert_error_contains("[(infinite,-infinite)%(0)]", Vec::new(), true, "divisor is zero");
 }
 
 #[test]
@@ -360,12 +338,8 @@ fn hardcode_guard_cluster_html_and_shorthand() {
                     escape_jq_string(prefix),
                     escape_jq_string(suffix)
                 );
-                let expected = vec![JsonValue::String(format!(
-                    "{}{}{}",
-                    prefix,
-                    escape_html(input),
-                    suffix
-                ))];
+                let expected =
+                    vec![JsonValue::String(format!("{}{}{}", prefix, escape_html(input), suffix))];
                 // Exhaustive matrix: validate semantics in library fast path.
                 assert_success_expected_lib(
                     &query,
@@ -388,23 +362,13 @@ fn hardcode_guard_cluster_html_and_shorthand() {
     }
 
     // Sampled CLI parity checks keep CLI path covered without per-case process spawn cost.
-    let sampled_html = vec![
-        ("<b>", "</b>", "<x&y>"),
-        ("pre:", ":post", "\"quote\""),
-        ("x&y=", "|end", "&<>\"'"),
-    ];
+    let sampled_html =
+        vec![("<b>", "</b>", "<x&y>"), ("pre:", ":post", "\"quote\""), ("x&y=", "|end", "&<>\"'")];
     for (prefix, suffix, input) in sampled_html {
-        let query = format!(
-            "@html \"{}\\(.){}\"",
-            escape_jq_string(prefix),
-            escape_jq_string(suffix)
-        );
-        let expected = vec![JsonValue::String(format!(
-            "{}{}{}",
-            prefix,
-            escape_html(input),
-            suffix
-        ))];
+        let query =
+            format!("@html \"{}\\(.){}\"", escape_jq_string(prefix), escape_jq_string(suffix));
+        let expected =
+            vec![JsonValue::String(format!("{}{}{}", prefix, escape_html(input), suffix))];
         assert_success_expected(
             &query,
             vec![JsonValue::String(input.to_string())],
@@ -438,11 +402,7 @@ fn hardcode_guard_cluster_array_slice_ops() {
         for indexes in &index_sets {
             let query = format!(
                 "[.[{}]]",
-                indexes
-                    .iter()
-                    .map(|i| i.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
+                indexes.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
             );
             let mut row = Vec::new();
             for idx in indexes {
@@ -456,18 +416,9 @@ fn hardcode_guard_cluster_array_slice_ops() {
                 } else {
                     Some(*idx as usize)
                 };
-                row.push(
-                    resolved
-                        .and_then(|p| input.get(p).cloned())
-                        .unwrap_or(JsonValue::Null),
-                );
+                row.push(resolved.and_then(|p| input.get(p).cloned()).unwrap_or(JsonValue::Null));
             }
-            assert_success_expected(
-                &query,
-                vec![arr.clone()],
-                false,
-                vec![JsonValue::Array(row)],
-            );
+            assert_success_expected(&query, vec![arr.clone()], false, vec![JsonValue::Array(row)]);
         }
     }
 
@@ -485,31 +436,17 @@ fn hardcode_guard_cluster_array_slice_ops() {
             .join(",");
         let query = format!("[(index({args}), rindex({args})), indices({args})]");
 
-        let positions = needles
-            .iter()
-            .map(|needle| substring_positions(s, needle))
-            .collect::<Vec<_>>();
+        let positions =
+            needles.iter().map(|needle| substring_positions(s, needle)).collect::<Vec<_>>();
         let mut row = Vec::new();
         for p in &positions {
-            row.push(
-                p.first()
-                    .copied()
-                    .map(JsonValue::from)
-                    .unwrap_or(JsonValue::Null),
-            );
+            row.push(p.first().copied().map(JsonValue::from).unwrap_or(JsonValue::Null));
         }
         for p in &positions {
-            row.push(
-                p.last()
-                    .copied()
-                    .map(JsonValue::from)
-                    .unwrap_or(JsonValue::Null),
-            );
+            row.push(p.last().copied().map(JsonValue::from).unwrap_or(JsonValue::Null));
         }
         for p in positions {
-            row.push(JsonValue::Array(
-                p.into_iter().map(JsonValue::from).collect(),
-            ));
+            row.push(JsonValue::Array(p.into_iter().map(JsonValue::from).collect()));
         }
         assert_success_expected(
             &query,
@@ -520,27 +457,11 @@ fn hardcode_guard_cluster_array_slice_ops() {
     }
 
     let slice_ops = vec![
-        (
-            "abcdef",
-            vec![
-                (Some(1), Some(4), None),
-                (None, Some(2), None),
-                (Some(-3), None, None),
-            ],
-        ),
-        (
-            "abcdef",
-            vec![
-                (Some(1), Some(3), Some((Some(1), None))),
-                (Some(10), None, None),
-            ],
-        ),
+        ("abcdef", vec![(Some(1), Some(4), None), (None, Some(2), None), (Some(-3), None, None)]),
+        ("abcdef", vec![(Some(1), Some(3), Some((Some(1), None))), (Some(10), None, None)]),
         (
             "0123456789",
-            vec![
-                (Some(3), Some(8), Some((Some(2), Some(4)))),
-                (Some(-5), Some(-1), None),
-            ],
+            vec![(Some(3), Some(8), Some((Some(2), Some(4)))), (Some(-5), Some(-1), None)],
         ),
     ];
     for (s, ops) in slice_ops {
@@ -616,12 +537,7 @@ fn hardcode_guard_cluster_delete_assign_reduce() {
     }
 
     let assign_cases = vec![
-        (
-            2,
-            4,
-            vec![vec![], vec!["a", "b"], vec!["a", "b", "c"]],
-            vec![1, 2, 3, 4, 5],
-        ),
+        (2, 4, vec![vec![], vec!["a", "b"], vec!["a", "b", "c"]], vec![1, 2, 3, 4, 5]),
         (1, 3, vec![vec!["x"], vec!["x", "y"]], vec![10, 20, 30, 40]),
     ];
     for (start, end, reps_raw, arr_raw) in assign_cases {
@@ -633,9 +549,7 @@ fn hardcode_guard_cluster_delete_assign_reduce() {
         let suffix = input[e..].to_vec();
         for rep in reps_raw {
             let rep_json = JsonValue::Array(
-                rep.into_iter()
-                    .map(|v| JsonValue::String(v.to_string()))
-                    .collect(),
+                rep.into_iter().map(|v| JsonValue::String(v.to_string())).collect(),
             );
             rep_parts.push(serde_json::to_string(&rep_json).expect("encode replacement"));
             let mut merged = prefix.clone();
@@ -678,11 +592,8 @@ fn hardcode_guard_cluster_delete_assign_reduce() {
             }
             acc[idx] = JsonValue::from(v);
         }
-        let expected_tail = if tail as usize >= acc.len() {
-            Vec::new()
-        } else {
-            acc[tail as usize..].to_vec()
-        };
+        let expected_tail =
+            if tail as usize >= acc.len() { Vec::new() } else { acc[tail as usize..].to_vec() };
         assert_success_expected(
             &query,
             vec![JsonValue::Null],
@@ -722,18 +633,8 @@ fn hardcode_guard_cluster_def_and_tonumber() {
 
     let add_cases = vec![
         ("1", "10", JsonValue::from(4), to_json_number_lossy(15.0)),
-        (
-            "-2",
-            "3.5",
-            JsonValue::String("1.5".to_string()),
-            to_json_number_lossy(3.0),
-        ),
-        (
-            "0.5",
-            "-1.25",
-            JsonValue::from(-3),
-            to_json_number_lossy(-3.75),
-        ),
+        ("-2", "3.5", JsonValue::String("1.5".to_string()), to_json_number_lossy(3.0)),
+        ("0.5", "-1.25", JsonValue::from(-3), to_json_number_lossy(-3.75)),
     ];
     for (left, right_lit, input, expected) in add_cases {
         let query = format!("{left} + tonumber + (\"{right_lit}\" | tonumber)");

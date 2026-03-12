@@ -188,9 +188,7 @@ impl Parser {
             }
         }
         Ok(Query {
-            branches: vec![Pipeline {
-                stages: vec![stage],
-            }],
+            branches: vec![Pipeline { stages: vec![stage] }],
             functions: std::mem::take(&mut self.functions),
         })
     }
@@ -222,11 +220,7 @@ impl Parser {
                     saw_top_level_declaration = true;
                     let function = self.parse_function_def()?;
                     let signature = format!("{}/{}", function.name, function.arity);
-                    if !self
-                        .local_function_defs
-                        .iter()
-                        .any(|seen| seen == &signature)
-                    {
+                    if !self.local_function_defs.iter().any(|seen| seen == &signature) {
                         self.local_function_defs.push(signature);
                         if self.local_function_defs.len() > MAX_LOCAL_FUNCTION_PARAMETERS_OR_DEFS {
                             return Err(
@@ -291,17 +285,14 @@ impl Parser {
 
         for mut function in functions {
             let old_id = function.id;
-            function.id = *function_id_map
-                .get(&old_id)
-                .expect("imported function id must be mapped");
+            function.id =
+                *function_id_map.get(&old_id).expect("imported function id must be mapped");
             function.name = function_name_map
                 .get(&old_id)
                 .expect("imported function name must be mapped")
                 .clone();
             for param_id in &mut function.param_ids {
-                *param_id = *param_id_map
-                    .get(param_id)
-                    .expect("imported param id must be mapped");
+                *param_id = *param_id_map.get(param_id).expect("imported param id must be mapped");
             }
             rewrite_stage_symbol_ids(
                 &mut function.body,
@@ -367,7 +358,7 @@ impl Parser {
         }
         if params.len() > MAX_LOCAL_FUNCTION_PARAMETERS_OR_DEFS {
             return Err(
-                "too many function parameters or local function definitions (max 4095)".to_string(),
+                "too many function parameters or local function definitions (max 4095)".to_string()
             );
         }
         self.expect(Token::Colon)?;
@@ -427,11 +418,7 @@ impl Parser {
         if self.peek() == &Token::DefinedOr {
             self.bump();
             let rhs = self.parse_defined_or_expr()?;
-            Ok(Stage::Binary {
-                op: BinaryOp::DefinedOr,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            })
+            Ok(Stage::Binary { op: BinaryOp::DefinedOr, lhs: Box::new(lhs), rhs: Box::new(rhs) })
         } else {
             Ok(lhs)
         }
@@ -489,11 +476,7 @@ impl Parser {
         while self.peek() == &Token::Or {
             self.bump();
             let rhs = self.parse_and_expr()?;
-            lhs = Stage::Binary {
-                op: BinaryOp::Or,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            lhs = Stage::Binary { op: BinaryOp::Or, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
         Ok(lhs)
     }
@@ -503,11 +486,7 @@ impl Parser {
         while self.peek() == &Token::And {
             self.bump();
             let rhs = self.parse_equality_expr()?;
-            lhs = Stage::Binary {
-                op: BinaryOp::And,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            lhs = Stage::Binary { op: BinaryOp::And, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
         Ok(lhs)
     }
@@ -525,11 +504,7 @@ impl Parser {
             if let Some(folded) = fold_large_integer_literal_equality(&lhs, &rhs, op) {
                 lhs = folded;
             } else {
-                lhs = Stage::Binary {
-                    op,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                };
+                lhs = Stage::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
             }
         }
         Ok(lhs)
@@ -547,11 +522,7 @@ impl Parser {
             };
             self.bump();
             let rhs = self.parse_additive_expr()?;
-            lhs = Stage::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            lhs = Stage::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
         Ok(lhs)
     }
@@ -566,11 +537,7 @@ impl Parser {
             };
             self.bump();
             let rhs = self.parse_multiplicative_expr()?;
-            lhs = Stage::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            lhs = Stage::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
         Ok(lhs)
     }
@@ -586,11 +553,7 @@ impl Parser {
             };
             self.bump();
             let rhs = self.parse_unary_expr()?;
-            lhs = Stage::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            lhs = Stage::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
         Ok(lhs)
     }
@@ -608,10 +571,7 @@ impl Parser {
             // jq parser.y:
             // Term '?' => gen_try(term, BACKTRACK)
             // BACKTRACK corresponds to producing no values on failure.
-            stage = Stage::TryCatch {
-                inner: Box::new(stage),
-                catcher: Box::new(Stage::Empty),
-            };
+            stage = Stage::TryCatch { inner: Box::new(stage), catcher: Box::new(Stage::Empty) };
         }
         Ok(stage)
     }
@@ -645,17 +605,12 @@ impl Parser {
             Token::Field(name) => {
                 let name = name.clone();
                 self.bump();
-                Ok(Stage::Field {
-                    name,
-                    optional: self.consume_optional(),
-                })
+                Ok(Stage::Field { name, optional: self.consume_optional() })
             }
             Token::Dot => self.parse_dot_stage(),
             Token::Rec => {
                 self.bump();
-                Ok(Stage::RecurseBy(Box::new(Stage::Iterate {
-                    optional: true,
-                })))
+                Ok(Stage::RecurseBy(Box::new(Stage::Iterate { optional: true })))
             }
             Token::BreakKw => self.parse_break_expr(),
             Token::Int(value) => {
@@ -679,10 +634,7 @@ impl Parser {
                 if self.peek() == &Token::QQStringStart {
                     self.parse_qq_string(fmt)
                 } else {
-                    Ok(Stage::Format {
-                        fmt,
-                        expr: Box::new(Stage::Identity),
-                    })
+                    Ok(Stage::Format { fmt, expr: Box::new(Stage::Identity) })
                 }
             }
             Token::QQStringStart => self.parse_qq_string("text".to_string()),
@@ -958,9 +910,7 @@ impl Parser {
                     ))
                 } else if name == "recurse" {
                     self.bump();
-                    Ok(Stage::RecurseBy(Box::new(Stage::Iterate {
-                        optional: true,
-                    })))
+                    Ok(Stage::RecurseBy(Box::new(Stage::Iterate { optional: true })))
                 } else if name == "debug" {
                     self.bump();
                     Ok(Stage::Builtin(Builtin::Debug))
@@ -1072,12 +1022,7 @@ impl Parser {
                 } else if self.allow_unresolved_calls {
                     let name = name.clone();
                     self.bump();
-                    Ok(Stage::Call {
-                        function_id: None,
-                        param_id: None,
-                        name,
-                        args: Vec::new(),
-                    })
+                    Ok(Stage::Call { function_id: None, param_id: None, name, args: Vec::new() })
                 } else {
                     Err(format!("{name}/0 is not defined"))
                 }
@@ -1126,10 +1071,7 @@ impl Parser {
                     out = Stage::Binary {
                         op: BinaryOp::Add,
                         lhs: Box::new(out),
-                        rhs: Box::new(Stage::Format {
-                            fmt: fmt.clone(),
-                            expr: Box::new(expr),
-                        }),
+                        rhs: Box::new(Stage::Format { fmt: fmt.clone(), expr: Box::new(expr) }),
                     };
                 }
                 Token::QQStringEnd => {
@@ -1214,111 +1156,63 @@ impl Parser {
             ("_plus", 2) => {
                 let rhs = args.pop().expect("arity checked by match");
                 let lhs = args.pop().expect("arity checked by match");
-                Ok(Stage::Binary {
-                    op: BinaryOp::Add,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                })
+                Ok(Stage::Binary { op: BinaryOp::Add, lhs: Box::new(lhs), rhs: Box::new(rhs) })
             }
             ("_minus", 2) => {
                 let rhs = args.pop().expect("arity checked by match");
                 let lhs = args.pop().expect("arity checked by match");
-                Ok(Stage::Binary {
-                    op: BinaryOp::Sub,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                })
+                Ok(Stage::Binary { op: BinaryOp::Sub, lhs: Box::new(lhs), rhs: Box::new(rhs) })
             }
             ("_multiply", 2) => {
                 let rhs = args.pop().expect("arity checked by match");
                 let lhs = args.pop().expect("arity checked by match");
-                Ok(Stage::Binary {
-                    op: BinaryOp::Mul,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                })
+                Ok(Stage::Binary { op: BinaryOp::Mul, lhs: Box::new(lhs), rhs: Box::new(rhs) })
             }
             ("_divide", 2) => {
                 let rhs = args.pop().expect("arity checked by match");
                 let lhs = args.pop().expect("arity checked by match");
-                Ok(Stage::Binary {
-                    op: BinaryOp::Div,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                })
+                Ok(Stage::Binary { op: BinaryOp::Div, lhs: Box::new(lhs), rhs: Box::new(rhs) })
             }
             ("_mod", 2) => {
                 let rhs = args.pop().expect("arity checked by match");
                 let lhs = args.pop().expect("arity checked by match");
-                Ok(Stage::Binary {
-                    op: BinaryOp::Mod,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                })
+                Ok(Stage::Binary { op: BinaryOp::Mod, lhs: Box::new(lhs), rhs: Box::new(rhs) })
             }
             ("_equal", 2) => {
                 let rhs = args.pop().expect("arity checked by match");
                 let lhs = args.pop().expect("arity checked by match");
-                Ok(Stage::Binary {
-                    op: BinaryOp::Eq,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                })
+                Ok(Stage::Binary { op: BinaryOp::Eq, lhs: Box::new(lhs), rhs: Box::new(rhs) })
             }
             ("_notequal", 2) => {
                 let rhs = args.pop().expect("arity checked by match");
                 let lhs = args.pop().expect("arity checked by match");
-                Ok(Stage::Binary {
-                    op: BinaryOp::Ne,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                })
+                Ok(Stage::Binary { op: BinaryOp::Ne, lhs: Box::new(lhs), rhs: Box::new(rhs) })
             }
             ("_less", 2) => {
                 let rhs = args.pop().expect("arity checked by match");
                 let lhs = args.pop().expect("arity checked by match");
-                Ok(Stage::Binary {
-                    op: BinaryOp::Lt,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                })
+                Ok(Stage::Binary { op: BinaryOp::Lt, lhs: Box::new(lhs), rhs: Box::new(rhs) })
             }
             ("_lesseq", 2) => {
                 let rhs = args.pop().expect("arity checked by match");
                 let lhs = args.pop().expect("arity checked by match");
-                Ok(Stage::Binary {
-                    op: BinaryOp::Le,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                })
+                Ok(Stage::Binary { op: BinaryOp::Le, lhs: Box::new(lhs), rhs: Box::new(rhs) })
             }
             ("_greater", 2) => {
                 let rhs = args.pop().expect("arity checked by match");
                 let lhs = args.pop().expect("arity checked by match");
-                Ok(Stage::Binary {
-                    op: BinaryOp::Gt,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                })
+                Ok(Stage::Binary { op: BinaryOp::Gt, lhs: Box::new(lhs), rhs: Box::new(rhs) })
             }
             ("_greatereq", 2) => {
                 let rhs = args.pop().expect("arity checked by match");
                 let lhs = args.pop().expect("arity checked by match");
-                Ok(Stage::Binary {
-                    op: BinaryOp::Ge,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                })
+                Ok(Stage::Binary { op: BinaryOp::Ge, lhs: Box::new(lhs), rhs: Box::new(rhs) })
             }
             ("_negate", 0) => Ok(Stage::UnaryMinus(Box::new(Stage::Identity))),
             ("pow", 2) => {
                 let rhs = args.pop().expect("arity checked by match");
                 let lhs = args.pop().expect("arity checked by match");
-                Ok(Stage::Binary {
-                    op: BinaryOp::Pow,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                })
+                Ok(Stage::Binary { op: BinaryOp::Pow, lhs: Box::new(lhs), rhs: Box::new(rhs) })
             }
             ("atan2", 2) => {
                 let rhs = args.pop().expect("arity checked by match");
@@ -1518,16 +1412,12 @@ impl Parser {
                 flags: None,
                 tuple_mode: true,
             }),
-            ("scan", 1) => Ok(Stage::RegexScan {
-                regex: Box::new(args.remove(0)),
-                flags: None,
-            }),
+            ("scan", 1) => Ok(Stage::RegexScan { regex: Box::new(args.remove(0)), flags: None }),
             // jq/src/builtin.jq
             // def splits($re): splits($re; null);
-            ("splits", 1) => Ok(Stage::RegexSplits {
-                regex: Box::new(args.remove(0)),
-                flags: None,
-            }),
+            ("splits", 1) => {
+                Ok(Stage::RegexSplits { regex: Box::new(args.remove(0)), flags: None })
+            }
             // jq/src/builtin.jq
             // def sub($re; s): sub($re; s; "");
             ("sub", 2) => {
@@ -1554,29 +1444,21 @@ impl Parser {
             }
             // jq/src/builtin.jq
             // def sort_by(f): _sort_by_impl(map([f]));
-            ("sort_by", 1) => Ok(Stage::SortByImpl(Box::new(by_impl_keys_stage(
-                args.remove(0),
-            )))),
+            ("sort_by", 1) => Ok(Stage::SortByImpl(Box::new(by_impl_keys_stage(args.remove(0))))),
             // jq/src/builtin.jq
             // def group_by(f): _group_by_impl(map([f]));
-            ("group_by", 1) => Ok(Stage::GroupByImpl(Box::new(by_impl_keys_stage(
-                args.remove(0),
-            )))),
+            ("group_by", 1) => Ok(Stage::GroupByImpl(Box::new(by_impl_keys_stage(args.remove(0))))),
             // jq/src/builtin.jq
             // def unique_by(f): _unique_by_impl(map([f]));
-            ("unique_by", 1) => Ok(Stage::UniqueByImpl(Box::new(by_impl_keys_stage(
-                args.remove(0),
-            )))),
+            ("unique_by", 1) => {
+                Ok(Stage::UniqueByImpl(Box::new(by_impl_keys_stage(args.remove(0)))))
+            }
             // jq/src/builtin.jq
             // def min_by(f): _min_by_impl(map([f]));
-            ("min_by", 1) => Ok(Stage::MinByImpl(Box::new(by_impl_keys_stage(
-                args.remove(0),
-            )))),
+            ("min_by", 1) => Ok(Stage::MinByImpl(Box::new(by_impl_keys_stage(args.remove(0))))),
             // jq/src/builtin.jq
             // def max_by(f): _max_by_impl(map([f]));
-            ("max_by", 1) => Ok(Stage::MaxByImpl(Box::new(by_impl_keys_stage(
-                args.remove(0),
-            )))),
+            ("max_by", 1) => Ok(Stage::MaxByImpl(Box::new(by_impl_keys_stage(args.remove(0))))),
             // jq internal builtins exposed from C runtime.
             ("_sort_by_impl", 1) => Ok(Stage::SortByImpl(Box::new(args.remove(0)))),
             ("_group_by_impl", 1) => Ok(Stage::GroupByImpl(Box::new(args.remove(0)))),
@@ -1594,16 +1476,14 @@ impl Parser {
             ("strptime", 1) => Ok(Stage::Strptime(Box::new(args.remove(0)))),
             // jq/src/builtin.c
             // CFUNC(f_strftime, "strftime", 2)
-            ("strftime", 1) => Ok(Stage::Strftime {
-                format: Box::new(args.remove(0)),
-                local: false,
-            }),
+            ("strftime", 1) => {
+                Ok(Stage::Strftime { format: Box::new(args.remove(0)), local: false })
+            }
             // jq/src/builtin.c
             // CFUNC(f_strflocaltime, "strflocaltime", 2)
-            ("strflocaltime", 1) => Ok(Stage::Strftime {
-                format: Box::new(args.remove(0)),
-                local: true,
-            }),
+            ("strflocaltime", 1) => {
+                Ok(Stage::Strftime { format: Box::new(args.remove(0)), local: true })
+            }
             ("flatten", 1) => Ok(Stage::Flatten(Box::new(args.remove(0)))),
             // jq/src/builtin.jq
             // def _flatten($x): ...
@@ -1729,10 +1609,7 @@ impl Parser {
             ("scan", 2) => {
                 let flags = args.pop().expect("arity checked by match");
                 let regex = args.pop().expect("arity checked by match");
-                Ok(Stage::RegexScan {
-                    regex: Box::new(regex),
-                    flags: Some(Box::new(flags)),
-                })
+                Ok(Stage::RegexScan { regex: Box::new(regex), flags: Some(Box::new(flags)) })
             }
             // jq/src/builtin.jq
             // def splits($re; $flags):
@@ -1741,10 +1618,7 @@ impl Parser {
             ("splits", 2) => {
                 let flags = args.pop().expect("arity checked by match");
                 let regex = args.pop().expect("arity checked by match");
-                Ok(Stage::RegexSplits {
-                    regex: Box::new(regex),
-                    flags: Some(Box::new(flags)),
-                })
+                Ok(Stage::RegexSplits { regex: Box::new(regex), flags: Some(Box::new(flags)) })
             }
             // jq/src/builtin.jq
             // def split($re; $flags): [ splits($re; $flags) ];
@@ -1865,9 +1739,7 @@ impl Parser {
     // jq/src/builtin.jq
     // def del(f): delpaths([path(f)]);
     fn expand_del(&self, path_filter: Stage) -> Stage {
-        Stage::DelPaths(Box::new(Stage::ArrayLiteral(vec![Stage::Path(Box::new(
-            path_filter,
-        ))])))
+        Stage::DelPaths(Box::new(Stage::ArrayLiteral(vec![Stage::Path(Box::new(path_filter))])))
     }
 
     // jq/src/builtin.jq
@@ -1948,11 +1820,8 @@ impl Parser {
     ) -> Stage {
         let root_var = self.fresh_internal_name("update-root");
         let rhs_from_root = Stage::Pipe(vec![Stage::Var(root_var.clone()), rhs_filter]);
-        let update = Stage::Binary {
-            op,
-            lhs: Box::new(Stage::Identity),
-            rhs: Box::new(rhs_from_root),
-        };
+        let update =
+            Stage::Binary { op, lhs: Box::new(Stage::Identity), rhs: Box::new(rhs_from_root) };
         Stage::Bind {
             source: Box::new(Stage::Identity),
             pattern: BindingPattern::Var(root_var),
@@ -2011,10 +1880,7 @@ impl Parser {
         ]);
         let path_filter = Stage::Chain(vec![
             Stage::Identity,
-            Stage::DynamicIndex {
-                key: Box::new(key_expr),
-                optional: false,
-            },
+            Stage::DynamicIndex { key: Box::new(key_expr), optional: false },
         ]);
         Stage::Reduce {
             source: Box::new(stream),
@@ -2039,10 +1905,7 @@ impl Parser {
             Stage::Identity,
             Stage::Chain(vec![
                 Stage::Var(idx_var.clone()),
-                Stage::DynamicIndex {
-                    key: Box::new(idx_expr),
-                    optional: false,
-                },
+                Stage::DynamicIndex { key: Box::new(idx_expr), optional: false },
             ]),
         ]);
         let mut stages = vec![stream, pair];
@@ -2062,10 +1925,7 @@ impl Parser {
     // We intentionally model only jq output semantics here; stderr side-effects
     // from the internal `debug` builtin are out-of-scope for vm_core execution.
     fn expand_debug(&self, messages: Stage) -> Stage {
-        Stage::Comma(vec![
-            Stage::Pipe(vec![messages, Stage::Empty]),
-            Stage::Identity,
-        ])
+        Stage::Comma(vec![Stage::Pipe(vec![messages, Stage::Empty]), Stage::Identity])
     }
 
     // jq/src/builtin.jq
@@ -2175,11 +2035,7 @@ impl Parser {
         let body = self.parse_pipe_expr();
         let _ = self.binding_scopes.pop();
         let body = body?;
-        Ok(Stage::Bind {
-            source: Box::new(source),
-            pattern,
-            body: Box::new(body),
-        })
+        Ok(Stage::Bind { source: Box::new(source), pattern, body: Box::new(body) })
     }
 
     fn parse_label_expr(&mut self) -> Result<Stage, String> {
@@ -2202,10 +2058,7 @@ impl Parser {
         let body = self.parse_pipe_expr();
         let _ = self.label_stack.pop();
         let body = body?;
-        Ok(Stage::Label {
-            name,
-            body: Box::new(body),
-        })
+        Ok(Stage::Label { name, body: Box::new(body) })
     }
 
     fn parse_patterns(&mut self) -> Result<BindingPattern, String> {
@@ -2297,11 +2150,7 @@ impl Parser {
             };
             self.expect(Token::Colon)?;
             let pattern = self.parse_pattern()?;
-            return Ok(ObjectBindingEntry {
-                key,
-                store_var: None,
-                pattern,
-            });
+            return Ok(ObjectBindingEntry { key, store_var: None, pattern });
         }
 
         let key = if self.peek() == &Token::LParen {
@@ -2331,11 +2180,7 @@ impl Parser {
 
         self.expect(Token::Colon)?;
         let pattern = self.parse_pattern()?;
-        Ok(ObjectBindingEntry {
-            key,
-            store_var: None,
-            pattern,
-        })
+        Ok(ObjectBindingEntry { key, store_var: None, pattern })
     }
 
     fn parse_if_expr(&mut self) -> Result<Stage, String> {
@@ -2395,10 +2240,7 @@ impl Parser {
         } else {
             Stage::Empty
         };
-        Ok(Stage::TryCatch {
-            inner: Box::new(inner),
-            catcher: Box::new(catcher),
-        })
+        Ok(Stage::TryCatch { inner: Box::new(inner), catcher: Box::new(catcher) })
     }
 
     fn parse_reduce_expr(&mut self) -> Result<Stage, String> {
@@ -2484,10 +2326,8 @@ impl Parser {
             } else if allow_shorthand {
                 shorthand_value
             } else {
-                return Err(
-                    "parse error: expected `:` after parenthesized object key expression"
-                        .to_string(),
-                );
+                return Err("parse error: expected `:` after parenthesized object key expression"
+                    .to_string());
             };
             entries.push((key, value));
             if self.peek() == &Token::Comma {
@@ -2504,21 +2344,13 @@ impl Parser {
         if let Token::Loc(line) = self.peek() {
             let line = *line;
             self.bump();
-            return Ok((
-                ObjectKey::Static("__loc__".to_string()),
-                loc_stage(line),
-                true,
-            ));
+            return Ok((ObjectKey::Static("__loc__".to_string()), loc_stage(line), true));
         }
         if let Token::Binding(name) = self.peek() {
             let name = name.clone();
             self.bump();
             if self.peek() == &Token::Colon {
-                return Ok((
-                    ObjectKey::Expr(Box::new(Stage::Var(name))),
-                    Stage::Identity,
-                    false,
-                ));
+                return Ok((ObjectKey::Expr(Box::new(Stage::Var(name))), Stage::Identity, false));
             }
             return Ok((ObjectKey::Static(name.clone()), Stage::Var(name), true));
         }
@@ -2526,19 +2358,13 @@ impl Parser {
             if let Stage::Literal(ZqValue::String(name)) = key_expr {
                 return Ok((
                     ObjectKey::Static(name.clone()),
-                    Stage::Field {
-                        name,
-                        optional: false,
-                    },
+                    Stage::Field { name, optional: false },
                     true,
                 ));
             }
             return Ok((
                 ObjectKey::Expr(Box::new(key_expr.clone())),
-                Stage::DynamicIndex {
-                    key: Box::new(key_expr),
-                    optional: false,
-                },
+                Stage::DynamicIndex { key: Box::new(key_expr), optional: false },
                 true,
             ));
         }
@@ -2556,10 +2382,7 @@ impl Parser {
         if let Some(name) = self.parse_object_key_name() {
             return Ok((
                 ObjectKey::Static(name.clone()),
-                Stage::Field {
-                    name,
-                    optional: false,
-                },
+                Stage::Field { name, optional: false },
                 true,
             ));
         }
@@ -2569,10 +2392,7 @@ impl Parser {
         if self.has_unparenthesized_object_key_expr() {
             return Err("May need parentheses around object key expression".to_string());
         }
-        Err(format!(
-            "parse error: unsupported object key token {:?}",
-            self.peek()
-        ))
+        Err(format!("parse error: unsupported object key token {:?}", self.peek()))
     }
 
     fn has_unparenthesized_object_key_expr(&self) -> bool {
@@ -2717,9 +2537,7 @@ impl Parser {
         match self.peek() {
             Token::RBracket => {
                 self.bump();
-                Ok(Stage::Iterate {
-                    optional: self.consume_optional(),
-                })
+                Ok(Stage::Iterate { optional: self.consume_optional() })
             }
             Token::Str(name) => {
                 let start_pos = self.pos;
@@ -2727,10 +2545,7 @@ impl Parser {
                 self.bump();
                 if self.peek() == &Token::RBracket {
                     self.expect(Token::RBracket)?;
-                    Ok(Stage::Field {
-                        name,
-                        optional: self.consume_optional(),
-                    })
+                    Ok(Stage::Field { name, optional: self.consume_optional() })
                 } else {
                     self.pos = start_pos;
                     let first = self.parse_pipe_expr()?;
@@ -2784,10 +2599,9 @@ impl Parser {
                 } else if self.peek() == &Token::RBracket {
                     self.expect(Token::RBracket)?;
                     match first {
-                        BracketBound::Static(index) => Ok(Stage::Index {
-                            index,
-                            optional: self.consume_optional(),
-                        }),
+                        BracketBound::Static(index) => {
+                            Ok(Stage::Index { index, optional: self.consume_optional() })
+                        }
                         BracketBound::Dynamic(key) => Ok(Stage::DynamicIndex {
                             key: Box::new(key),
                             optional: self.consume_optional(),
@@ -2818,13 +2632,7 @@ impl Parser {
                     };
                     self.expect(Token::RBracket)?;
                     let optional = self.consume_optional();
-                    Ok(
-                        self.finish_bracket_slice(
-                            Some(BracketBound::Dynamic(first)),
-                            end,
-                            optional,
-                        ),
-                    )
+                    Ok(self.finish_bracket_slice(Some(BracketBound::Dynamic(first)), end, optional))
                 } else {
                     self.expect(Token::RBracket)?;
                     Ok(Stage::DynamicIndex {
@@ -2881,18 +2689,10 @@ impl Parser {
                 BracketBound::Static(v) => Some(v),
                 BracketBound::Dynamic(_) => None,
             });
-            return Stage::Slice {
-                start,
-                end,
-                optional,
-            };
+            return Stage::Slice { start, end, optional };
         }
-        let start_expr = start
-            .map(bracket_bound_to_stage)
-            .unwrap_or(Stage::Literal(ZqValue::Null));
-        let end_expr = end
-            .map(bracket_bound_to_stage)
-            .unwrap_or(Stage::Literal(ZqValue::Null));
+        let start_expr = start.map(bracket_bound_to_stage).unwrap_or(Stage::Literal(ZqValue::Null));
+        let end_expr = end.map(bracket_bound_to_stage).unwrap_or(Stage::Literal(ZqValue::Null));
         Stage::DynamicIndex {
             key: Box::new(Stage::ObjectLiteral(vec![
                 (ObjectKey::Static("start".to_string()), start_expr),
@@ -2926,11 +2726,7 @@ impl Parser {
             self.bump();
             Ok(())
         } else {
-            Err(format!(
-                "parse error: expected {:?}, found {:?}",
-                wanted,
-                self.peek()
-            ))
+            Err(format!("parse error: expected {:?}, found {:?}", wanted, self.peek()))
         }
     }
 
@@ -3007,10 +2803,7 @@ mod tests {
         let err = parser
             .resolve_module_code_path(&abs_name, None)
             .expect_err("absolute import path must fail");
-        assert!(
-            err.starts_with("module not found:"),
-            "unexpected error: {err}"
-        );
+        assert!(err.starts_with("module not found:"), "unexpected error: {err}");
     }
 
     #[test]
@@ -3025,15 +2818,11 @@ mod tests {
         let parser =
             Parser::new_with_context(Vec::new(), vec![non_canonical_root.clone()], None, 0);
 
-        let resolved_code = parser
-            .resolve_module_code_path("one", None)
-            .expect("resolve code");
+        let resolved_code = parser.resolve_module_code_path("one", None).expect("resolve code");
         let expected_code = fs::canonicalize(mods_dir.join("one.jq")).expect("canonical jq");
         assert_eq!(resolved_code, expected_code);
 
-        let resolved_data = parser
-            .resolve_module_data_path("one", None)
-            .expect("resolve data");
+        let resolved_data = parser.resolve_module_data_path("one", None).expect("resolve data");
         let expected_data = fs::canonicalize(mods_dir.join("one.json")).expect("canonical json");
         assert_eq!(resolved_data, expected_data);
     }
@@ -3041,9 +2830,7 @@ mod tests {
     #[test]
     fn load_module_query_rejects_depth_above_limit() {
         let parser = Parser::new_with_context(Vec::new(), Vec::new(), None, 32);
-        let err = parser
-            .load_module_query("any", None)
-            .expect_err("must reject depth");
+        let err = parser.load_module_query("any", None).expect_err("must reject depth");
         assert_eq!(err, "module import depth exceeded");
     }
 
@@ -3059,9 +2846,7 @@ mod tests {
             0,
         );
 
-        let value = parser
-            .load_module_data("stream", None, false)
-            .expect("load module data");
+        let value = parser.load_module_data("stream", None, false).expect("load module data");
         assert_eq!(
             value,
             ZqValue::Array(vec![
@@ -3082,10 +2867,7 @@ mod tests {
         );
 
         let roots = parser.module_search_roots(None);
-        assert_eq!(
-            roots,
-            vec![PathBuf::from("."), module_origin.path().join("librel")]
-        );
+        assert_eq!(roots, vec![PathBuf::from("."), module_origin.path().join("librel")]);
     }
 
     #[test]
@@ -3118,10 +2900,7 @@ mod tests {
     #[test]
     fn import_directive_requires_identifier_or_binding_alias() {
         let err = parse_query(r#"import "mod" as 1; ."#).expect_err("must fail");
-        assert!(
-            err.contains("expected alias after `as` in import"),
-            "err={err}"
-        );
+        assert!(err.contains("expected alias after `as` in import"), "err={err}");
     }
 
     #[test]
@@ -3265,10 +3044,7 @@ mod tests {
             fold_large_integer_literal_equality(&lhs, &rhs_diff, BinaryOp::Ne),
             Some(Stage::Literal(ZqValue::Bool(true)))
         );
-        assert_eq!(
-            fold_large_integer_literal_equality(&lhs, &rhs_diff, BinaryOp::Gt),
-            None
-        );
+        assert_eq!(fold_large_integer_literal_equality(&lhs, &rhs_diff, BinaryOp::Gt), None);
     }
 
     #[test]
@@ -3283,10 +3059,7 @@ mod tests {
     #[test]
     fn stage_helper_construction_contract() {
         let pred = Stage::Literal(ZqValue::Bool(true));
-        assert_eq!(
-            select_stage(pred.clone()),
-            Stage::Select(Box::new(pred.clone()))
-        );
+        assert_eq!(select_stage(pred.clone()), Stage::Select(Box::new(pred.clone())));
 
         let eq = type_eq_stage("number");
         match eq {
@@ -3318,19 +3091,13 @@ mod tests {
     #[test]
     fn stage_helper_abs_loc_bracket_and_chain_contract() {
         let abs = abs_stage();
-        assert!(
-            matches!(abs, Stage::IfElse { .. }),
-            "abs stage shape: {abs:?}"
-        );
+        assert!(matches!(abs, Stage::IfElse { .. }), "abs stage shape: {abs:?}");
 
         let loc = loc_stage(7);
         assert_eq!(
             loc,
             Stage::Literal(ZqValue::Object(IndexMap::from([
-                (
-                    "file".to_string(),
-                    ZqValue::String("<top-level>".to_string())
-                ),
+                ("file".to_string(), ZqValue::String("<top-level>".to_string())),
                 ("line".to_string(), ZqValue::from(7i64)),
             ])))
         );
@@ -3339,10 +3106,7 @@ mod tests {
             bracket_bound_to_stage(BracketBound::Static(3)),
             Stage::Literal(ZqValue::from(3))
         );
-        assert_eq!(
-            bracket_bound_to_stage(BracketBound::Dynamic(Stage::Identity)),
-            Stage::Identity
-        );
+        assert_eq!(bracket_bound_to_stage(BracketBound::Dynamic(Stage::Identity)), Stage::Identity);
 
         let chain = append_chain_stage(Stage::Identity, Stage::Literal(ZqValue::from(1)));
         assert!(matches!(chain, Stage::Chain(ref values) if values.len() == 2));
@@ -3354,13 +3118,7 @@ mod tests {
     fn isfinite_stage_matches_expected_shape() {
         let stage = isfinite_stage();
         assert!(
-            matches!(
-                stage,
-                Stage::Binary {
-                    op: BinaryOp::And,
-                    ..
-                }
-            ),
+            matches!(stage, Stage::Binary { op: BinaryOp::And, .. }),
             "isfinite stage shape: {stage:?}"
         );
     }
@@ -3369,10 +3127,7 @@ mod tests {
     fn wrap_with_import_bindings_preserves_binding_order() {
         let wrapped = wrap_with_import_bindings(
             Stage::Identity,
-            &[
-                ("a".to_string(), ZqValue::from(1)),
-                ("b".to_string(), ZqValue::from(2)),
-            ],
+            &[("a".to_string(), ZqValue::from(1)), ("b".to_string(), ZqValue::from(2))],
         );
         assert_eq!(
             wrapped,
@@ -3405,20 +3160,9 @@ mod tests {
         let function_name_map = BTreeMap::from([(1usize, "ns::new".to_string())]);
         let param_id_map = BTreeMap::from([(10usize, 20usize)]);
 
-        rewrite_stage_symbol_ids(
-            &mut stage,
-            &function_id_map,
-            &function_name_map,
-            &param_id_map,
-        );
+        rewrite_stage_symbol_ids(&mut stage, &function_id_map, &function_name_map, &param_id_map);
 
-        let Stage::Call {
-            function_id,
-            param_id,
-            name,
-            args,
-        } = stage
-        else {
+        let Stage::Call { function_id, param_id, name, args } = stage else {
             panic!("expected call stage");
         };
         assert_eq!(function_id, Some(11));
@@ -3492,12 +3236,8 @@ mod tests {
     #[test]
     fn resolve_param_call_prefers_innermost_scope() {
         let mut parser = Parser::new(vec![Token::End]);
-        parser
-            .local_param_scopes
-            .push(BTreeMap::from([(("x".to_string(), 0), 1)]));
-        parser
-            .local_param_scopes
-            .push(BTreeMap::from([(("x".to_string(), 0), 2)]));
+        parser.local_param_scopes.push(BTreeMap::from([(("x".to_string(), 0), 1)]));
+        parser.local_param_scopes.push(BTreeMap::from([(("x".to_string(), 0), 2)]));
 
         assert_eq!(parser.resolve_param_call("x", 0), Some(2));
         assert_eq!(parser.resolve_param_call("x", 1), None);

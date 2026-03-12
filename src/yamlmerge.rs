@@ -172,10 +172,7 @@ fn collect_merge_style_hints(input: &str) -> Result<Vec<MergeStyleHints>, String
         let Some(key_token) = extract_mapping_key_token(trimmed) else {
             continue;
         };
-        let path: Path = key_stack
-            .iter()
-            .map(|(_, key)| PathSegment::Key(key.clone()))
-            .collect();
+        let path: Path = key_stack.iter().map(|(_, key)| PathSegment::Key(key.clone())).collect();
         if key_token == "<<" {
             current.plain_merge_paths.insert(path);
         } else if key_token == "\"<<\"" || key_token == "'<<'" {
@@ -335,10 +332,7 @@ obj:
             let j = serde_json::to_value(n).expect("json");
             assert_eq!(j["obj"]["x"], a, "x mismatch for source:\n{src}");
             assert_eq!(j["obj"]["y"], b, "y precedence mismatch for source:\n{src}");
-            assert_eq!(
-                j["obj"]["z"], b,
-                "local override mismatch for source:\n{src}"
-            );
+            assert_eq!(j["obj"]["z"], b, "local override mismatch for source:\n{src}");
         }
     }
 }

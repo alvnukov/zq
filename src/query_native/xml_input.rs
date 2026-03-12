@@ -5,10 +5,7 @@ pub(super) fn parse_xml_native_doc(input: &str) -> Result<ZqValue, Error> {
         roxmltree::Document::parse(input).map_err(|e| Error::Runtime(format!("xml: {e}")))?;
     let root = document.root_element();
     let mut out = serde_json::Map::new();
-    out.insert(
-        root.tag_name().name().to_string(),
-        xml_element_to_json_value(root),
-    );
+    out.insert(root.tag_name().name().to_string(), xml_element_to_json_value(root));
     Ok(ZqValue::from_json(JsonValue::Object(out)))
 }
 
@@ -16,10 +13,7 @@ fn xml_element_to_json_value(node: roxmltree::Node<'_, '_>) -> JsonValue {
     let mut object = serde_json::Map::new();
 
     for attr in node.attributes() {
-        object.insert(
-            format!("@{}", attr.name()),
-            JsonValue::String(attr.value().to_string()),
-        );
+        object.insert(format!("@{}", attr.name()), JsonValue::String(attr.value().to_string()));
     }
 
     for child in node.children().filter(|child| child.is_element()) {

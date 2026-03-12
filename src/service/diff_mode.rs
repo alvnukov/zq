@@ -4,9 +4,7 @@ use std::io::IsTerminal;
 
 pub(super) fn run_diff_mode(cli: &Cli, spool: &SpoolManager) -> Result<i32, Error> {
     if cli.from_file.is_some() {
-        return Err(Error::Query(
-            "--diff mode cannot be combined with -f/--from-file".to_string(),
-        ));
+        return Err(Error::Query("--diff mode cannot be combined with -f/--from-file".to_string()));
     }
     if cli.input_legacy.is_some() {
         return Err(Error::Query(
@@ -77,9 +75,9 @@ pub(super) fn resolve_diff_paths(cli: &Cli) -> Result<(String, String), Error> {
             }
             Ok(("-".to_string(), right.clone()))
         }
-        (None, Some(_)) => Err(Error::Query(
-            "--diff mode expects positional paths as LEFT RIGHT".to_string(),
-        )),
+        (None, Some(_)) => {
+            Err(Error::Query("--diff mode expects positional paths as LEFT RIGHT".to_string()))
+        }
         (None, None) => Err(Error::Query(
             "--diff mode expects LEFT RIGHT (or a single RIGHT to compare stdin against RIGHT)"
                 .to_string(),
@@ -94,6 +92,7 @@ fn parse_diff_docs(
     format: zq::NativeInputFormat,
     csv_parse_json_cells: bool,
 ) -> Result<Vec<zq::NativeValue>, Error> {
+    let tool = cli_error_tool_name();
     zq::parse_native_input_values_with_format_native(input, format)
         .map(|mut parsed| {
             if csv_parse_json_cells && matches!(format, zq::NativeInputFormat::Csv) {
@@ -104,7 +103,7 @@ fn parse_diff_docs(
         .map_err(|err| {
             Error::Query(format!(
                 "--diff: cannot parse {side} input `{path}`: {}",
-                zq::format_query_error("zq", input, &err)
+                zq::format_query_error(tool, input, &err)
             ))
         })
 }
@@ -116,12 +115,8 @@ pub(super) fn build_custom_input_stream(
     doc_mode: zq::DocMode,
 ) -> Result<Vec<JsonValue>, zq::EngineError> {
     let format = resolve_effective_input_format(cli.input_format, "-");
-    build_custom_input_stream_native(cli, input, doc_mode, format).map(|values| {
-        values
-            .into_iter()
-            .map(zq::NativeValue::into_json)
-            .collect::<Vec<_>>()
-    })
+    build_custom_input_stream_native(cli, input, doc_mode, format)
+        .map(|values| values.into_iter().map(zq::NativeValue::into_json).collect::<Vec<_>>())
 }
 
 pub(super) fn build_custom_input_stream_native(
@@ -130,18 +125,15 @@ pub(super) fn build_custom_input_stream_native(
     doc_mode: zq::DocMode,
     input_format: zq::NativeInputFormat,
 ) -> Result<Vec<zq::NativeValue>, zq::EngineError> {
+    let tool = cli_error_tool_name();
     if cli.raw_input {
         if cli.slurp {
             return Ok(vec![zq::NativeValue::String(input.to_string())]);
         }
-        return Ok(raw_input_lines(input)
-            .into_iter()
-            .map(zq::NativeValue::String)
-            .collect());
+        return Ok(raw_input_lines(input).into_iter().map(zq::NativeValue::String).collect());
     }
 
-    let mut parsed =
-        zq::parse_jq_input_values_with_format_native(input, doc_mode, "zq", input_format)?;
+    let mut parsed = zq::parse_jq_input_values_with_format_native(input, doc_mode, tool, input_format)?;
     if cli.csv_parse_json_cells && matches!(input_format, zq::NativeInputFormat::Csv) {
         decode_csv_json_cells_in_place(&mut parsed);
     }

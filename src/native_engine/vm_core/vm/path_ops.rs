@@ -78,10 +78,7 @@ struct PathTrace {
 
 pub(super) fn run_path(op: &Op, input: &ZqValue) -> Result<Vec<ZqValue>, String> {
     let traces = eval_path_expr(op, input.clone(), Vec::new(), input)?;
-    Ok(traces
-        .into_iter()
-        .map(|trace| ZqValue::Array(trace.path))
-        .collect())
+    Ok(traces.into_iter().map(|trace| ZqValue::Array(trace.path)).collect())
 }
 
 pub(super) fn run_paths_builtin(input: &ZqValue) -> Vec<ZqValue> {
@@ -127,16 +124,10 @@ fn eval_path_expr(
     root: &ZqValue,
 ) -> Result<Vec<PathTrace>, String> {
     match op {
-        Op::Identity => Ok(vec![PathTrace {
-            path,
-            value: current,
-        }]),
+        Op::Identity => Ok(vec![PathTrace { path, value: current }]),
         Op::Chain(steps) => eval_path_chain(steps, current, path, root),
         Op::Pipe(stages) => {
-            let mut traces = vec![PathTrace {
-                path,
-                value: current,
-            }];
+            let mut traces = vec![PathTrace { path, value: current }];
             for (idx, stage) in stages.iter().enumerate() {
                 if path_stage_supported_for_tracing(stage) {
                     let mut next = Vec::new();
@@ -154,10 +145,7 @@ fn eval_path_expr(
                 let sample = if values.is_empty() {
                     ZqValue::Array(Vec::new())
                 } else if values.len() == 1 {
-                    values
-                        .into_iter()
-                        .next()
-                        .expect("single value exists for len == 1")
+                    values.into_iter().next().expect("single value exists for len == 1")
                 } else {
                     ZqValue::Array(values)
                 };
@@ -175,24 +163,14 @@ fn eval_path_expr(
             }
             Ok(traces)
         }
-        Op::Call {
-            function_id: None,
-            param_id: Some(param_id),
-            args,
-            ..
-        } if args.is_empty() => {
+        Op::Call { function_id: None, param_id: Some(param_id), args, .. } if args.is_empty() => {
             let Some(arg_filter) = lookup_param_closure(*param_id, 0) else {
                 return Err(format!("Invalid path expression with result ${param_id}"));
             };
             let _guard = push_bindings(arg_filter.bindings.clone());
             eval_path_expr(&arg_filter.op, current, path, root)
         }
-        Op::Call {
-            function_id: Some(function_id),
-            name,
-            args,
-            ..
-        } => {
+        Op::Call { function_id: Some(function_id), name, args, .. } => {
             let arity = args.len();
             let Some(function) = lookup_function_by_id(*function_id) else {
                 return Err(format!("{name}/{arity} is not defined"));
@@ -202,17 +180,12 @@ fn eval_path_expr(
             }
             let captured_args: Vec<CapturedFilter> =
                 args.iter().map(capture_call_argument).collect();
-            let frame = CallFrame {
-                params: function.param_ids.into_iter().zip(captured_args).collect(),
-            };
+            let frame =
+                CallFrame { params: function.param_ids.into_iter().zip(captured_args).collect() };
             let _call_frame_guard = push_call_frame(frame);
             eval_path_expr(&function.body, current, path, root)
         }
-        Op::Bind {
-            source,
-            pattern,
-            body,
-        } => {
+        Op::Bind { source, pattern, body } => {
             let source_values = eval_many(source, &current)?;
             let mut out = Vec::new();
             let mut source_iter = source_values.into_iter().peekable();
@@ -227,10 +200,7 @@ fn eval_path_expr(
                 let next_current = if is_last {
                     current_slot.take().expect("current value still available")
                 } else {
-                    current_slot
-                        .as_ref()
-                        .expect("current value still available")
-                        .clone()
+                    current_slot.as_ref().expect("current value still available").clone()
                 };
                 let next_path = if is_last {
                     path_slot.take().expect("path still available")
@@ -258,34 +228,23 @@ fn eval_path_expr(
             eval_path_recurse(next, Some(cond.as_ref()), current, path, root)
         }
         Op::Select(cond) => {
-            let truthy_count = eval_many(cond, &current)?
-                .into_iter()
-                .filter(jq_truthy)
-                .count();
+            let truthy_count = eval_many(cond, &current)?.into_iter().filter(jq_truthy).count();
             if truthy_count == 0 {
                 return Ok(Vec::new());
             }
             let mut out = Vec::with_capacity(truthy_count);
             for _ in 1..truthy_count {
-                out.push(PathTrace {
-                    path: path.clone(),
-                    value: current.clone(),
-                });
+                out.push(PathTrace { path: path.clone(), value: current.clone() });
             }
-            out.push(PathTrace {
-                path,
-                value: current,
-            });
+            out.push(PathTrace { path, value: current });
             Ok(out)
         }
         Op::GetField { name, optional } => eval_path_field(current, path, name, *optional),
         Op::GetIndex { index, optional } => eval_path_index(current, path, *index, *optional),
         Op::GetPath(arg) => eval_path_getpath(current, path, arg),
-        Op::Slice {
-            start,
-            end,
-            optional,
-        } => eval_path_slice(current, path, *start, *end, *optional),
+        Op::Slice { start, end, optional } => {
+            eval_path_slice(current, path, *start, *end, *optional)
+        }
         Op::DynamicIndex { key, optional } => {
             eval_path_dynamic_index(current, path, key, *optional, root)
         }
@@ -325,16 +284,8 @@ fn path_stage_supported_for_tracing(op: &Op) -> bool {
         | Op::Builtin(Builtin::First)
         | Op::Builtin(Builtin::Last)
         | Op::Bind { .. } => true,
-        Op::Call {
-            function_id: None,
-            param_id: Some(_),
-            args,
-            ..
-        } if args.is_empty() => true,
-        Op::Call {
-            function_id: Some(_),
-            ..
-        } => true,
+        Op::Call { function_id: None, param_id: Some(_), args, .. } if args.is_empty() => true,
+        Op::Call { function_id: Some(_), .. } => true,
         _ => false,
     }
 }
@@ -359,10 +310,7 @@ fn eval_path_recurse_inner(
     root: &ZqValue,
     out: &mut Vec<PathTrace>,
 ) -> Result<(), String> {
-    out.push(PathTrace {
-        path: path.clone(),
-        value: current.clone(),
-    });
+    out.push(PathTrace { path: path.clone(), value: current.clone() });
     let next_traces = eval_path_expr(next, current, path, root)?;
     for trace in next_traces {
         if let Some(cond) = cond {
@@ -378,15 +326,9 @@ fn eval_path_recurse_inner(
 
 fn format_invalid_path_near(next: &Op, value: &ZqValue) -> Option<String> {
     match next {
-        Op::Chain(steps) => steps
-            .first()
-            .and_then(|first| format_invalid_path_near(first, value)),
-        Op::Pipe(stages) => stages
-            .first()
-            .and_then(|first| format_invalid_path_near(first, value)),
-        Op::Comma(items) => items
-            .first()
-            .and_then(|first| format_invalid_path_near(first, value)),
+        Op::Chain(steps) => steps.first().and_then(|first| format_invalid_path_near(first, value)),
+        Op::Pipe(stages) => stages.first().and_then(|first| format_invalid_path_near(first, value)),
+        Op::Comma(items) => items.first().and_then(|first| format_invalid_path_near(first, value)),
         Op::GetIndex { index, .. } => Some(format!(
             "Invalid path expression near attempt to access element {} of {}",
             index,
@@ -419,20 +361,14 @@ fn eval_path_chain(
     root: &ZqValue,
 ) -> Result<Vec<PathTrace>, String> {
     let Some((first, rest)) = steps.split_first() else {
-        return Ok(vec![PathTrace {
-            path,
-            value: current,
-        }]);
+        return Ok(vec![PathTrace { path, value: current }]);
     };
     if !path_stage_supported_for_tracing(first) {
         let values = eval_many(first, &current)?;
         let sample = if values.is_empty() {
             ZqValue::Array(Vec::new())
         } else if values.len() == 1 {
-            values
-                .into_iter()
-                .next()
-                .expect("single value exists for len == 1")
+            values.into_iter().next().expect("single value exists for len == 1")
         } else {
             ZqValue::Array(values)
         };
@@ -472,11 +408,7 @@ fn eval_path_field(
             if optional {
                 return Ok(Vec::new());
             }
-            return Err(format!(
-                "Cannot index {} with string {:?}",
-                type_name(&other),
-                name
-            ));
+            return Err(format!("Cannot index {} with string {:?}", type_name(&other), name));
         }
     };
     path.push(ZqValue::String(name.to_string()));
@@ -501,11 +433,7 @@ fn eval_path_index(
             if optional {
                 return Ok(Vec::new());
             }
-            return Err(format!(
-                "Cannot index {} with number ({})",
-                type_name(&other),
-                index
-            ));
+            return Err(format!("Cannot index {} with number ({})", type_name(&other), index));
         }
     };
     path.push(ZqValue::from(index));
@@ -528,10 +456,7 @@ fn eval_path_getpath(
         let mut next_value = if is_last {
             current_slot.take().expect("current value still available")
         } else {
-            current_slot
-                .as_ref()
-                .expect("current value still available")
-                .clone()
+            current_slot.as_ref().expect("current value still available").clone()
         };
         let mut next_path = if is_last {
             path_slot.take().expect("path still available")
@@ -545,10 +470,7 @@ fn eval_path_getpath(
             }
             next_path.push(component);
         }
-        out.push(PathTrace {
-            path: next_path,
-            value: next_value,
-        });
+        out.push(PathTrace { path: next_path, value: next_value });
     }
     Ok(out)
 }
@@ -573,10 +495,7 @@ fn eval_path_slice(
 
 fn slice_path_component_value(start: Option<i64>, end: Option<i64>) -> ZqValue {
     let mut key = IndexMap::new();
-    key.insert(
-        "start".to_string(),
-        start.map_or(ZqValue::Null, ZqValue::from),
-    );
+    key.insert("start".to_string(), start.map_or(ZqValue::Null, ZqValue::from));
     key.insert("end".to_string(), end.map_or(ZqValue::Null, ZqValue::from));
     ZqValue::Object(key)
 }
@@ -593,10 +512,7 @@ fn eval_path_dynamic_index(
     let mut keys_iter = keys.into_iter().peekable();
     let mut path_slot = Some(path);
     while let Some(key_value) = keys_iter.next() {
-        if !matches!(
-            key_value,
-            ZqValue::String(_) | ZqValue::Number(_) | ZqValue::Object(_)
-        ) {
+        if !matches!(key_value, ZqValue::String(_) | ZqValue::Number(_) | ZqValue::Object(_)) {
             let rendered = value_for_error(&key_value);
             return Err(format!(
                 "Invalid path expression near attempt to access element {rendered} of {}",
@@ -613,10 +529,7 @@ fn eval_path_dynamic_index(
                     path_slot.as_ref().expect("path still available").clone()
                 };
                 next_path.push(key_value);
-                out.push(PathTrace {
-                    path: next_path,
-                    value,
-                });
+                out.push(PathTrace { path: next_path, value });
             }
             Err(err) if optional => {
                 let _ = err;
@@ -668,10 +581,7 @@ fn eval_path_first(current: ZqValue, path: Vec<ZqValue>) -> Result<Vec<PathTrace
             if let Some(first) = values.into_iter().next() {
                 let mut next_path = path;
                 next_path.push(ZqValue::from(0));
-                Ok(vec![PathTrace {
-                    path: next_path,
-                    value: first,
-                }])
+                Ok(vec![PathTrace { path: next_path, value: first }])
             } else {
                 Ok(Vec::new())
             }
@@ -692,10 +602,7 @@ fn eval_path_last(current: ZqValue, path: Vec<ZqValue>) -> Result<Vec<PathTrace>
             if let Some(last) = values.into_iter().last() {
                 let mut next_path = path;
                 next_path.push(ZqValue::from(-1));
-                Ok(vec![PathTrace {
-                    path: next_path,
-                    value: last,
-                }])
+                Ok(vec![PathTrace { path: next_path, value: last }])
             } else {
                 Ok(Vec::new())
             }
@@ -726,10 +633,7 @@ fn parse_paths_array(paths_value: ZqValue) -> Result<Vec<Vec<ZqValue>>, String> 
         .into_iter()
         .map(|path| match path {
             ZqValue::Array(path) => Ok(path),
-            other => Err(format!(
-                "Path must be specified as array, not {}",
-                type_name(&other)
-            )),
+            other => Err(format!("Path must be specified as array, not {}", type_name(&other))),
         })
         .collect()
 }
@@ -757,11 +661,7 @@ fn set_path_recursive(
                 map.insert(key.clone(), next);
                 Ok(ZqValue::Object(map))
             }
-            other => Err(format!(
-                "Cannot index {} with string {:?}",
-                type_name(&other),
-                key
-            )),
+            other => Err(format!("Cannot index {} with string {:?}", type_name(&other), key)),
         },
         ZqValue::Number(index) => {
             let Some(raw) = c_math::path_number_for_set(index)? else {
@@ -796,10 +696,7 @@ fn set_path_recursive(
                     items[target] = set_path_recursive(child, tail, new_value)?;
                     Ok(ZqValue::Array(items))
                 }
-                other => Err(format!(
-                    "Cannot index {} with number ({raw})",
-                    type_name(&other)
-                )),
+                other => Err(format!("Cannot index {} with number ({raw})", type_name(&other))),
             }
         }
         // jq-port: jq/src/jv_aux.c:jv_set() slice assignment branch.
@@ -855,19 +752,16 @@ fn set_path_recursive(
             Ok(ZqValue::Array(items))
         }
         other => match value {
-            current if matches!(other, ZqValue::Array(_)) => Err(format!(
-                "Cannot update field at array index of {}",
-                type_name(&current)
-            )),
+            current if matches!(other, ZqValue::Array(_)) => {
+                Err(format!("Cannot update field at array index of {}", type_name(&current)))
+            }
             ZqValue::Array(_) | ZqValue::String(_) => {
                 let _ = other;
                 Err("Array/string slice indices must be integers".to_string())
             }
-            current => Err(format!(
-                "Cannot index {} with {}",
-                type_name(&current),
-                type_name(other)
-            )),
+            current => {
+                Err(format!("Cannot index {} with {}", type_name(&current), type_name(other)))
+            }
         },
     }
 }
@@ -876,10 +770,7 @@ fn canonicalize_delete_paths(
     root: &ZqValue,
     paths: Vec<Vec<ZqValue>>,
 ) -> Result<Vec<Vec<ZqValue>>, String> {
-    paths
-        .into_iter()
-        .map(|path| canonicalize_delete_path(root, &path))
-        .collect()
+    paths.into_iter().map(|path| canonicalize_delete_path(root, &path)).collect()
 }
 
 fn canonicalize_delete_path(root: &ZqValue, path: &[ZqValue]) -> Result<Vec<ZqValue>, String> {
@@ -1008,10 +899,7 @@ fn delete_path_recursive(value: &mut ZqValue, path: &[ZqValue]) -> Result<bool, 
                 Ok(false)
             }
             ZqValue::Number(_) => Err("Cannot delete number field of object".to_string()),
-            other => Err(format!(
-                "Cannot delete {} field of object",
-                type_name(other)
-            )),
+            other => Err(format!("Cannot delete {} field of object", type_name(other))),
         },
         ZqValue::Array(items) => match head {
             ZqValue::Number(index) => {

@@ -12,10 +12,7 @@ pub(crate) fn dump_value_string_trunc_legacy(value: &ZqValue, bufsize: usize) ->
 
     let dumped = serde_json::to_string(&value.clone().into_json())
         .unwrap_or_else(|_| "<invalid>".to_string());
-    let mut out = dumped
-        .chars()
-        .take(bufsize.saturating_sub(1))
-        .collect::<String>();
+    let mut out = dumped.chars().take(bufsize.saturating_sub(1)).collect::<String>();
     if dumped.len() > bufsize.saturating_sub(1) && bufsize >= 4 {
         let dots_from = bufsize.saturating_sub(4);
         if dots_from <= out.len() {
@@ -112,16 +109,11 @@ pub(crate) fn split_jq(a: ZqValue, b: ZqValue) -> Result<ZqValue, String> {
         return Err("split input and separator must be strings".to_string());
     };
     if separator.is_empty() {
-        let chars = text
-            .chars()
-            .map(|ch| ZqValue::String(ch.to_string()))
-            .collect();
+        let chars = text.chars().map(|ch| ZqValue::String(ch.to_string())).collect();
         return Ok(ZqValue::Array(chars));
     }
     Ok(ZqValue::Array(
-        text.split(&separator)
-            .map(|part| ZqValue::String(part.to_string()))
-            .collect(),
+        text.split(&separator).map(|part| ZqValue::String(part.to_string())).collect(),
     ))
 }
 
@@ -202,9 +194,9 @@ pub(crate) fn ascii_case_jq(input: ZqValue, upcase: bool) -> Result<ZqValue, Str
 // moved-from: src/native_engine/vm_core/vm.rs::run_explode
 pub(crate) fn explode_jq(input: ZqValue) -> Result<ZqValue, String> {
     match input {
-        ZqValue::String(s) => Ok(ZqValue::Array(
-            s.chars().map(|ch| ZqValue::from(ch as i64)).collect(),
-        )),
+        ZqValue::String(s) => {
+            Ok(ZqValue::Array(s.chars().map(|ch| ZqValue::from(ch as i64)).collect()))
+        }
         _ => Err("explode input must be a string".to_string()),
     }
 }
@@ -275,9 +267,7 @@ pub(crate) fn format_value_jq(fmt: &str, value: &ZqValue) -> Result<String, Stri
         "base64" => Ok(base64::engine::general_purpose::STANDARD
             .encode(c_json::tostring_value_jq(value)?.as_bytes())),
         "base64d" => decode_base64_to_string_jq(&c_json::tostring_value_jq(value)?),
-        "uri" => Ok(encode_uri_bytes_jq(
-            c_json::tostring_value_jq(value)?.as_bytes(),
-        )),
+        "uri" => Ok(encode_uri_bytes_jq(c_json::tostring_value_jq(value)?.as_bytes())),
         "urid" => decode_uri_jq(&c_json::tostring_value_jq(value)?),
         "html" => Ok(escape_html_jq(&c_json::tostring_value_jq(value)?)),
         "sh" => Ok(shell_quote_single_jq(&c_json::tostring_value_jq(value)?)),
@@ -326,11 +316,7 @@ fn sep_name_jq(sep: &str) -> &'static str {
 
 // moved-from: src/native_engine/vm_core/vm.rs::normalize_index
 pub(crate) fn normalize_index_jq(len: usize, index: i64) -> Option<usize> {
-    let idx = if index >= 0 {
-        index
-    } else {
-        len as i64 + index
-    };
+    let idx = if index >= 0 { index } else { len as i64 + index };
     if (0..len as i64).contains(&idx) {
         Some(idx as usize)
     } else {
@@ -475,29 +461,22 @@ mod tests {
 
     #[test]
     fn split_and_trim_family_follow_jq_shapes() {
-        let split = split_jq(
-            ZqValue::String("a,b".to_string()),
-            ZqValue::String(",".to_string()),
-        )
-        .expect("split");
+        let split = split_jq(ZqValue::String("a,b".to_string()), ZqValue::String(",".to_string()))
+            .expect("split");
         assert_eq!(split.into_json(), serde_json::json!(["a", "b"]));
 
-        let split_chars = split_jq(
-            ZqValue::String("ab".to_string()),
-            ZqValue::String(String::new()),
-        )
-        .expect("split chars");
+        let split_chars =
+            split_jq(ZqValue::String("ab".to_string()), ZqValue::String(String::new()))
+                .expect("split chars");
         assert_eq!(split_chars.into_json(), serde_json::json!(["a", "b"]));
 
         let trimmed =
             trim_whitespace_jq(ZqValue::String("  a  ".to_string()), TrimMode::Both).expect("trim");
         assert_eq!(trimmed.into_json(), serde_json::json!("a"));
 
-        let ltrim = ltrimstr_jq(
-            ZqValue::String("foobar".to_string()),
-            ZqValue::String("foo".to_string()),
-        )
-        .expect("ltrimstr");
+        let ltrim =
+            ltrimstr_jq(ZqValue::String("foobar".to_string()), ZqValue::String("foo".to_string()))
+                .expect("ltrimstr");
         assert_eq!(ltrim.into_json(), serde_json::json!("bar"));
 
         let starts = startswith_jq(
@@ -507,11 +486,9 @@ mod tests {
         .expect("startswith");
         assert_eq!(starts.into_json(), serde_json::json!(true));
 
-        let ends = endswith_jq(
-            ZqValue::String("foobar".to_string()),
-            ZqValue::String("bar".to_string()),
-        )
-        .expect("endswith");
+        let ends =
+            endswith_jq(ZqValue::String("foobar".to_string()), ZqValue::String("bar".to_string()))
+                .expect("endswith");
         assert_eq!(ends.into_json(), serde_json::json!(true));
 
         assert_eq!(normalize_index_jq(5, 1), Some(1));

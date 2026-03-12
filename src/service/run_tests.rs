@@ -206,10 +206,7 @@ pub(super) fn run_query_case(
 
     let input_line = strip_bom_prefix(&payload.input_line).to_string();
     if zq::normalize_jsonish_line(&input_line).is_err() {
-        println!(
-            "*** Input is invalid on line {}: {}",
-            payload.input_line_no, input_line
-        );
+        println!("*** Input is invalid on line {}: {}", payload.input_line_no, input_line);
         stats.invalid += 1;
         return;
     }
@@ -447,11 +444,7 @@ pub(super) fn normalize_run_tests_error_line(line: &str) -> String {
         return "jq: error: Invalid escape".to_string();
     }
     if let Some(idx) = out.find("syntax error, unexpected '") {
-        let prefix = if out.starts_with("jq: error: ") {
-            "jq: error: "
-        } else {
-            ""
-        };
+        let prefix = if out.starts_with("jq: error: ") { "jq: error: " } else { "" };
         let rest = &out[idx + "syntax error, unexpected '".len()..];
         if let Some(end) = rest.find('\'') {
             let token = &rest[..end];
@@ -656,12 +649,7 @@ pub(super) enum RunTestMode {
 
 impl RunTestMode {
     fn check_message(self) -> bool {
-        matches!(
-            self,
-            Self::CompileFail {
-                check_message: true
-            }
-        )
+        matches!(self, Self::CompileFail { check_message: true })
     }
 }
 
@@ -719,15 +707,8 @@ pub(super) struct TestCursor {
 
 impl TestCursor {
     pub(super) fn new(input: &str) -> Self {
-        let lines = input
-            .lines()
-            .map(|line| line.trim_end_matches('\r').to_string())
-            .collect();
-        Self {
-            lines,
-            idx: 0,
-            pending_mode: RunTestMode::Query,
-        }
+        let lines = input.lines().map(|line| line.trim_end_matches('\r').to_string()).collect();
+        Self { lines, idx: 0, pending_mode: RunTestMode::Query }
     }
 
     fn next_line(&mut self) -> Option<(usize, String)> {
@@ -746,19 +727,14 @@ impl TestCursor {
                 continue;
             }
             if is_fail_marker(&line) {
-                self.pending_mode = RunTestMode::CompileFail {
-                    check_message: is_fail_with_message(&line),
-                };
+                self.pending_mode =
+                    RunTestMode::CompileFail { check_message: is_fail_with_message(&line) };
                 continue;
             }
 
             let mode = self.pending_mode;
             self.pending_mode = RunTestMode::Query;
-            return Some(TestCaseProgram {
-                program_line_no: line_no,
-                program: line,
-                mode,
-            });
+            return Some(TestCaseProgram { program_line_no: line_no, program: line, mode });
         }
         None
     }
@@ -768,9 +744,7 @@ impl TestCursor {
             RunTestMode::CompileFail { .. } => {
                 let expected_error_line = self.next_line().map(|(_, line)| line)?;
                 self.skip_until_separator();
-                Some(CasePayload::CompileFail(CompileFailPayload {
-                    expected_error_line,
-                }))
+                Some(CasePayload::CompileFail(CompileFailPayload { expected_error_line }))
             }
             RunTestMode::Query => {
                 let (input_line_no, input_line) = self.next_line()?;
@@ -822,14 +796,7 @@ pub(super) fn shorten_for_report(s: &str) -> String {
         return s.to_string();
     }
     let head: String = s.chars().take(120).collect();
-    let tail: String = s
-        .chars()
-        .rev()
-        .take(80)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
+    let tail: String = s.chars().rev().take(80).collect::<Vec<_>>().into_iter().rev().collect();
     format!("{head}...[{} chars omitted]...{tail}", len - 200)
 }
 

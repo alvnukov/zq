@@ -1,4 +1,9 @@
-use crate::value::ZqValue;
+mod doc_tape;
+mod json_fast_path;
+
+use crate::value::{
+    install_active_native_value_recycle_context, NativeValueRecycleContext, ZqValue,
+};
 use serde::Deserialize;
 #[cfg(test)]
 use serde_json::Value as RawJsonValue;
@@ -85,12 +90,7 @@ impl VmWorkerPool {
     ) -> Result<mpsc::Receiver<Result<Vec<ZqValue>, String>>, String> {
         let (result_tx, result_rx) = mpsc::channel();
         self.sender
-            .send(VmRunTask {
-                program,
-                inputs,
-                run_options,
-                result_tx,
-            })
+            .send(VmRunTask { program, inputs, run_options, result_tx })
             .map_err(|_| "native VM worker pool is unavailable".to_string())?;
         Ok(result_rx)
     }
@@ -102,9 +102,7 @@ impl VmWorkerPool {
         run_options: RunOptions,
     ) -> Result<Vec<ZqValue>, String> {
         let result_rx = self.submit(program, inputs, run_options)?;
-        result_rx
-            .recv()
-            .map_err(|_| "native VM worker disconnected".to_string())?
+        result_rx.recv().map_err(|_| "native VM worker disconnected".to_string())?
     }
 }
 
@@ -124,12 +122,7 @@ fn vm_worker_loop(receiver: Arc<Mutex<mpsc::Receiver<VmRunTask>>>) {
 }
 
 fn run_vm_task(task: VmRunTask) {
-    let VmRunTask {
-        program,
-        inputs,
-        run_options,
-        result_tx,
-    } = task;
+    let VmRunTask { program, inputs, run_options, result_tx } = task;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         execute_slice_native_inner(program, inputs, run_options)
     }))
@@ -147,7 +140,7 @@ fn execute_slice_native_inner(
         out.push(value);
         Ok(())
     };
-    program.execute_slice_native(&inputs, run_options, &mut emit)?;
+    program.execute_slice_native_owned(inputs, run_options, &mut emit)?;
     Ok(out)
 }
 
@@ -199,9 +192,7 @@ pub fn try_compile_error_with_paths(query: &str, library_paths: &[String]) -> Op
 }
 
 pub fn try_compile(query: &str) -> Option<CompiledProgram> {
-    vm_core::compile(query)
-        .ok()
-        .map(|program| CompiledProgram { program })
+    vm_core::compile(query).ok().map(|program| CompiledProgram { program })
 }
 
 pub fn try_compile_with_paths(query: &str, library_paths: &[String]) -> Option<CompiledProgram> {
@@ -216,11 +207,7 @@ pub fn try_compile_with_paths(query: &str, library_paths: &[String]) -> Option<C
 #[cfg(test)]
 #[allow(dead_code)]
 pub fn try_execute(query: &str, inputs: &[RawJsonValue], run_options: RunOptions) -> TryExecute {
-    let native_inputs = inputs
-        .iter()
-        .cloned()
-        .map(ZqValue::from_json)
-        .collect::<Vec<_>>();
+    let native_inputs = inputs.iter().cloned().map(ZqValue::from_json).collect::<Vec<_>>();
     match try_execute_native(query, &native_inputs, run_options) {
         TryExecuteNative::Unsupported => TryExecute::Unsupported,
         TryExecuteNative::Executed(Ok(values)) => {
@@ -245,16 +232,26 @@ pub fn try_execute_native(
     }
 }
 
+#[allow(dead_code)]
 pub fn try_execute_native_with_paths(
     query: &str,
     inputs: &[ZqValue],
     library_paths: &[String],
     run_options: RunOptions,
 ) -> TryExecuteNative {
+    try_execute_native_with_paths_owned(query, inputs.to_vec(), library_paths, run_options)
+}
+
+pub fn try_execute_native_with_paths_owned(
+    query: &str,
+    inputs: Vec<ZqValue>,
+    library_paths: &[String],
+    run_options: RunOptions,
+) -> TryExecuteNative {
     let Some(program) = try_compile_with_paths(query, library_paths) else {
         return TryExecuteNative::Unsupported;
     };
-    match execute_slice_native_collect_on_large_stack(program, inputs.to_vec(), run_options) {
+    match execute_slice_native_collect_on_large_stack(program, inputs, run_options) {
         Ok(values) => TryExecuteNative::Executed(Ok(values)),
         Err(err) => TryExecuteNative::Executed(Err(err)),
     }
@@ -271,14 +268,8 @@ pub fn try_execute_stream<F>(
 where
     F: FnMut(RawJsonValue) -> Result<(), String>,
 {
-    let native_inputs = inputs
-        .iter()
-        .cloned()
-        .map(ZqValue::from_json)
-        .collect::<Vec<_>>();
-    try_execute_stream_native(query, &native_inputs, run_options, |value| {
-        emit(value.into_json())
-    })
+    let native_inputs = inputs.iter().cloned().map(ZqValue::from_json).collect::<Vec<_>>();
+    try_execute_stream_native(query, &native_inputs, run_options, |value| emit(value.into_json()))
 }
 
 pub fn try_execute_stream_native<F>(
@@ -366,9 +357,14 @@ impl CompiledProgram {
     where
         F: FnMut(ZqValue) -> Result<(), String>,
     {
+        if let Some(plan) = json_fast_path::FastProgram::compile(&self.program) {
+            return plan.execute_json_text_stream(input, emit);
+        }
         let _program_context_guard = vm_core::install_program_context(&self.program);
-        for item in serde_json::Deserializer::from_str(input).into_iter::<serde_json::Value>() {
-            let root = ZqValue::from_json(item.map_err(|e| format!("json parse error: {e}"))?);
+        let mut recycle_ctx = NativeValueRecycleContext::default();
+        let _recycle_guard = install_active_native_value_recycle_context(&mut recycle_ctx);
+        for item in serde_json::Deserializer::from_str(input).into_iter::<ZqValue>() {
+            let root = item.map_err(|e| format!("json parse error: {e}"))?;
             vm_core::execute_prepared_with(&self.program, root, emit)?;
         }
         Ok(())
@@ -382,14 +378,16 @@ impl CompiledProgram {
     where
         F: FnMut(ZqValue) -> Result<(), String>,
     {
+        if let Some(plan) = json_fast_path::FastProgram::compile(&self.program) {
+            return plan.execute_json_reader_stream(reader, emit);
+        }
         let _program_context_guard = vm_core::install_program_context(&self.program);
+        let mut recycle_ctx = NativeValueRecycleContext::default();
+        let _recycle_guard = install_active_native_value_recycle_context(&mut recycle_ctx);
         let mut parser = serde_json::Deserializer::from_reader(reader);
         loop {
-            match serde_json::Value::deserialize(&mut parser) {
-                Ok(item) => {
-                    let root = ZqValue::from_json(item);
-                    vm_core::execute_prepared_with(&self.program, root, emit)?;
-                }
+            match ZqValue::deserialize(&mut parser) {
+                Ok(root) => vm_core::execute_prepared_with(&self.program, root, emit)?,
                 Err(err) if err.is_eof() => break,
                 Err(err) => return Err(format!("json parse error: {err}")),
             }
@@ -410,17 +408,9 @@ impl CompiledProgram {
         let (first, remaining) = parse_first_json_stream_value(input)?;
         let has_first = first.is_some();
         let root = first.unwrap_or(ZqValue::Null);
-        let replay = if reads_as_events && has_first {
-            vec![root.clone()]
-        } else {
-            Vec::new()
-        };
+        let replay = if reads_as_events && has_first { vec![root.clone()] } else { Vec::new() };
         let _input_guard = vm_core::install_input_stream_json_text(remaining, replay, has_first);
-        let cursor_start = if reads_as_events {
-            0
-        } else {
-            usize::from(has_first)
-        };
+        let cursor_start = if reads_as_events { 0 } else { usize::from(has_first) };
         vm_core::set_input_cursor(cursor_start);
         self.execute_input_native_prepared(root, emit)
     }
@@ -438,17 +428,9 @@ impl CompiledProgram {
         let (first, parser) = parse_first_json_stream_value_reader(reader)?;
         let has_first = first.is_some();
         let root = first.unwrap_or(ZqValue::Null);
-        let replay = if reads_as_events && has_first {
-            vec![root.clone()]
-        } else {
-            Vec::new()
-        };
+        let replay = if reads_as_events && has_first { vec![root.clone()] } else { Vec::new() };
         let _input_guard = vm_core::install_input_stream_json_parser(parser, replay, has_first);
-        let cursor_start = if reads_as_events {
-            0
-        } else {
-            usize::from(has_first)
-        };
+        let cursor_start = if reads_as_events { 0 } else { usize::from(has_first) };
         vm_core::set_input_cursor(cursor_start);
         self.execute_input_native_prepared(root, emit)
     }
@@ -463,10 +445,12 @@ impl CompiledProgram {
     {
         let _program_context_guard = vm_core::install_program_context(&self.program);
         let _input_guard = vm_core::install_input_metadata_context();
-        let values = serde_json::Deserializer::from_str(input).into_iter::<serde_json::Value>();
+        let mut recycle_ctx = NativeValueRecycleContext::default();
+        let _recycle_guard = install_active_native_value_recycle_context(&mut recycle_ctx);
+        let values = serde_json::Deserializer::from_str(input).into_iter::<ZqValue>();
         for (index, item) in values.enumerate() {
             vm_core::set_input_cursor(index);
-            let root = ZqValue::from_json(item.map_err(|e| format!("json parse error: {e}"))?);
+            let root = item.map_err(|e| format!("json parse error: {e}"))?;
             self.execute_input_native_prepared(root, emit)?;
         }
         Ok(())
@@ -482,14 +466,15 @@ impl CompiledProgram {
     {
         let _program_context_guard = vm_core::install_program_context(&self.program);
         let _input_guard = vm_core::install_input_metadata_context();
+        let mut recycle_ctx = NativeValueRecycleContext::default();
+        let _recycle_guard = install_active_native_value_recycle_context(&mut recycle_ctx);
         let mut parser = serde_json::Deserializer::from_reader(reader);
         let mut index = 0usize;
         loop {
-            match serde_json::Value::deserialize(&mut parser) {
-                Ok(item) => {
+            match ZqValue::deserialize(&mut parser) {
+                Ok(root) => {
                     vm_core::set_input_cursor(index);
                     index += 1;
-                    let root = ZqValue::from_json(item);
                     self.execute_input_native_prepared(root, emit)?;
                 }
                 Err(err) if err.is_eof() => break,
@@ -515,19 +500,15 @@ impl CompiledProgram {
     where
         F: FnMut(RawJsonValue) -> Result<(), String>,
     {
-        self.execute_input_native(ZqValue::from_json(root), &mut |value| {
-            emit(value.into_json())
-        })
+        self.execute_input_native(ZqValue::from_json(root), &mut |value| emit(value.into_json()))
     }
 
     pub fn execute_input_native<F>(&self, root: ZqValue, emit: &mut F) -> Result<(), String>
     where
         F: FnMut(ZqValue) -> Result<(), String>,
     {
-        for value in vm_core::execute(&self.program, &root)? {
-            emit(value)?;
-        }
-        Ok(())
+        let _program_context_guard = vm_core::install_program_context(&self.program);
+        vm_core::execute_prepared_with(&self.program, root, emit)
     }
 
     fn execute_input_native_prepared<F>(&self, root: ZqValue, emit: &mut F) -> Result<(), String>
@@ -537,6 +518,7 @@ impl CompiledProgram {
         vm_core::execute_prepared_with(&self.program, root, emit)
     }
 
+    #[allow(dead_code)]
     pub fn execute_slice_native<F>(
         &self,
         inputs: &[ZqValue],
@@ -610,33 +592,31 @@ impl CompiledProgram {
     where
         F: FnMut(RawJsonValue) -> Result<(), String>,
     {
-        let native_inputs = inputs
-            .iter()
-            .cloned()
-            .map(ZqValue::from_json)
-            .collect::<Vec<_>>();
-        self.execute_slice_native(&native_inputs, run_options, &mut |value| {
-            emit(value.into_json())
-        })
+        let native_inputs = inputs.iter().cloned().map(ZqValue::from_json).collect::<Vec<_>>();
+        self.execute_slice_native(&native_inputs, run_options, &mut |value| emit(value.into_json()))
     }
 }
 
 fn parse_first_json_stream_value(input: &str) -> Result<(Option<ZqValue>, &str), String> {
-    let mut values = serde_json::Deserializer::from_str(input).into_iter::<serde_json::Value>();
+    let mut recycle_ctx = NativeValueRecycleContext::default();
+    let _recycle_guard = install_active_native_value_recycle_context(&mut recycle_ctx);
+    let mut values = serde_json::Deserializer::from_str(input).into_iter::<ZqValue>();
     let Some(first) = values.next() else {
         return Ok((None, input));
     };
     let first = first.map_err(|e| format!("json parse error: {e}"))?;
     let offset = values.byte_offset();
-    Ok((Some(ZqValue::from_json(first)), &input[offset..]))
+    Ok((Some(first), &input[offset..]))
 }
 
 fn parse_first_json_stream_value_reader(
     reader: JsonInputReader,
 ) -> Result<(Option<ZqValue>, JsonInputParser), String> {
+    let mut recycle_ctx = NativeValueRecycleContext::default();
+    let _recycle_guard = install_active_native_value_recycle_context(&mut recycle_ctx);
     let mut parser = serde_json::Deserializer::from_reader(reader);
-    match serde_json::Value::deserialize(&mut parser) {
-        Ok(first) => Ok((Some(ZqValue::from_json(first)), parser)),
+    match ZqValue::deserialize(&mut parser) {
+        Ok(first) => Ok((Some(first), parser)),
         Err(err) if err.is_eof() => Ok((None, parser)),
         Err(err) => Err(format!("json parse error: {err}")),
     }
@@ -667,10 +647,7 @@ fn enqueue_call_ids_from_debug_repr(debug: &str, pending: &mut VecDeque<usize>) 
     let mut rest = debug;
     while let Some(pos) = rest.find(needle) {
         rest = &rest[(pos + needle.len())..];
-        let digits = rest
-            .bytes()
-            .take_while(|b| b.is_ascii_digit())
-            .collect::<Vec<_>>();
+        let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).collect::<Vec<_>>();
         if digits.is_empty() {
             continue;
         }
@@ -688,13 +665,15 @@ fn execute_slice_native_collect_on_large_stack(
     inputs: Vec<ZqValue>,
     run_options: RunOptions,
 ) -> Result<Vec<ZqValue>, String> {
-    // Deep jq-compatible expressions can build >10k nesting depth (for example,
-    // reduce/range+flatten fixtures). Keep a dedicated large-stack worker pool
-    // and submit jobs there instead of spawning a fresh thread per query.
     if should_parallelize_inputs(&program.program, &inputs, run_options) {
         return execute_slice_parallel_inputs(program, inputs);
     }
-    vm_worker_pool()?.run(program, inputs, run_options)
+    // Keep large-stack execution only for recursive programs that can exceed
+    // the default process stack; run common short filters inline.
+    if program_requires_large_stack(&program.program) {
+        return vm_worker_pool()?.run(program, inputs, run_options);
+    }
+    execute_slice_native_inner(program, inputs, run_options)
 }
 
 fn should_parallelize_inputs(
@@ -711,6 +690,117 @@ fn should_parallelize_inputs(
     match parse_parallel_override_mode() {
         Some(force) => force,
         None => inputs.len() >= PAR_EXEC_MIN_INPUTS,
+    }
+}
+
+fn program_requires_large_stack(program: &vm_core::ir::Program) -> bool {
+    program.branches.iter().any(|branch| branch.ops.iter().any(op_requires_large_stack))
+        || program.functions.iter().any(|function| op_requires_large_stack(&function.body))
+}
+
+fn op_requires_large_stack(op: &vm_core::ir::Op) -> bool {
+    use vm_core::ir::Op;
+    match op {
+        Op::While(_, _)
+        | Op::Until(_, _)
+        | Op::Reduce { .. }
+        | Op::Foreach { .. }
+        | Op::RecurseBy(_)
+        | Op::RecurseByCond(_, _)
+        | Op::Walk(_)
+        | Op::Combinations
+        | Op::Repeat(_) => true,
+        Op::Chain(items) | Op::Pipe(items) | Op::Comma(items) | Op::ArrayLiteral(items) => {
+            items.iter().any(op_requires_large_stack)
+        }
+        Op::Call { args, .. } => args.iter().any(op_requires_large_stack),
+        Op::ObjectLiteral(fields) => fields.iter().any(|(key, value)| {
+            op_object_key_requires_large_stack(key) || op_requires_large_stack(value)
+        }),
+        Op::Has(arg)
+        | Op::In(arg)
+        | Op::StartsWith(arg)
+        | Op::EndsWith(arg)
+        | Op::Split(arg)
+        | Op::Join(arg)
+        | Op::LTrimStr(arg)
+        | Op::RTrimStr(arg)
+        | Op::TrimStr(arg)
+        | Op::Indices(arg)
+        | Op::IndexOf(arg)
+        | Op::RIndexOf(arg)
+        | Op::Contains(arg)
+        | Op::Inside(arg)
+        | Op::BSearch(arg)
+        | Op::SortByImpl(arg)
+        | Op::GroupByImpl(arg)
+        | Op::UniqueByImpl(arg)
+        | Op::MinByImpl(arg)
+        | Op::MaxByImpl(arg)
+        | Op::Path(arg)
+        | Op::GetPath(arg)
+        | Op::DelPaths(arg)
+        | Op::TruncateStream(arg)
+        | Op::FromStream(arg)
+        | Op::Flatten(arg)
+        | Op::FlattenRaw(arg)
+        | Op::Nth(arg)
+        | Op::FirstBy(arg)
+        | Op::LastBy(arg)
+        | Op::IsEmpty(arg)
+        | Op::AddBy(arg)
+        | Op::Select(arg)
+        | Op::Map(arg)
+        | Op::MapValues(arg)
+        | Op::WithEntries(arg)
+        | Op::Format { expr: arg, .. }
+        | Op::Strptime(arg)
+        | Op::Error(arg)
+        | Op::HaltError(arg)
+        | Op::UnaryMinus(arg)
+        | Op::UnaryNot(arg)
+        | Op::Label { body: arg, .. } => op_requires_large_stack(arg),
+        Op::RegexMatch { spec, flags, .. } | Op::RegexCapture { spec, flags, .. } => {
+            op_requires_large_stack(spec) || flags.as_deref().is_some_and(op_requires_large_stack)
+        }
+        Op::RegexScan { regex, flags } | Op::RegexSplits { regex, flags } => {
+            op_requires_large_stack(regex) || flags.as_deref().is_some_and(op_requires_large_stack)
+        }
+        Op::RegexSub { regex, replacement, flags, .. } => {
+            op_requires_large_stack(regex)
+                || op_requires_large_stack(replacement)
+                || op_requires_large_stack(flags)
+        }
+        Op::SetPath(path, value)
+        | Op::Modify(path, value)
+        | Op::Any(path, value)
+        | Op::All(path, value)
+        | Op::LimitBy(path, value)
+        | Op::SkipBy(path, value)
+        | Op::NthBy(path, value) => op_requires_large_stack(path) || op_requires_large_stack(value),
+        Op::Bind { source, body, .. } => {
+            op_requires_large_stack(source) || op_requires_large_stack(body)
+        }
+        Op::DynamicIndex { key, .. } => op_requires_large_stack(key),
+        Op::Range(a, b, c) => {
+            op_requires_large_stack(a) || op_requires_large_stack(b) || op_requires_large_stack(c)
+        }
+        Op::TryCatch { inner, catcher } => {
+            op_requires_large_stack(inner) || op_requires_large_stack(catcher)
+        }
+        Op::IfElse { cond, then_expr, else_expr } => {
+            op_requires_large_stack(cond)
+                || op_requires_large_stack(then_expr)
+                || op_requires_large_stack(else_expr)
+        }
+        Op::Binary { lhs, rhs, .. } | Op::MathBinary { lhs, rhs, .. } => {
+            op_requires_large_stack(lhs) || op_requires_large_stack(rhs)
+        }
+        Op::MathTernary { a, b, c, .. } => {
+            op_requires_large_stack(a) || op_requires_large_stack(b) || op_requires_large_stack(c)
+        }
+        Op::Strftime { format, .. } => op_requires_large_stack(format),
+        _ => false,
     }
 }
 
@@ -736,9 +826,7 @@ fn execute_slice_parallel_inputs(
 
     let mut out = Vec::new();
     for rx in results {
-        let mut batch = rx
-            .recv()
-            .map_err(|_| "native VM worker disconnected".to_string())??;
+        let mut batch = rx.recv().map_err(|_| "native VM worker disconnected".to_string())??;
         out.append(&mut batch);
     }
     Ok(out)
@@ -762,10 +850,7 @@ fn module_search_dirs_from_cli_paths(library_paths: &[String]) -> Vec<PathBuf> {
 }
 
 fn program_uses_input_op(program: &vm_core::ir::Program) -> bool {
-    program
-        .branches
-        .iter()
-        .any(|branch| branch.ops.iter().any(op_uses_input))
+    program.branches.iter().any(|branch| branch.ops.iter().any(op_uses_input))
 }
 
 fn program_uses_input_stream_metadata(program: &vm_core::ir::Program) -> bool {
@@ -797,9 +882,9 @@ fn op_uses_input(op: &vm_core::ir::Op) -> bool {
             items.iter().any(op_uses_input)
         }
         Op::Call { args, .. } => args.iter().any(op_uses_input),
-        Op::ObjectLiteral(fields) => fields
-            .iter()
-            .any(|(key, value)| op_object_key_uses_input(key) || op_uses_input(value)),
+        Op::ObjectLiteral(fields) => {
+            fields.iter().any(|(key, value)| op_object_key_uses_input(key) || op_uses_input(value))
+        }
         Op::Has(arg)
         | Op::In(arg)
         | Op::StartsWith(arg)
@@ -852,12 +937,9 @@ fn op_uses_input(op: &vm_core::ir::Op) -> bool {
         Op::RegexScan { regex, flags } | Op::RegexSplits { regex, flags } => {
             op_uses_input(regex) || flags.as_deref().is_some_and(op_uses_input)
         }
-        Op::RegexSub {
-            regex,
-            replacement,
-            flags,
-            ..
-        } => op_uses_input(regex) || op_uses_input(replacement) || op_uses_input(flags),
+        Op::RegexSub { regex, replacement, flags, .. } => {
+            op_uses_input(regex) || op_uses_input(replacement) || op_uses_input(flags)
+        }
         Op::SetPath(path, value)
         | Op::Modify(path, value)
         | Op::Any(path, value)
@@ -867,30 +949,19 @@ fn op_uses_input(op: &vm_core::ir::Op) -> bool {
         Op::Bind { source, body, .. } => op_uses_input(source) || op_uses_input(body),
         Op::DynamicIndex { key, .. } => op_uses_input(key),
         Op::Range(a, b, c) => op_uses_input(a) || op_uses_input(b) || op_uses_input(c),
-        Op::Reduce {
-            source,
-            init,
-            update,
-            ..
-        } => op_uses_input(source) || op_uses_input(init) || op_uses_input(update),
-        Op::Foreach {
-            source,
-            init,
-            update,
-            extract,
-            ..
-        } => {
+        Op::Reduce { source, init, update, .. } => {
+            op_uses_input(source) || op_uses_input(init) || op_uses_input(update)
+        }
+        Op::Foreach { source, init, update, extract, .. } => {
             op_uses_input(source)
                 || op_uses_input(init)
                 || op_uses_input(update)
                 || op_uses_input(extract)
         }
         Op::TryCatch { inner, catcher } => op_uses_input(inner) || op_uses_input(catcher),
-        Op::IfElse {
-            cond,
-            then_expr,
-            else_expr,
-        } => op_uses_input(cond) || op_uses_input(then_expr) || op_uses_input(else_expr),
+        Op::IfElse { cond, then_expr, else_expr } => {
+            op_uses_input(cond) || op_uses_input(then_expr) || op_uses_input(else_expr)
+        }
         Op::Binary { lhs, rhs, .. } | Op::MathBinary { lhs, rhs, .. } => {
             op_uses_input(lhs) || op_uses_input(rhs)
         }
@@ -981,12 +1052,7 @@ fn op_uses_input_outside_fromstream(
                     op_uses_input_outside_fromstream(value, inside_fromstream, has_input)
                 })
         }
-        Op::RegexSub {
-            regex,
-            replacement,
-            flags,
-            ..
-        } => {
+        Op::RegexSub { regex, replacement, flags, .. } => {
             op_uses_input_outside_fromstream(regex, inside_fromstream, has_input)
                 || op_uses_input_outside_fromstream(replacement, inside_fromstream, has_input)
                 || op_uses_input_outside_fromstream(flags, inside_fromstream, has_input)
@@ -1012,23 +1078,12 @@ fn op_uses_input_outside_fromstream(
                 || op_uses_input_outside_fromstream(b, inside_fromstream, has_input)
                 || op_uses_input_outside_fromstream(c, inside_fromstream, has_input)
         }
-        Op::Reduce {
-            source,
-            init,
-            update,
-            ..
-        } => {
+        Op::Reduce { source, init, update, .. } => {
             op_uses_input_outside_fromstream(source, inside_fromstream, has_input)
                 || op_uses_input_outside_fromstream(init, inside_fromstream, has_input)
                 || op_uses_input_outside_fromstream(update, inside_fromstream, has_input)
         }
-        Op::Foreach {
-            source,
-            init,
-            update,
-            extract,
-            ..
-        } => {
+        Op::Foreach { source, init, update, extract, .. } => {
             op_uses_input_outside_fromstream(source, inside_fromstream, has_input)
                 || op_uses_input_outside_fromstream(init, inside_fromstream, has_input)
                 || op_uses_input_outside_fromstream(update, inside_fromstream, has_input)
@@ -1038,11 +1093,7 @@ fn op_uses_input_outside_fromstream(
             op_uses_input_outside_fromstream(inner, inside_fromstream, has_input)
                 || op_uses_input_outside_fromstream(catcher, inside_fromstream, has_input)
         }
-        Op::IfElse {
-            cond,
-            then_expr,
-            else_expr,
-        } => {
+        Op::IfElse { cond, then_expr, else_expr } => {
             op_uses_input_outside_fromstream(cond, inside_fromstream, has_input)
                 || op_uses_input_outside_fromstream(then_expr, inside_fromstream, has_input)
                 || op_uses_input_outside_fromstream(else_expr, inside_fromstream, has_input)
@@ -1080,6 +1131,43 @@ fn op_object_key_uses_input_outside_fromstream(
         vm_core::ir::OpObjectKey::Expr(expr) => {
             op_uses_input_outside_fromstream(expr, inside_fromstream, has_input)
         }
+    }
+}
+
+fn op_object_key_requires_large_stack(key: &vm_core::ir::OpObjectKey) -> bool {
+    match key {
+        vm_core::ir::OpObjectKey::Static(_) => false,
+        vm_core::ir::OpObjectKey::Expr(expr) => op_requires_large_stack(expr),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_stack_detector_marks_recursive_queries() {
+        let recurse = vm_core::compile("recurse(.a?)").expect("compile recurse");
+        assert!(program_requires_large_stack(&recurse));
+
+        let while_loop = vm_core::compile("while(. < 3; . + 1)").expect("compile while");
+        assert!(program_requires_large_stack(&while_loop));
+    }
+
+    #[test]
+    fn large_stack_detector_keeps_simple_queries_inline() {
+        let add = vm_core::compile(".a + .b").expect("compile add");
+        assert!(!program_requires_large_stack(&add));
+
+        let project = vm_core::compile("{id,group,value}").expect("compile project");
+        assert!(!program_requires_large_stack(&project));
+    }
+
+    #[test]
+    fn large_stack_detector_scans_function_bodies() {
+        let with_function =
+            vm_core::compile("def walker: recurse(.a?); walker").expect("compile function");
+        assert!(program_requires_large_stack(&with_function));
     }
 }
 

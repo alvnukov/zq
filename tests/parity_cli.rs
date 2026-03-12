@@ -20,11 +20,7 @@ fn fixture(name: &str) -> String {
 }
 
 fn run_zq(args: &[&str]) -> Output {
-    Command::new(bin())
-        .args(args)
-        .current_dir(root())
-        .output()
-        .expect("run zq")
+    Command::new(bin()).args(args).current_dir(root()).output().expect("run zq")
 }
 
 fn run_zq_stdin(args: &[&str], stdin_data: &str) -> Output {
@@ -166,10 +162,7 @@ fn parity_help_contract() {
     ] {
         assert!(text.contains(token), "help must include token: {token}");
     }
-    assert!(
-        !text.contains(" yq "),
-        "help must not advertise yq language mode"
-    );
+    assert!(!text.contains(" yq "), "help must not advertise yq language mode");
 }
 
 #[test]
@@ -177,14 +170,8 @@ fn parity_completion_bash_contract() {
     let out = run_zq(&["completion", "bash"]);
     assert_ok(&out, "completion bash");
     let text = stdout_text(&out);
-    assert!(
-        text.contains("_zq()"),
-        "bash completion must define _zq function"
-    );
-    assert!(
-        text.contains("complete -F _zq"),
-        "bash completion must register zq completer"
-    );
+    assert!(text.contains("_zq()"), "bash completion must define _zq function");
+    assert!(text.contains("complete -F _zq"), "bash completion must register zq completer");
 }
 
 #[test]
@@ -192,14 +179,8 @@ fn parity_completion_zsh_contract() {
     let out = run_zq(&["completion", "zsh"]);
     assert_ok(&out, "completion zsh");
     let text = stdout_text(&out);
-    assert!(
-        text.contains("#compdef zq"),
-        "zsh completion must declare compdef header"
-    );
-    assert!(
-        text.contains("compdef _zq zq"),
-        "zsh completion must register zq completer"
-    );
+    assert!(text.contains("#compdef zq"), "zsh completion must declare compdef header");
+    assert!(text.contains("compdef _zq zq"), "zsh completion must register zq completer");
 }
 
 #[test]
@@ -216,6 +197,18 @@ fn parity_jq_query_on_yaml_input_contract() {
 }
 
 #[test]
+fn parity_type_builtin_on_yaml_repos_uses_jq_names() {
+    let yaml = r#"
+repos:
+  - !!str https://example.com/charts
+  - !!map {name: stable, url: https://charts.example.com}
+"#;
+    let out = run_zq_stdin(&["--input-format", "yaml", "-c", ".repos[] | type"], yaml);
+    assert_ok(&out, "yaml type names must match jq");
+    assert_stdout_trim_eq(&out, "\"string\"\n\"object\"", "yaml type names must match jq");
+}
+
+#[test]
 fn parity_jq_query_on_xml_input_contract() {
     let out = run_zq_stdin(
         &["--input-format", "xml", "-r", ".catalog.book.title"],
@@ -228,20 +221,11 @@ fn parity_jq_query_on_xml_input_contract() {
 #[test]
 fn parity_xml_scalars_stay_strings_contract() {
     let out = run_zq_stdin(
-        &[
-            "--input-format",
-            "xml",
-            "-c",
-            "[(.root.n|type),(.root.flag|type),(.root.none|type)]",
-        ],
+        &["--input-format", "xml", "-c", "[(.root.n|type),(.root.flag|type),(.root.none|type)]"],
         "<root><n>10</n><flag>true</flag><none>null</none></root>",
     );
     assert_ok(&out, "xml scalars stay strings");
-    assert_stdout_trim_eq(
-        &out,
-        "[\"string\",\"string\",\"string\"]",
-        "xml scalars stay strings",
-    );
+    assert_stdout_trim_eq(&out, "[\"string\",\"string\",\"string\"]", "xml scalars stay strings");
 }
 
 #[test]
@@ -282,11 +266,8 @@ fn parity_small_json_transform_cases_contract() {
             .filter(|line| !line.is_empty())
             .map(ToOwned::to_owned)
             .collect();
-        let expected_lines: Vec<String> = case
-            .expected_lines
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+        let expected_lines: Vec<String> =
+            case.expected_lines.iter().map(ToString::to_string).collect();
         assert_eq!(
             actual_lines,
             expected_lines,
@@ -300,43 +281,22 @@ fn parity_small_json_transform_cases_contract() {
 
 #[test]
 fn parity_output_format_yaml_contract() {
-    let out = run_zq(&[
-        ".global",
-        &fixture("valid-values.yaml"),
-        "--output-format",
-        "yaml",
-    ]);
+    let out = run_zq(&[".global", &fixture("valid-values.yaml"), "--output-format", "yaml"]);
     assert_ok(&out, "yaml output");
     let text = stdout_text(&out);
-    assert!(
-        text.contains("env: dev"),
-        "yaml output must contain env key"
-    );
+    assert!(text.contains("env: dev"), "yaml output must contain env key");
 }
 
 #[test]
 fn parity_output_format_yaml_with_anchors_contract() {
     let out = run_zq_stdin(
-        &[
-            ".",
-            "--input-format",
-            "json",
-            "--output-format",
-            "yaml",
-            "--yaml-anchors",
-        ],
+        &[".", "--input-format", "json", "--output-format", "yaml", "--yaml-anchors"],
         "{\"a\":{\"x\":[1,2]},\"b\":{\"x\":[1,2]}}\n",
     );
     assert_ok(&out, "yaml output with anchors");
     let text = stdout_text(&out);
-    assert!(
-        text.contains("&a"),
-        "yaml output with anchors must define readable anchor"
-    );
-    assert!(
-        text.contains("*a"),
-        "yaml output with anchors must define readable alias"
-    );
+    assert!(text.contains("&a"), "yaml output with anchors must define readable anchor");
+    assert!(text.contains("*a"), "yaml output with anchors must define readable alias");
 }
 
 #[test]
@@ -356,14 +316,8 @@ fn parity_output_format_yaml_with_strict_friendly_anchor_names_contract() {
     );
     assert_ok(&out, "yaml output with strict-friendly anchors");
     let text = stdout_text(&out);
-    assert!(
-        text.contains('&'),
-        "yaml output with strict-friendly anchors must define anchor"
-    );
-    assert!(
-        text.contains('*'),
-        "yaml output with strict-friendly anchors must define alias"
-    );
+    assert!(text.contains('&'), "yaml output with strict-friendly anchors must define anchor");
+    assert!(text.contains('*'), "yaml output with strict-friendly anchors must define alias");
 }
 
 #[test]
@@ -384,26 +338,15 @@ fn parity_output_format_xml_contract() {
 #[test]
 fn parity_yaml_to_csv_ragged_arrays_contract() {
     let input = "- id: a\n  vals: [1, 2]\n- id: b\n  vals: [3]\n";
-    let out = run_zq_stdin(
-        &[
-            "--input-format",
-            "yaml",
-            "--output-format",
-            "csv",
-            ".[] | .vals",
-        ],
-        input,
-    );
+    let out =
+        run_zq_stdin(&["--input-format", "yaml", "--output-format", "csv", ".[] | .vals"], input);
     assert_ok(&out, "yaml to csv with ragged arrays");
     assert_stdout_trim_eq(&out, "1,2\n3,", "yaml to csv with ragged arrays");
 }
 
 #[test]
 fn parity_forced_csv_stdin_single_column_contract() {
-    let out = run_zq_stdin(
-        &["--input-format", "csv", "--output-format", "yaml"],
-        "cases\nx\n",
-    );
+    let out = run_zq_stdin(&["--input-format", "csv", "--output-format", "yaml"], "cases\nx\n");
     assert_ok(&out, "forced csv on stdin (single column)");
     let text = stdout_text(&out);
     assert!(
@@ -420,13 +363,7 @@ fn parity_csv_parse_json_cells_roundtrip_contract() {
     assert_ok(&csv_out, "yaml to csv");
 
     let recovered = run_zq_stdin(
-        &[
-            "--input-format",
-            "csv",
-            "--csv-parse-json-cells",
-            "-r",
-            ".cases[0].id",
-        ],
+        &["--input-format", "csv", "--csv-parse-json-cells", "-r", ".cases[0].id"],
         &stdout_text(&csv_out),
     );
     assert_ok(&recovered, "csv json-cell roundtrip");
@@ -437,11 +374,7 @@ fn parity_csv_parse_json_cells_roundtrip_contract() {
 fn parity_doc_mode_index_requires_doc_index() {
     let out = run_zq(&[".", &fixture("valid-values.yaml"), "--doc-mode", "index"]);
     assert_fail(&out, "doc-mode index without doc-index");
-    assert_stderr_contains(
-        &out,
-        "--doc-index is required",
-        "doc-mode index without doc-index",
-    );
+    assert_stderr_contains(&out, "--doc-index is required", "doc-mode index without doc-index");
 }
 
 #[test]
@@ -470,12 +403,7 @@ fn parity_yaml_output_rejects_raw_output_flag() {
 
 #[test]
 fn parity_supports_legacy_input_flag() {
-    let out = run_zq(&[
-        ".global.env",
-        "--input",
-        &fixture("valid-values.yaml"),
-        "-r",
-    ]);
+    let out = run_zq(&[".global.env", "--input", &fixture("valid-values.yaml"), "-r"]);
     assert_ok(&out, "legacy --input");
     assert_stdout_trim_eq(&out, "dev", "legacy --input");
 }
@@ -493,11 +421,7 @@ fn parity_supports_raw_input_and_slurp_modes() {
     assert_ok(&out, "-Rse");
     assert_stdout_trim_eq(&out, "true", "-Rse");
 
-    let out = run_zq(&[
-        "-Rne",
-        r#"[inputs] == ["a","b","c"]"#,
-        &fixture("raw-lines.txt"),
-    ]);
+    let out = run_zq(&["-Rne", r#"[inputs] == ["a","b","c"]"#, &fixture("raw-lines.txt")]);
     assert_ok(&out, "-Rne");
     assert_stdout_trim_eq(&out, "true", "-Rne");
 }
@@ -561,11 +485,7 @@ fn parity_rejects_incompatible_flags() {
     let out = run_zq(&["-R", "--stream", "."]);
     assert_fail(&out, "--stream with --raw-input");
     assert_exit_code(&out, 5, "--stream with --raw-input");
-    assert_stderr_contains(
-        &out,
-        "incompatible with --raw-input",
-        "--stream with --raw-input",
-    );
+    assert_stderr_contains(&out, "incompatible with --raw-input", "--stream with --raw-input");
 
     let out = run_zq(&[
         ".global.env",
@@ -593,17 +513,7 @@ fn parity_cli_compat_args_modes() {
     let slurp_s = slurp.to_string_lossy().into_owned();
     let raw_s = raw.to_string_lossy().into_owned();
 
-    let out = run_zq(&[
-        "-n",
-        "-c",
-        "--arg",
-        "foo",
-        "x",
-        "--argjson",
-        "bar",
-        "2",
-        "{$foo, $bar}",
-    ]);
+    let out = run_zq(&["-n", "-c", "--arg", "foo", "x", "--argjson", "bar", "2", "{$foo, $bar}"]);
     assert_ok(&out, "arg + argjson");
     assert_stdout_trim_eq(&out, "{\"foo\":\"x\",\"bar\":2}", "arg + argjson");
 
@@ -619,24 +529,13 @@ fn parity_cli_compat_args_modes() {
         "{$foo, $bar}",
     ]);
     assert_ok(&out, "slurpfile + rawfile");
-    assert_stdout_trim_eq(
-        &out,
-        "{\"foo\":[1,2],\"bar\":\"ab\\ncd\\n\"}",
-        "slurpfile + rawfile",
-    );
+    assert_stdout_trim_eq(&out, "{\"foo\":[1,2],\"bar\":\"ab\\ncd\\n\"}", "slurpfile + rawfile");
 
     let out = run_zq(&["-n", "-c", "$ARGS.positional", "--args", "a", "b"]);
     assert_ok(&out, "--args positional");
     assert_stdout_trim_eq(&out, "[\"a\",\"b\"]", "--args positional");
 
-    let out = run_zq(&[
-        "-n",
-        "-c",
-        "$ARGS.positional",
-        "--jsonargs",
-        "1",
-        "{\"a\":2}",
-    ]);
+    let out = run_zq(&["-n", "-c", "$ARGS.positional", "--jsonargs", "1", "{\"a\":2}"]);
     assert_ok(&out, "--jsonargs positional");
     assert_stdout_trim_eq(&out, "[1,{\"a\":2}]", "--jsonargs positional");
 }
@@ -732,22 +631,10 @@ fn parity_diff_mode_json_format_reports_structured_payload() {
     let payload: serde_json::Value =
         serde_json::from_str(stdout_text(&out).trim()).expect("valid diff json");
     assert_eq!(payload.get("equal"), Some(&serde_json::Value::Bool(false)));
-    assert_eq!(
-        payload.pointer("/summary/total"),
-        Some(&serde_json::Value::from(5u64))
-    );
-    assert_eq!(
-        payload.pointer("/summary/changed"),
-        Some(&serde_json::Value::from(2u64))
-    );
-    assert_eq!(
-        payload.pointer("/summary/added"),
-        Some(&serde_json::Value::from(2u64))
-    );
-    assert_eq!(
-        payload.pointer("/summary/removed"),
-        Some(&serde_json::Value::from(1u64))
-    );
+    assert_eq!(payload.pointer("/summary/total"), Some(&serde_json::Value::from(5u64)));
+    assert_eq!(payload.pointer("/summary/changed"), Some(&serde_json::Value::from(2u64)));
+    assert_eq!(payload.pointer("/summary/added"), Some(&serde_json::Value::from(2u64)));
+    assert_eq!(payload.pointer("/summary/removed"), Some(&serde_json::Value::from(1u64)));
 }
 
 #[test]
@@ -764,17 +651,10 @@ fn parity_diff_mode_jsonl_format_emits_summary_for_equal_inputs() {
     assert_ok(&out, "--diff --diff-format jsonl equal");
     assert_exit_code(&out, 0, "--diff --diff-format jsonl equal");
     let text = stdout_text(&out);
-    let lines = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
+    let lines = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>();
     assert_eq!(lines.len(), 1, "stdout:\n{text}");
     let summary: serde_json::Value = serde_json::from_str(lines[0]).expect("jsonl summary");
-    assert_eq!(
-        summary.get("type"),
-        Some(&serde_json::Value::String("summary".to_string()))
-    );
+    assert_eq!(summary.get("type"), Some(&serde_json::Value::String("summary".to_string())));
     assert_eq!(summary.get("equal"), Some(&serde_json::Value::Bool(true)));
 }
 
@@ -834,26 +714,11 @@ fn parity_diff_mode_diff_format_supports_forced_color_and_monochrome_override() 
     let forced = run_zq(&["--diff", "--diff-format", "diff", "-C", &left_s, &right_s]);
     assert_fail(&forced, "--diff color forced");
     let forced_stdout = stdout_text(&forced);
-    assert!(
-        forced_stdout.contains("\u{1b}[33m~\u{1b}[0m"),
-        "stdout:\n{forced_stdout}"
-    );
+    assert!(forced_stdout.contains("\u{1b}[33m~\u{1b}[0m"), "stdout:\n{forced_stdout}");
 
-    let no_color = run_zq(&[
-        "--diff",
-        "--diff-format",
-        "diff",
-        "-C",
-        "-M",
-        &left_s,
-        &right_s,
-    ]);
+    let no_color = run_zq(&["--diff", "--diff-format", "diff", "-C", "-M", &left_s, &right_s]);
     assert_fail(&no_color, "--diff monochrome override");
-    assert!(
-        !stdout_text(&no_color).contains("\u{1b}["),
-        "stdout:\n{}",
-        stdout_text(&no_color)
-    );
+    assert!(!stdout_text(&no_color).contains("\u{1b}["), "stdout:\n{}", stdout_text(&no_color));
 }
 
 #[test]
@@ -874,9 +739,5 @@ fn parity_diff_mode_rejects_double_stdin() {
     let out = run_zq(&["--diff", "-", "-"]);
     assert_fail(&out, "--diff - -");
     assert_exit_code(&out, 5, "--diff - -");
-    assert_stderr_contains(
-        &out,
-        "does not support reading both sides from stdin",
-        "--diff - -",
-    );
+    assert_stderr_contains(&out, "does not support reading both sides from stdin", "--diff - -");
 }

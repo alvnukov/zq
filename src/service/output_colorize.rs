@@ -26,11 +26,8 @@ pub(super) fn colorize_structured_output(
 fn colorize_key_value_text(rendered: &str, separator: char, palette: &JsonColorPalette) -> String {
     let mut out = String::with_capacity(rendered.len() + rendered.len() / 8);
     for part in rendered.split_inclusive('\n') {
-        let (line, newline) = if let Some(prefix) = part.strip_suffix('\n') {
-            (prefix, "\n")
-        } else {
-            (part, "")
-        };
+        let (line, newline) =
+            if let Some(prefix) = part.strip_suffix('\n') { (prefix, "\n") } else { (part, "") };
         if line.trim().is_empty() {
             out.push_str(line);
             out.push_str(newline);

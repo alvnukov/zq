@@ -33,11 +33,7 @@ fn main() {
     let exit = match worker.join() {
         Ok(Ok(actual)) => {
             if actual.len() != expected_len {
-                eprintln!(
-                    "mismatch: got {} outputs, expected {}",
-                    actual.len(),
-                    expected_len
-                );
+                eprintln!("mismatch: got {} outputs, expected {}", actual.len(), expected_len);
                 4
             } else {
                 0

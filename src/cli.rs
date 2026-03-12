@@ -23,15 +23,9 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<CliCommand>,
 
-    #[arg(
-        value_name = "FILTER",
-        help = "jq filter expression (defaults to . when omitted)"
-    )]
+    #[arg(value_name = "FILTER", help = "jq filter expression (defaults to . when omitted)")]
     pub query: Option<String>,
-    #[arg(
-        value_name = "FILE",
-        help = "Input file path. If omitted, stdin is used ('-')."
-    )]
+    #[arg(value_name = "FILE", help = "Input file path. If omitted, stdin is used ('-').")]
     pub input_file: Option<String>,
     #[arg(
         long = "input",
@@ -45,10 +39,7 @@ pub struct Cli {
         help = "Document selection for YAML streams: first|all|index"
     )]
     pub doc_mode: String,
-    #[arg(
-        long = "doc-index",
-        help = "Zero-based document index when --doc-mode=index"
-    )]
+    #[arg(long = "doc-index", help = "Zero-based document index when --doc-mode=index")]
     pub doc_index: Option<usize>,
     #[arg(
         long = "input-format",
@@ -72,12 +63,7 @@ pub struct Cli {
         help = "Module search path (accepted for jq compatibility)"
     )]
     pub library_path: Vec<String>,
-    #[arg(
-        short = 'f',
-        long = "from-file",
-        value_name = "FILE",
-        help = "Read filter from a file"
-    )]
+    #[arg(short = 'f', long = "from-file", value_name = "FILE", help = "Read filter from a file")]
     pub from_file: Option<String>,
     #[arg(
         short = 'b',

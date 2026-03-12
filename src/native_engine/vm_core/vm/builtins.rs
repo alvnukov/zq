@@ -367,9 +367,7 @@ fn run_builtins_list(_input: ZqValue) -> Result<ZqValue, String> {
         }
         entries.insert(format!("{name}/{arity}"));
     }
-    Ok(ZqValue::Array(
-        entries.into_iter().map(ZqValue::String).collect(),
-    ))
+    Ok(ZqValue::Array(entries.into_iter().map(ZqValue::String).collect()))
 }
 
 pub(super) fn run_length(input: ZqValue) -> Result<ZqValue, String> {
@@ -384,9 +382,7 @@ pub(super) fn run_length(input: ZqValue) -> Result<ZqValue, String> {
             }
             let raw = n.to_string();
             let abs_raw = raw.strip_prefix('-').unwrap_or(raw.as_str()).to_string();
-            Ok(ZqValue::Number(serde_json::Number::from_string_unchecked(
-                abs_raw,
-            )))
+            Ok(ZqValue::Number(serde_json::Number::from_string_unchecked(abs_raw)))
         }
         ZqValue::Bool(b) => Err(format!("boolean ({b}) has no length")),
     }
@@ -400,11 +396,9 @@ fn run_fabs(input: ZqValue) -> Result<ZqValue, String> {
             };
             Ok(c_math::number_to_value(value.abs()))
         }
-        other => Err(format!(
-            "{} ({}) number required",
-            type_name(&other),
-            value_for_error(&other)
-        )),
+        other => {
+            Err(format!("{} ({}) number required", type_name(&other), value_for_error(&other)))
+        }
     }
 }
 
@@ -512,11 +506,9 @@ fn run_unary_math(input: ZqValue, op: fn(f64) -> f64) -> Result<ZqValue, String>
             };
             Ok(c_math::number_to_value(op(value)))
         }
-        other => Err(format!(
-            "{} ({}) number required",
-            type_name(&other),
-            value_for_error(&other)
-        )),
+        other => {
+            Err(format!("{} ({}) number required", type_name(&other), value_for_error(&other)))
+        }
     }
 }
 
@@ -571,11 +563,7 @@ fn as_f64_math_arg(value: &ZqValue) -> Result<f64, String> {
 }
 
 fn number_required_error(value: &ZqValue) -> String {
-    format!(
-        "{} ({}) number required",
-        type_name(value),
-        value_for_error(value)
-    )
+    format!("{} ({}) number required", type_name(value), value_for_error(value))
 }
 
 fn run_isinfinite(input: ZqValue) -> Result<ZqValue, String> {
@@ -641,12 +629,9 @@ fn run_reverse(input: ZqValue) -> Result<ZqValue, String> {
             values.reverse();
             Ok(ZqValue::Array(values))
         }
-        ZqValue::String(s) => Ok(ZqValue::Array(
-            s.chars()
-                .rev()
-                .map(|ch| ZqValue::String(ch.to_string()))
-                .collect(),
-        )),
+        ZqValue::String(s) => {
+            Ok(ZqValue::Array(s.chars().rev().map(|ch| ZqValue::String(ch.to_string())).collect()))
+        }
         ZqValue::Null => Ok(ZqValue::Array(Vec::new())),
         ZqValue::Bool(b) => Err(format!("boolean ({b}) has no length")),
         ZqValue::Object(map) => {
@@ -740,9 +725,7 @@ pub(super) fn run_strptime(input: ZqValue, format: ZqValue) -> Result<ZqValue, S
     let (mut tm, remainder_bytes) = c_time::parse_strptime(&input, &format)
         .map_err(|_| format!("date \"{input}\" does not match format \"{format}\""))?;
     if !remainder_bytes.is_empty() && !remainder_bytes[0].is_ascii_whitespace() {
-        return Err(format!(
-            "date \"{input}\" does not match format \"{format}\""
-        ));
+        return Err(format!("date \"{input}\" does not match format \"{format}\""));
     }
     c_time::fill_tm_wday_yday(&mut tm);
     let mut out = match tm_to_jq_array(&tm, 0.0)? {
@@ -796,9 +779,7 @@ pub(super) fn run_strftime(
 
 fn tm_to_jq_array(tm: &libc::tm, fsecs: f64) -> Result<ZqValue, String> {
     let fields = c_time::tm_to_numeric_fields_like_jq(tm, fsecs);
-    Ok(ZqValue::Array(
-        fields.into_iter().map(c_math::number_to_value).collect(),
-    ))
+    Ok(ZqValue::Array(fields.into_iter().map(c_math::number_to_value).collect()))
 }
 
 fn jq_array_to_tm(input: ZqValue, local: bool) -> Option<libc::tm> {

@@ -62,10 +62,7 @@ fn module_directive_forms_parse_at_toplevel() {
         compile(r#"import "src/native_engine/vm_core/test_modules/raw" as $r {"raw":true}; $r"#)
             .expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::String("this is raw text, not JSON\n".to_string())]
-    );
+    assert_eq!(out, vec![ZqValue::String("this is raw text, not JSON\n".to_string())]);
 }
 
 #[test]
@@ -75,9 +72,7 @@ fn module_library_paths_can_be_provided_explicitly() {
 
     let q = compile_with_module_dirs(
         r#"import "alt" as mod; mod::value"#,
-        vec![std::path::PathBuf::from(
-            "src/native_engine/vm_core/test_modules/search",
-        )],
+        vec![std::path::PathBuf::from("src/native_engine/vm_core/test_modules/search")],
     )
     .expect("compile with library path");
     let out = execute(&q, &ZqValue::Null).expect("execute");
@@ -200,16 +195,9 @@ fn get_search_list_uses_compile_library_paths() {
         compile_with_module_dirs("get_search_list", vec![modulemeta_dir.clone()]).expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
     let rendered = out[0].clone().into_json();
-    let values = rendered
-        .as_array()
-        .expect("array")
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect::<Vec<_>>();
-    assert!(
-        values.contains(&modulemeta_dir.to_string_lossy().as_ref()),
-        "values={values:?}"
-    );
+    let values =
+        rendered.as_array().expect("array").iter().filter_map(|v| v.as_str()).collect::<Vec<_>>();
+    assert!(values.contains(&modulemeta_dir.to_string_lossy().as_ref()), "values={values:?}");
 }
 
 #[test]
@@ -230,10 +218,7 @@ fn jq_origin_and_runtime_flags_builtins_are_defined() {
     let Some(origin_type) = arr.first().and_then(|v| v.as_str()) else {
         panic!("unexpected payload: {payload}");
     };
-    assert!(
-        origin_type == "string" || origin_type == "null",
-        "payload={payload}"
-    );
+    assert!(origin_type == "string" || origin_type == "null", "payload={payload}");
 }
 
 #[test]
@@ -292,12 +277,7 @@ fn internal_binop_and_negate_aliases_match_jq_cfuncs() {
     let out = execute(&q, &ZqValue::Null).expect("execute");
     assert_eq!(
         out,
-        vec![
-            ZqValue::Bool(true),
-            ZqValue::Bool(true),
-            ZqValue::Bool(true),
-            ZqValue::Bool(true),
-        ]
+        vec![ZqValue::Bool(true), ZqValue::Bool(true), ZqValue::Bool(true), ZqValue::Bool(true),]
     );
 
     let q = compile("_negate").expect("compile");
@@ -326,17 +306,11 @@ fn huge_input_numbers_keep_numeric_arithmetic_like_jq_non_decnum() {
 
     let q = compile("try (. * 1000000000) catch .").expect("compile");
     let out = execute(&q, &input).expect("execute");
-    assert!(
-        matches!(out.as_slice(), [ZqValue::Number(_)]),
-        "unexpected output: {out:?}"
-    );
+    assert!(matches!(out.as_slice(), [ZqValue::Number(_)]), "unexpected output: {out:?}");
 
     let q = compile("try (-.) catch .").expect("compile");
     let out = execute(&q, &input).expect("execute");
-    assert!(
-        matches!(out.as_slice(), [ZqValue::Number(_)]),
-        "unexpected output: {out:?}"
-    );
+    assert!(matches!(out.as_slice(), [ZqValue::Number(_)]), "unexpected output: {out:?}");
 }
 
 #[test]
@@ -424,10 +398,7 @@ fn libm_binary_and_ternary_builtins_from_jq_are_supported() {
     )
     .expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!([true, true, true, true]))]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!([true, true, true, true]))]);
 }
 
 #[test]
@@ -450,12 +421,7 @@ fn not_is_builtin_filter_like_in_jq() {
     let out = execute(&q, &ZqValue::from_json(json!([true, false, null, 0]))).expect("execute");
     assert_eq!(
         out,
-        vec![
-            ZqValue::Bool(false),
-            ZqValue::Bool(true),
-            ZqValue::Bool(true),
-            ZqValue::Bool(false)
-        ]
+        vec![ZqValue::Bool(false), ZqValue::Bool(true), ZqValue::Bool(true), ZqValue::Bool(false)]
     );
 }
 
@@ -497,10 +463,7 @@ fn object_field_lookup() {
 #[test]
 fn dot_identifier_with_whitespace_requires_bracket_form() {
     let err = compile(". foo").expect_err("must fail");
-    assert_eq!(
-        err,
-        "parse error: try .[\"field\"] instead of .field for unusually named fields"
-    );
+    assert_eq!(err, "parse error: try .[\"field\"] instead of .field for unusually named fields");
 }
 
 #[test]
@@ -515,10 +478,7 @@ fn object_field_missing_returns_null() {
 fn non_object_field_lookup_errors_like_jq_family() {
     let program = compile(".foo").expect("compile");
     let err = execute(&program, &ZqValue::from(1)).expect_err("must fail");
-    assert!(
-        err.contains("Cannot index number with string \"foo\""),
-        "err={err}"
-    );
+    assert!(err.contains("Cannot index number with string \"foo\""), "err={err}");
 }
 
 #[test]
@@ -548,33 +508,21 @@ fn optional_bracket_string_suppresses_non_object_errors() {
 fn field_access_forms_match_upstream_man_cases() {
     // jq/tests/man.test
     let q = compile(".foo").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!({"foo": 42, "bar": "less interesting data"})),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!({"foo": 42, "bar": "less interesting data"})))
+        .expect("execute");
     assert_eq!(out, vec![ZqValue::from(42)]);
 
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!({"notfoo": true, "alsonotfoo": false})),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!({"notfoo": true, "alsonotfoo": false})))
+        .expect("execute");
     assert_eq!(out, vec![ZqValue::Null]);
 
     let q = compile(".foo?").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!({"foo": 42, "bar": "less interesting data"})),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!({"foo": 42, "bar": "less interesting data"})))
+        .expect("execute");
     assert_eq!(out, vec![ZqValue::from(42)]);
 
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!({"notfoo": true, "alsonotfoo": false})),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!({"notfoo": true, "alsonotfoo": false})))
+        .expect("execute");
     assert_eq!(out, vec![ZqValue::Null]);
 
     let q = compile(".[\"foo\"]?").expect("compile");
@@ -634,10 +582,7 @@ fn iteration_and_projection_match_upstream_man_cases() {
     .expect("execute");
     assert_eq!(
         out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
-        vec![
-            json!({"name":"JSON", "good":true}),
-            json!({"name":"XML", "good":false}),
-        ]
+        vec![json!({"name":"JSON", "good":true}), json!({"name":"XML", "good":false}),]
     );
 
     let out = execute(&q, &ZqValue::from_json(json!([]))).expect("execute");
@@ -645,10 +590,7 @@ fn iteration_and_projection_match_upstream_man_cases() {
 
     let q = compile(".foo[]").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!({"foo":[1,2,3]}))).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from(1), ZqValue::from(2), ZqValue::from(3)]
-    );
+    assert_eq!(out, vec![ZqValue::from(1), ZqValue::from(2), ZqValue::from(3)]);
 
     let q = compile(".[]").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!({"a":1,"b":1}))).expect("execute");
@@ -663,13 +605,7 @@ fn iteration_and_projection_match_upstream_man_cases() {
         ])),
     )
     .expect("execute");
-    assert_eq!(
-        out,
-        vec![
-            ZqValue::String("JSON".to_string()),
-            ZqValue::String("XML".to_string())
-        ]
-    );
+    assert_eq!(out, vec![ZqValue::String("JSON".to_string()), ZqValue::String("XML".to_string())]);
 
     let q = compile(".user, .projects[]").expect("compile");
     let out = execute(
@@ -692,10 +628,7 @@ fn iteration_and_projection_match_upstream_man_cases() {
         &ZqValue::from_json(json!({"user":"stedolan", "projects": ["jq", "wikiflow"]})),
     )
     .expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!(["stedolan", "jq", "wikiflow"])
-    );
+    assert_eq!(out[0].clone().into_json(), json!(["stedolan", "jq", "wikiflow"]));
 }
 
 #[test]
@@ -757,10 +690,7 @@ fn defined_or_operator_matches_jq_core_semantics() {
 
     let q = compile("(false, null, 1) | . // 42").expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from(42), ZqValue::from(42), ZqValue::from(1)]
-    );
+    assert_eq!(out, vec![ZqValue::from(42), ZqValue::from(42), ZqValue::from(1)]);
 }
 
 #[test]
@@ -771,14 +701,7 @@ fn and_or_operators_follow_jq_stream_semantics() {
 
     let q = compile("(false, 1) and (2, 3)").expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
-    assert_eq!(
-        out,
-        vec![
-            ZqValue::Bool(false),
-            ZqValue::Bool(true),
-            ZqValue::Bool(true)
-        ]
-    );
+    assert_eq!(out, vec![ZqValue::Bool(false), ZqValue::Bool(true), ZqValue::Bool(true)]);
 
     let q = compile("1 and empty").expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
@@ -786,14 +709,7 @@ fn and_or_operators_follow_jq_stream_semantics() {
 
     let q = compile("(true, false) or (false, true)").expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
-    assert_eq!(
-        out,
-        vec![
-            ZqValue::Bool(true),
-            ZqValue::Bool(false),
-            ZqValue::Bool(true)
-        ]
-    );
+    assert_eq!(out, vec![ZqValue::Bool(true), ZqValue::Bool(false), ZqValue::Bool(true)]);
 }
 
 #[test]
@@ -831,12 +747,7 @@ fn boolean_ops_match_upstream_man_cases() {
     let out = execute(&q, &ZqValue::Null).expect("execute");
     assert_eq!(
         out,
-        vec![
-            ZqValue::Bool(true),
-            ZqValue::Bool(false),
-            ZqValue::Bool(true),
-            ZqValue::Bool(false)
-        ]
+        vec![ZqValue::Bool(true), ZqValue::Bool(false), ZqValue::Bool(true), ZqValue::Bool(false)]
     );
 }
 
@@ -954,10 +865,7 @@ fn index_and_slice_forms_match_upstream_man_cases() {
         ])),
     )
     .expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!({"name":"JSON", "good":true})
-    );
+    assert_eq!(out[0].clone().into_json(), json!({"name":"JSON", "good":true}));
 
     let q = compile(".[2]").expect("compile");
     let out = execute(
@@ -992,13 +900,7 @@ fn index_and_slice_forms_match_upstream_man_cases() {
 
     let q = compile(".[4,2]").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!(["a", "b", "c", "d", "e"]))).expect("execute");
-    assert_eq!(
-        out,
-        vec![
-            ZqValue::String("e".to_string()),
-            ZqValue::String("c".to_string())
-        ]
-    );
+    assert_eq!(out, vec![ZqValue::String("e".to_string()), ZqValue::String("c".to_string())]);
 
     let q = compile(".[1+2]").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!(["a", "b", "c", "d", "e"]))).expect("execute");
@@ -1049,10 +951,7 @@ fn string_literal_with_escape() {
 fn boolean_and_null_literals() {
     let program = compile("true,false,null").expect("compile");
     let out = execute(&program, &ZqValue::from(1)).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::Bool(true), ZqValue::Bool(false), ZqValue::Null]
-    );
+    assert_eq!(out, vec![ZqValue::Bool(true), ZqValue::Bool(false), ZqValue::Null]);
 }
 
 #[test]
@@ -1117,10 +1016,7 @@ fn divide_numbers_returns_fractional_number() {
 fn divide_by_zero_returns_jq_style_error() {
     let program = compile("1 / 0").expect("compile");
     let err = execute(&program, &ZqValue::Null).expect_err("must fail");
-    assert_eq!(
-        err,
-        "number (1) and number (0) cannot be divided because the divisor is zero"
-    );
+    assert_eq!(err, "number (1) and number (0) cannot be divided because the divisor is zero");
 }
 
 #[test]
@@ -1174,10 +1070,7 @@ fn arithmetic_and_merge_examples_match_upstream_man_cases() {
     let q =
         compile("{\"k\": {\"a\": 1, \"b\": 2}} * {\"k\": {\"a\": 0, \"c\": 3}}").expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!({"k": {"a": 0, "b": 2, "c": 3}})
-    );
+    assert_eq!(out[0].clone().into_json(), json!({"k": {"a": 0, "b": 2, "c": 3}}));
 }
 
 #[test]
@@ -1193,10 +1086,7 @@ fn string_repeat_limit_matches_upstream_jq_guard() {
     // jq/tests/jq.test
     let q = compile(". * 1000000000").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!(""))).expect("execute");
-    assert_eq!(
-        out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
-        vec![json!("")]
-    );
+    assert_eq!(out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(), vec![json!("")]);
 }
 
 #[test]
@@ -1278,15 +1168,9 @@ fn not_filter_uses_upstream_jq_forms() {
 
     // jq/tests/jq.test
     let program = compile("[.[] | not]").expect("compile");
-    let out = execute(
-        &program,
-        &ZqValue::from_json(json!([1, 0, false, null, true, "hello"])),
-    )
-    .expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!([false, false, true, true, false, false])
-    );
+    let out = execute(&program, &ZqValue::from_json(json!([1, 0, false, null, true, "hello"])))
+        .expect("execute");
+    assert_eq!(out[0].clone().into_json(), json!([false, false, true, true, false, false]));
 }
 
 #[test]
@@ -1306,10 +1190,7 @@ fn object_literal_builds_from_expressions() {
     map.insert("foo".to_string(), ZqValue::from(2));
     map.insert("bar".to_string(), ZqValue::from(3));
     let out = execute(&program, &ZqValue::Object(map)).expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!({"a": 2, "b": 6, "c": true})
-    );
+    assert_eq!(out[0].clone().into_json(), json!({"a": 2, "b": 6, "c": true}));
 }
 
 #[test]
@@ -1317,10 +1198,7 @@ fn object_literal_supports_jq_shorthand_fields() {
     let program = compile("{foo, \"bar\", if, elif}").expect("compile");
     let input = ZqValue::from_json(json!({"foo": 1, "bar": 2, "if": 3, "elif": 4}));
     let out = execute(&program, &input).expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!({"foo":1, "bar":2, "if":3, "elif":4})
-    );
+    assert_eq!(out[0].clone().into_json(), json!({"foo":1, "bar":2, "if":3, "elif":4}));
 
     let program = compile("{missing}").expect("compile");
     let out = execute(&program, &ZqValue::from_json(json!({}))).expect("execute");
@@ -1405,10 +1283,7 @@ fn object_builders_match_upstream_man_cases() {
 
     let q = compile("{(.user): .titles}").expect("compile");
     let out = execute(&q, &input).expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!({"stedolan": ["JQ Primer", "More JQ"]})
-    );
+    assert_eq!(out[0].clone().into_json(), json!({"stedolan": ["JQ Primer", "More JQ"]}));
 }
 
 #[test]
@@ -1495,10 +1370,7 @@ fn parser_reports_top_level_percent_and_rbrace_like_jq() {
     assert_eq!(err, "syntax error, unexpected '%', expecting end of file");
 
     let err = compile("}").expect_err("must fail");
-    assert_eq!(
-        err,
-        "syntax error, unexpected INVALID_CHARACTER, expecting end of file"
-    );
+    assert_eq!(err, "syntax error, unexpected INVALID_CHARACTER, expecting end of file");
 
     let err = compile("{").expect_err("must fail");
     assert_eq!(err, "syntax error, unexpected end of file");
@@ -1512,34 +1384,19 @@ fn top_level_program_is_required_for_defs_only_like_jq() {
 
 #[test]
 fn parser_enforces_jq_function_parameter_limit() {
-    let params = (0..4097)
-        .map(|i| format!("$a{i}"))
-        .collect::<Vec<_>>()
-        .join("; ");
-    let args = (0..4097)
-        .map(|i| i.to_string())
-        .collect::<Vec<_>>()
-        .join("; ");
+    let params = (0..4097).map(|i| format!("$a{i}")).collect::<Vec<_>>().join("; ");
+    let args = (0..4097).map(|i| i.to_string()).collect::<Vec<_>>().join("; ");
     let query = format!("def f({params}): .; f({args})");
     let err = compile(query.as_str()).expect_err("must fail");
-    assert_eq!(
-        err,
-        "too many function parameters or local function definitions (max 4095)"
-    );
+    assert_eq!(err, "too many function parameters or local function definitions (max 4095)");
 }
 
 #[test]
 fn parser_enforces_jq_local_function_limit() {
-    let defs = (0..4097)
-        .map(|i| format!("def f{i}: {i};"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let defs = (0..4097).map(|i| format!("def f{i}: {i};")).collect::<Vec<_>>().join(" ");
     let query = format!("{defs} 0");
     let err = compile(query.as_str()).expect_err("must fail");
-    assert_eq!(
-        err,
-        "too many function parameters or local function definitions (max 4095)"
-    );
+    assert_eq!(err, "too many function parameters or local function definitions (max 4095)");
 }
 
 #[test]
@@ -1618,15 +1475,9 @@ fn def_with_params_matches_upstream_jq_cases() {
              f(.[0];.[1];.[2];.[3];.[4];.[5];.[6];.[7];.[8];.[9])",
     )
     .expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])),
-    )
-    .expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!([9, 8, 7, 6, 5, 4, 3, 2, 1, 0]))]
-    );
+    let out =
+        execute(&q, &ZqValue::from_json(json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]))).expect("execute");
+    assert_eq!(out, vec![ZqValue::from_json(json!([9, 8, 7, 6, 5, 4, 3, 2, 1, 0]))]);
 }
 
 #[test]
@@ -1689,10 +1540,7 @@ fn nested_and_scoped_defs_match_upstream_jq_cases() {
     )
     .expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!([4, 1, 2, 3, 3, 5, 4, 1, 2, 3, 3]))]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!([4, 1, 2, 3, 3, 5, 4, 1, 2, 3, 3]))]);
 }
 
 #[test]
@@ -1707,10 +1555,7 @@ fn closures_and_lexical_scoping_match_upstream_jq_case() {
     )
     .expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!("more testing"))).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!([1, 100, 2100, 100, 2100]))]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!([1, 100, 2100, 100, 2100]))]);
 }
 
 #[test]
@@ -1813,13 +1658,7 @@ fn if_without_else_defaults_to_identity_like_jq() {
 fn if_uses_stream_semantics_like_jq() {
     let q = compile("if (true, false) then \"T\" else \"F\" end").expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
-    assert_eq!(
-        out,
-        vec![
-            ZqValue::String("T".to_string()),
-            ZqValue::String("F".to_string())
-        ]
-    );
+    assert_eq!(out, vec![ZqValue::String("T".to_string()), ZqValue::String("F".to_string())]);
 
     let q = compile("if empty then 1 else 2 end").expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
@@ -1838,13 +1677,7 @@ fn if_branch_expressions_can_emit_multiple_results() {
 
     let q = compile("if .[] then . else 0 end").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([0, 1]))).expect("execute");
-    assert_eq!(
-        out,
-        vec![
-            ZqValue::from_json(json!([0, 1])),
-            ZqValue::from_json(json!([0, 1]))
-        ]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!([0, 1])), ZqValue::from_json(json!([0, 1]))]);
 }
 
 #[test]
@@ -1933,10 +1766,7 @@ fn pipe_is_supported_inside_parentheses_and_if_subqueries() {
 
     let q = compile("if (.[] | . > 0) then . else 0 end").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([0, 1]))).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from(0), ZqValue::from_json(json!([0, 1]))]
-    );
+    assert_eq!(out, vec![ZqValue::from(0), ZqValue::from_json(json!([0, 1]))]);
 }
 
 #[test]
@@ -2118,16 +1948,10 @@ fn try_and_catch_can_be_field_names() {
 #[test]
 fn length_builtin_matches_jq_core_cases() {
     let q = compile("length").expect("compile");
+    assert_eq!(execute(&q, &ZqValue::Null).expect("execute"), vec![ZqValue::from(0)]);
     assert_eq!(
-        execute(&q, &ZqValue::Null).expect("execute"),
-        vec![ZqValue::from(0)]
-    );
-    assert_eq!(
-        execute(
-            &q,
-            &ZqValue::Array(vec![ZqValue::from(1), ZqValue::from(2), ZqValue::from(3)])
-        )
-        .expect("execute"),
+        execute(&q, &ZqValue::Array(vec![ZqValue::from(1), ZqValue::from(2), ZqValue::from(3)]))
+            .expect("execute"),
         vec![ZqValue::from(3)]
     );
     assert_eq!(
@@ -2241,24 +2065,15 @@ fn special_number_literals_follow_jq_non_decnum_forms() {
 fn nan_indices_and_slices_match_upstream_jq_cases() {
     let q = compile("[range(3)] | .[nan:1]").expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
-    assert_eq!(
-        out.into_iter().map(|v| v.into_json()).collect::<Vec<_>>(),
-        vec![json!([0])]
-    );
+    assert_eq!(out.into_iter().map(|v| v.into_json()).collect::<Vec<_>>(), vec![json!([0])]);
 
     let q = compile("[range(3)] | .[1:nan]").expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
-    assert_eq!(
-        out.into_iter().map(|v| v.into_json()).collect::<Vec<_>>(),
-        vec![json!([1, 2])]
-    );
+    assert_eq!(out.into_iter().map(|v| v.into_json()).collect::<Vec<_>>(), vec![json!([1, 2])]);
 
     let q = compile("[range(3)] | .[nan]").expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
-    assert_eq!(
-        out.into_iter().map(|v| v.into_json()).collect::<Vec<_>>(),
-        vec![json!(null)]
-    );
+    assert_eq!(out.into_iter().map(|v| v.into_json()).collect::<Vec<_>>(), vec![json!(null)]);
 
     let q = compile(r#"try ([range(3)] | .[nan] = 9) catch ."#).expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
@@ -2269,10 +2084,7 @@ fn nan_indices_and_slices_match_upstream_jq_cases() {
 
     let q = compile("del(.[nan])").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([1, 2, 3]))).expect("execute");
-    assert_eq!(
-        out.into_iter().map(|v| v.into_json()).collect::<Vec<_>>(),
-        vec![json!([1, 2, 3])]
-    );
+    assert_eq!(out.into_iter().map(|v| v.into_json()).collect::<Vec<_>>(), vec![json!([1, 2, 3])]);
 }
 
 #[test]
@@ -2345,11 +2157,9 @@ fn type_builtin_matches_jq_names() {
 #[test]
 fn add_builtin_follows_jq_reduce_definition() {
     let q = compile("add").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::Array(vec![ZqValue::from(1), ZqValue::from(2), ZqValue::from(3)]),
-    )
-    .expect("execute");
+    let out =
+        execute(&q, &ZqValue::Array(vec![ZqValue::from(1), ZqValue::from(2), ZqValue::from(3)]))
+            .expect("execute");
     assert_eq!(out, vec![ZqValue::from(6)]);
 
     let out = execute(&q, &ZqValue::Array(Vec::new())).expect("execute");
@@ -2382,10 +2192,7 @@ fn add_filter_form_matches_upstream_cases() {
         ])),
     )
     .expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!([null, 6, "abc", [3, 4, 5, 6], {"a": 3, "b": 2}])
-    );
+    assert_eq!(out[0].clone().into_json(), json!([null, 6, "abc", [3, 4, 5, 6], {"a": 3, "b": 2}]));
 }
 
 #[test]
@@ -2414,10 +2221,7 @@ fn entries_builtins_follow_jq_defs() {
     );
 
     let out_arr = execute(&to_entries, &ZqValue::from_json(json!([10, 20]))).expect("execute");
-    assert_eq!(
-        out_arr[0].clone().into_json(),
-        json!([{"key":0,"value":10},{"key":1,"value":20}])
-    );
+    assert_eq!(out_arr[0].clone().into_json(), json!([{"key":0,"value":10},{"key":1,"value":20}]));
 
     let from_entries = compile("from_entries").expect("compile");
     let out_from = execute(
@@ -2440,26 +2244,16 @@ fn with_entries_matches_jq_definition() {
 
     let q = compile("try with_entries(.value) catch .").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!({"a":1}))).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!(
-            "Cannot index number with string \"key\""
-        ))]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!("Cannot index number with string \"key\""))]);
 }
 
 #[test]
 fn recurse_forms_match_upstream_core_cases() {
     let q = compile("recurse(.foo[])").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!({"foo":[{"foo": []}, {"foo":[{"foo":[]}]}]})),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!({"foo":[{"foo": []}, {"foo":[{"foo":[]}]}]})))
+        .expect("execute");
     assert_eq!(
-        out.into_iter()
-            .map(|v| v.into_json())
-            .collect::<Vec<serde_json::Value>>(),
+        out.into_iter().map(|v| v.into_json()).collect::<Vec<serde_json::Value>>(),
         vec![
             json!({"foo":[{"foo":[]},{"foo":[{"foo":[]}]}]}),
             json!({"foo":[]}),
@@ -2471,18 +2265,13 @@ fn recurse_forms_match_upstream_core_cases() {
     let q = compile("recurse").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!({"a":0,"b":[1]}))).expect("execute");
     assert_eq!(
-        out.into_iter()
-            .map(|v| v.into_json())
-            .collect::<Vec<serde_json::Value>>(),
+        out.into_iter().map(|v| v.into_json()).collect::<Vec<serde_json::Value>>(),
         vec![json!({"a":0,"b":[1]}), json!(0), json!([1]), json!(1)]
     );
 
     let q = compile("recurse(. * .; . < 20)").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!(2))).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from(2), ZqValue::from(4), ZqValue::from(16)]
-    );
+    assert_eq!(out, vec![ZqValue::from(2), ZqValue::from(4), ZqValue::from(16)]);
 
     let q = compile("recurse").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!(1))).expect("execute");
@@ -2602,33 +2391,20 @@ fn index_and_join_match_upstream_sql_style_cases() {
             "JOIN({\"0\":[0,\"abc\"],\"1\":[1,\"bcd\"],\"2\":[2,\"def\"],\"3\":[3,\"efg\"],\"4\":[4,\"fgh\"]}; .[0]|tostring)",
         )
         .expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([[5, "foo"], [3, "bar"], [1, "foobar"]])),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!([[5, "foo"], [3, "bar"], [1, "foobar"]])))
+        .expect("execute");
     assert_eq!(
         out[0].clone().into_json(),
-        json!([
-            [[5, "foo"], null],
-            [[3, "bar"], [3, "efg"]],
-            [[1, "foobar"], [1, "bcd"]]
-        ])
+        json!([[[5, "foo"], null], [[3, "bar"], [3, "efg"]], [[1, "foobar"], [1, "bcd"]]])
     );
 }
 
 #[test]
 fn index_and_join_overloads_match_builtin_jq_definitions() {
     let q = compile("INDEX(.[0])").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([[0, "a"], [1, "b"], [2, "c"]])),
-    )
-    .expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!({"0":[0,"a"],"1":[1,"b"],"2":[2,"c"]})
-    );
+    let out =
+        execute(&q, &ZqValue::from_json(json!([[0, "a"], [1, "b"], [2, "c"]]))).expect("execute");
+    assert_eq!(out[0].clone().into_json(), json!({"0":[0,"a"],"1":[1,"b"],"2":[2,"c"]}));
 
     let q = compile("JOIN({\"0\":\"zero\",\"1\":\"one\"}; .[]; tostring)").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([1, 0, 2]))).expect("execute");
@@ -2791,12 +2567,7 @@ fn fromdate_and_todate_errors_match_expected_shapes() {
 
     let q = compile("try todateiso8601 catch .").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!("bad"))).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!(
-            "strftime/1 requires parsed datetime inputs"
-        ))]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!("strftime/1 requires parsed datetime inputs"))]);
 }
 
 #[test]
@@ -2804,10 +2575,7 @@ fn time_builtins_match_upstream_jq_cases() {
     // jq/tests/jq.test + jq/tests/man.test
     let q = compile("gmtime").expect("compile");
     let out = execute(&q, &ZqValue::from(1425599507i64)).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!([2015, 2, 5, 23, 51, 47, 4, 63]))]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!([2015, 2, 5, 23, 51, 47, 4, 63]))]);
 
     let q = compile("gmtime[5]").expect("compile");
     let out = execute(
@@ -2817,17 +2585,12 @@ fn time_builtins_match_upstream_jq_cases() {
     .expect("execute");
     assert_eq!(
         out,
-        vec![ZqValue::from_json(
-            serde_json::from_str::<serde_json::Value>("47.25").unwrap()
-        )]
+        vec![ZqValue::from_json(serde_json::from_str::<serde_json::Value>("47.25").unwrap())]
     );
 
     let q = compile(r#"strftime("%Y-%m-%dT%H:%M:%SZ")"#).expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([2015, 2, 5, 23, 51, 47, 4, 63])),
-    )
-    .expect("execute");
+    let out =
+        execute(&q, &ZqValue::from_json(json!([2015, 2, 5, 23, 51, 47, 4, 63]))).expect("execute");
     assert_eq!(out, vec![ZqValue::from_json(json!("2015-03-05T23:51:47Z"))]);
 
     let q = compile(r#"strftime("%A, %B %d, %Y")"#).expect("compile");
@@ -2838,10 +2601,7 @@ fn time_builtins_match_upstream_jq_cases() {
         ),
     )
     .expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!("Tuesday, June 30, 2015"))]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!("Tuesday, June 30, 2015"))]);
 
     let q = compile("mktime").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([2024, 8, 21]))).expect("execute");
@@ -2849,13 +2609,7 @@ fn time_builtins_match_upstream_jq_cases() {
 
     let q = compile(r#"[strptime("%Y-%m-%dT%H:%M:%SZ")|(.,mktime)]"#).expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!("2015-03-05T23:51:47Z"))).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!([
-            [2015, 2, 5, 23, 51, 47, 4, 63],
-            1425599507
-        ]))]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!([[2015, 2, 5, 23, 51, 47, 4, 63], 1425599507]))]);
 }
 
 #[test]
@@ -2894,18 +2648,9 @@ fn inputs_ir_keeps_try_repeat_input_shape() {
     let q = compile("inputs").expect("compile");
     let branch = q.branches.first().expect("inputs branch");
     let shape = format!("{:?}", branch.ops);
-    assert!(
-        shape.contains("TryCatch"),
-        "inputs ir must contain TryCatch, got: {shape}"
-    );
-    assert!(
-        shape.contains("Repeat"),
-        "inputs ir must contain Repeat, got: {shape}"
-    );
-    assert!(
-        shape.contains("Input"),
-        "inputs ir must contain Input, got: {shape}"
-    );
+    assert!(shape.contains("TryCatch"), "inputs ir must contain TryCatch, got: {shape}");
+    assert!(shape.contains("Repeat"), "inputs ir must contain Repeat, got: {shape}");
+    assert!(shape.contains("Input"), "inputs ir must contain Input, got: {shape}");
 }
 
 #[test]
@@ -2981,30 +2726,18 @@ fn onig_capture_and_scan_core_cases() {
     );
 
     let q = compile("[.[] | scan(\", \")]").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!(["a,b, c, d, e,f", ", a,b, c, d, e,f, "])),
-    )
-    .expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!([", ", ", ", ", ", ", ", ", ", ", ", ", ", ", "])
-    );
+    let out = execute(&q, &ZqValue::from_json(json!(["a,b, c, d, e,f", ", a,b, c, d, e,f, "])))
+        .expect("execute");
+    assert_eq!(out[0].clone().into_json(), json!([", ", ", ", ", ", ", ", ", ", ", ", ", ", ", "]));
 }
 
 #[test]
 fn onig_sub_and_gsub_core_cases() {
     // jq/tests/onig.test
     let q = compile(r#"[.[] | sub(", "; ":")]"#).expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!(["a,b, c, d, e,f", ", a,b, c, d, e,f, "])),
-    )
-    .expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!(["a,b:c, d, e,f", ":a,b, c, d, e,f, "])
-    );
+    let out = execute(&q, &ZqValue::from_json(json!(["a,b, c, d, e,f", ", a,b, c, d, e,f, "])))
+        .expect("execute");
+    assert_eq!(out[0].clone().into_json(), json!(["a,b:c, d, e,f", ":a,b, c, d, e,f, "]));
 
     let q = compile(r#"sub("^(?<head>.)"; "Head=\(.head) Tail=")"#).expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!("abcdef"))).expect("execute");
@@ -3098,19 +2831,11 @@ fn tostring_builtin_matches_upstream_happy_path() {
 #[test]
 fn toboolean_builtin_matches_upstream_happy_path() {
     let q = compile(".[] | toboolean").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!(["true", "false", true, false])),
-    )
-    .expect("execute");
+    let out =
+        execute(&q, &ZqValue::from_json(json!(["true", "false", true, false]))).expect("execute");
     assert_eq!(
         out,
-        vec![
-            ZqValue::Bool(true),
-            ZqValue::Bool(false),
-            ZqValue::Bool(true),
-            ZqValue::Bool(false)
-        ]
+        vec![ZqValue::Bool(true), ZqValue::Bool(false), ZqValue::Bool(true), ZqValue::Bool(false)]
     );
 }
 
@@ -3153,9 +2878,8 @@ fn tojson_encodes_like_jq_dump_string() {
     );
 
     let q = compile("tojson").expect("compile");
-    let scientific = ZqValue::Number(serde_json::Number::from_string_unchecked(
-        "100e-2".to_string(),
-    ));
+    let scientific =
+        ZqValue::Number(serde_json::Number::from_string_unchecked("100e-2".to_string()));
     let out = execute(&q, &scientific).expect("execute");
     assert_eq!(out, vec![ZqValue::String("1.00".to_string())]);
 }
@@ -3191,11 +2915,8 @@ fn utf8bytelength_matches_upstream_and_errors() {
 #[test]
 fn startswith_and_endswith_match_upstream_cases() {
     let q = compile(".[] | startswith(\"foo\")").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!(["fo", "foo", "barfoo", "foobar", "barfoob"])),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!(["fo", "foo", "barfoo", "foobar", "barfoob"])))
+        .expect("execute");
     assert_eq!(
         out,
         vec![
@@ -3208,11 +2929,8 @@ fn startswith_and_endswith_match_upstream_cases() {
     );
 
     let q = compile(".[] | endswith(\"foo\")").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!(["fo", "foo", "barfoo", "foobar", "barfoob"])),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!(["fo", "foo", "barfoo", "foobar", "barfoob"])))
+        .expect("execute");
     assert_eq!(
         out,
         vec![
@@ -3239,16 +2957,10 @@ fn startswith_and_endswith_type_errors_match_jq() {
 #[test]
 fn split_matches_upstream_cases() {
     let q = compile(".[] | split(\", \")").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!(["a,b, c, d, e,f", ", a,b, c, d, e,f, "])),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!(["a,b, c, d, e,f", ", a,b, c, d, e,f, "])))
+        .expect("execute");
     assert_eq!(out[0].clone().into_json(), json!(["a,b", "c", "d", "e,f"]));
-    assert_eq!(
-        out[1].clone().into_json(),
-        json!(["", "a,b", "c", "d", "e,f", ""])
-    );
+    assert_eq!(out[1].clone().into_json(), json!(["", "a,b", "c", "d", "e,f", ""]));
 
     let q = compile("split(\"\")").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!("abc"))).expect("execute");
@@ -3266,10 +2978,7 @@ fn split_type_error_matches_jq() {
 fn explode_and_implode_match_upstream_cases() {
     let explode = compile("explode").expect("compile");
     let out = execute(&explode, &ZqValue::from_json(json!("foobar"))).expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!([102, 111, 111, 98, 97, 114])
-    );
+    assert_eq!(out[0].clone().into_json(), json!([102, 111, 111, 98, 97, 114]));
 
     let implode = compile("implode").expect("compile");
     let out = execute(&implode, &ZqValue::from_json(json!([65, 66, 67]))).expect("execute");
@@ -3296,20 +3005,14 @@ fn implode_errors_match_jq() {
     assert_eq!(err, "implode input must be an array");
 
     let err = execute(&q, &ZqValue::from_json(json!(["a"]))).expect_err("must fail");
-    assert_eq!(
-        err,
-        "string (\"a\") can't be imploded, unicode codepoint needs to be numeric"
-    );
+    assert_eq!(err, "string (\"a\") can't be imploded, unicode codepoint needs to be numeric");
 }
 
 #[test]
 fn trimstr_family_matches_upstream_cases() {
     let q = compile(".[] | ltrimstr(\"foo\")").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!(["fo", "foo", "barfoo", "foobar", "afoo"])),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!(["fo", "foo", "barfoo", "foobar", "afoo"])))
+        .expect("execute");
     assert_eq!(
         out,
         vec![
@@ -3322,11 +3025,8 @@ fn trimstr_family_matches_upstream_cases() {
     );
 
     let q = compile(".[] | rtrimstr(\"foo\")").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!(["fo", "foo", "barfoo", "foobar", "foob"])),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!(["fo", "foo", "barfoo", "foobar", "foob"])))
+        .expect("execute");
     assert_eq!(
         out,
         vec![
@@ -3339,11 +3039,8 @@ fn trimstr_family_matches_upstream_cases() {
     );
 
     let q = compile(".[] | trimstr(\"foo\")").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!(["fo", "foo", "barfoo", "foobarfoo", "foob"])),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!(["fo", "foo", "barfoo", "foobarfoo", "foob"])))
+        .expect("execute");
     assert_eq!(
         out,
         vec![
@@ -3443,19 +3140,13 @@ fn indices_index_rindex_match_upstream_array_cases() {
     assert_eq!(out[0].clone().into_json(), json!([1, 2, 6]));
 
     let q = compile("indices([1,2])").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([0, 1, 2, 3, 1, 4, 2, 5, 1, 2, 6, 7])),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!([0, 1, 2, 3, 1, 4, 2, 5, 1, 2, 6, 7])))
+        .expect("execute");
     assert_eq!(out[0].clone().into_json(), json!([1, 8]));
 
     let q = compile("index([1,2]), rindex([1,2])").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([0, 1, 2, 3, 1, 4, 2, 5, 1, 2, 6, 7])),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!([0, 1, 2, 3, 1, 4, 2, 5, 1, 2, 6, 7])))
+        .expect("execute");
     assert_eq!(out, vec![ZqValue::from(1), ZqValue::from(8)]);
 }
 
@@ -3495,27 +3186,19 @@ fn contains_matches_upstream_string_cases() {
 #[test]
 fn contains_matches_upstream_array_and_object_cases() {
     let q = compile("contains([\"baz\", \"bar\"])").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!(["foobar", "foobaz", "blarp"])),
-    )
-    .expect("execute");
+    let out =
+        execute(&q, &ZqValue::from_json(json!(["foobar", "foobaz", "blarp"]))).expect("execute");
     assert_eq!(out, vec![ZqValue::Bool(true)]);
 
     let q = compile("contains([\"bazzzzz\", \"bar\"])").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!(["foobar", "foobaz", "blarp"])),
-    )
-    .expect("execute");
+    let out =
+        execute(&q, &ZqValue::from_json(json!(["foobar", "foobaz", "blarp"]))).expect("execute");
     assert_eq!(out, vec![ZqValue::Bool(false)]);
 
     let q = compile("contains({foo: 12, bar: [{barp: 12}]})").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!({"foo": 12, "bar":[1,2,{"barp":12, "blip":13}]})),
-    )
-    .expect("execute");
+    let out =
+        execute(&q, &ZqValue::from_json(json!({"foo": 12, "bar":[1,2,{"barp":12, "blip":13}]})))
+            .expect("execute");
     assert_eq!(out, vec![ZqValue::Bool(true)]);
 }
 
@@ -3537,10 +3220,7 @@ fn inside_matches_upstream_definition() {
 fn contains_type_mismatch_errors_like_jq() {
     let q = compile("contains(1)").expect("compile");
     let err = execute(&q, &ZqValue::from_json(json!("x"))).expect_err("must fail");
-    assert_eq!(
-        err,
-        "string (\"x\") and number (1) cannot have their containment checked"
-    );
+    assert_eq!(err, "string (\"x\") and number (1) cannot have their containment checked");
 }
 
 #[test]
@@ -3550,11 +3230,9 @@ fn join_matches_upstream_cases() {
     assert_eq!(out, vec![ZqValue::from_json(json!("1,2,true,false,3.4"))]);
 
     let q = compile(".[] | join(\",\")").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([[], [null], [null, null], [null, null, null]])),
-    )
-    .expect("execute");
+    let out =
+        execute(&q, &ZqValue::from_json(json!([[], [null], [null, null], [null, null, null]])))
+            .expect("execute");
     assert_eq!(
         out,
         vec![
@@ -3569,11 +3247,8 @@ fn join_matches_upstream_cases() {
 #[test]
 fn join_type_errors_match_upstream() {
     let q = compile("try join(\",\") catch .").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!(["1", "2", {"a":{"b":{"c":33}}}])),
-    )
-    .expect("execute");
+    let out =
+        execute(&q, &ZqValue::from_json(json!(["1", "2", {"a":{"b":{"c":33}}}]))).expect("execute");
     assert_eq!(
         out,
         vec![ZqValue::from_json(json!(
@@ -3624,29 +3299,17 @@ fn transpose_follows_jq_definition_on_non_arrays() {
 #[test]
 fn walk_matches_upstream_man_case() {
     let q = compile("walk(if type == \"array\" then sort else (.) end)").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([[4, 1, 7], [8, 5, 2], [3, 6, 9]])),
-    )
-    .expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!([[1, 4, 7], [2, 5, 8], [3, 6, 9]])
-    );
+    let out = execute(&q, &ZqValue::from_json(json!([[4, 1, 7], [8, 5, 2], [3, 6, 9]])))
+        .expect("execute");
+    assert_eq!(out[0].clone().into_json(), json!([[1, 4, 7], [2, 5, 8], [3, 6, 9]]));
 }
 
 #[test]
 fn walk_recurses_through_objects_and_arrays() {
     let q = compile("walk(if type == \"array\" then sort else (.) end)").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!({"a":[3,1,2],"b":{"c":[2,1]}})),
-    )
-    .expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!({"a":[1,2,3],"b":{"c":[1,2]}})
-    );
+    let out =
+        execute(&q, &ZqValue::from_json(json!({"a":[3,1,2],"b":{"c":[2,1]}}))).expect("execute");
+    assert_eq!(out[0].clone().into_json(), json!({"a":[1,2,3],"b":{"c":[1,2]}}));
 
     let q = compile("walk(if type == \"number\" then . + 1 else (.) end)").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([1, [2], {"a": 3}, "x"]))).expect("execute");
@@ -3670,28 +3333,18 @@ fn flatten_matches_upstream_core_cases() {
 fn flatten_depth_errors_match_jq_definition() {
     let q = compile("try flatten(-1) catch .").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([0, [1], [[2]], [[[3]]]]))).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!(
-            "flatten depth must not be negative"
-        ))]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!("flatten depth must not be negative"))]);
 
     let q = compile("try flatten(\"a\") catch .").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([1, [2]]))).expect("execute");
     assert_eq!(
         out,
-        vec![ZqValue::from_json(json!(
-            "string (\"a\") and number (1) cannot be subtracted"
-        ))]
+        vec![ZqValue::from_json(json!("string (\"a\") and number (1) cannot be subtracted"))]
     );
 
     let q = compile("try flatten catch .").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!(1))).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!("Cannot iterate over number (1)"))]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!("Cannot iterate over number (1)"))]);
 }
 
 #[test]
@@ -3733,11 +3386,8 @@ fn flatten_internal_helper_matches_builtin_jq_definition() {
 #[test]
 fn first_last_nth_match_jq_index_aliases() {
     let q = compile("[first,last,nth(5)]").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])),
-    )
-    .expect("execute");
+    let out =
+        execute(&q, &ZqValue::from_json(json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]))).expect("execute");
     assert_eq!(out[0].clone().into_json(), json!([0, 9, 5]));
 
     let q = compile("nth(-1)").expect("compile");
@@ -3778,11 +3428,8 @@ fn array_literal_collects_stream_values_like_jq() {
 #[test]
 fn first_last_nth_generator_forms_match_upstream() {
     let q = compile("[first(.[]), last(.[]), nth(5; .[])]").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])),
-    )
-    .expect("execute");
+    let out =
+        execute(&q, &ZqValue::from_json(json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]))).expect("execute");
     assert_eq!(out[0].clone().into_json(), json!([0, 9, 5]));
 
     let q = compile("[first(empty), last(empty), nth(5; empty)]").expect("compile");
@@ -3802,12 +3449,7 @@ fn first_last_nth_generator_short_circuit_and_errors() {
 
     let q = compile("try nth(-1; .[]) catch .").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([1, 2]))).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!(
-            "nth doesn't support negative indices"
-        ))]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!("nth doesn't support negative indices"))]);
 
     let q = compile("try last(1,error(\"foo\")) catch .").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!(null))).expect("execute");
@@ -3817,19 +3459,13 @@ fn first_last_nth_generator_short_circuit_and_errors() {
 #[test]
 fn limit_and_skip_match_upstream_cases() {
     let q = compile("[limit(3; .[])]").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])),
-    )
-    .expect("execute");
+    let out =
+        execute(&q, &ZqValue::from_json(json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]))).expect("execute");
     assert_eq!(out[0].clone().into_json(), json!([0, 1, 2]));
 
     let q = compile("[skip(3; .[])]").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])),
-    )
-    .expect("execute");
+    let out =
+        execute(&q, &ZqValue::from_json(json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]))).expect("execute");
     assert_eq!(out[0].clone().into_json(), json!([3, 4, 5, 6, 7, 8, 9]));
 
     let out = execute(&q, &ZqValue::from_json(json!([]))).expect("execute");
@@ -3845,31 +3481,18 @@ fn limit_and_skip_support_comma_counts_like_jq() {
     let q = compile("[limit(5,7; .[])]").expect("compile");
     let out =
         execute(&q, &ZqValue::from_json(json!([0, 1, 2, 3, 4, 5, 6, 7, 8]))).expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!([0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 5, 6])
-    );
+    assert_eq!(out[0].clone().into_json(), json!([0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 5, 6]));
 }
 
 #[test]
 fn limit_and_skip_negative_count_errors_match_jq() {
     let q = compile("try skip(-1; error) catch .").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!(null))).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!(
-            "skip doesn't support negative count"
-        ))]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!("skip doesn't support negative count"))]);
 
     let q = compile("try limit(-1; error) catch .").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!(null))).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!(
-            "limit doesn't support negative count"
-        ))]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!("limit doesn't support negative count"))]);
 }
 
 #[test]
@@ -3903,10 +3526,7 @@ fn range_matches_upstream_core_cases() {
 fn range_supports_stream_arguments_cartesian_products() {
     let q = compile("[range(0,1;3,4)]").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!(null))).expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!([0, 1, 2, 0, 1, 2, 3, 1, 2, 1, 2, 3])
-    );
+    assert_eq!(out[0].clone().into_json(), json!([0, 1, 2, 0, 1, 2, 3, 1, 2, 1, 2, 3]));
 
     let q = compile("[range(0,1,2;4,3,2;2,3)]").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!(null))).expect("execute");
@@ -3930,9 +3550,7 @@ fn range_zero_step_and_type_errors_match_jq_definition() {
     let out = execute(&q, &ZqValue::from_json(json!(null))).expect("execute");
     assert_eq!(
         out,
-        vec![ZqValue::from_json(json!(
-            "number (0) and string (\"x\") cannot be added"
-        ))]
+        vec![ZqValue::from_json(json!("number (0) and string (\"x\") cannot be added"))]
     );
 }
 
@@ -3951,13 +3569,7 @@ fn while_matches_upstream_generator_case() {
 fn until_matches_upstream_factorial_case() {
     let q = compile(".[]|[.,1]|until(.[0] < 1; [.[0] - 1, .[1] * .[0]])|.[1]").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([1, 2, 3, 4, 5]))).expect("execute");
-    assert_eq!(
-        out,
-        vec![1, 2, 6, 24, 120]
-            .into_iter()
-            .map(ZqValue::from)
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(out, vec![1, 2, 6, 24, 120].into_iter().map(ZqValue::from).collect::<Vec<_>>());
 
     let q = compile("[until(. > 5; . + 2)]").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!(1))).expect("execute");
@@ -3976,22 +3588,16 @@ fn while_until_require_semicolon_forms() {
 #[test]
 fn any_all_generator_forms_match_upstream_cases() {
     let q = compile("any(.[]; not)").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([1, 2, 3, 4, true, false, 1, 2, 3, 4, 5])),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!([1, 2, 3, 4, true, false, 1, 2, 3, 4, 5])))
+        .expect("execute");
     assert_eq!(out, vec![ZqValue::Bool(true)]);
 
     let out = execute(&q, &ZqValue::from_json(json!([1, 2, 3, 4, true]))).expect("execute");
     assert_eq!(out, vec![ZqValue::Bool(false)]);
 
     let q = compile("all(.[]; .)").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([1, 2, 3, 4, true, false, 1, 2, 3, 4, 5])),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!([1, 2, 3, 4, true, false, 1, 2, 3, 4, 5])))
+        .expect("execute");
     assert_eq!(out, vec![ZqValue::Bool(false)]);
 
     let out = execute(&q, &ZqValue::from_json(json!([1, 2, 3, 4, true]))).expect("execute");
@@ -4043,10 +3649,7 @@ fn any_all_alias_forms_match_upstream() {
 #[test]
 fn parser_rejects_non_jq_not_dot_forms() {
     let err = compile("any(not .)").expect_err("must fail");
-    assert!(
-        err.contains("parse error"),
-        "expected parse error for non-jq syntax, got: {err}"
-    );
+    assert!(err.contains("parse error"), "expected parse error for non-jq syntax, got: {err}");
 }
 
 #[test]
@@ -4055,13 +3658,7 @@ fn type_selector_builtins_match_upstream() {
 
     let q = compile(".[]|arrays").expect("compile");
     let out = execute(&q, &input).expect("execute");
-    assert_eq!(
-        out,
-        vec![
-            ZqValue::from_json(json!([])),
-            ZqValue::from_json(json!([3, []]))
-        ]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!([])), ZqValue::from_json(json!([3, []]))]);
 
     let q = compile(".[]|objects").expect("compile");
     let out = execute(&q, &input).expect("execute");
@@ -4283,27 +3880,15 @@ fn unique_by_matches_upstream_cases() {
         ])),
     )
     .expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!([{"foo":1,"bar":10},{"foo":3,"bar":100}])
-    );
+    assert_eq!(out[0].clone().into_json(), json!([{"foo":1,"bar":10},{"foo":3,"bar":100}]));
 
     let q = compile("unique_by(length)").expect("compile");
     let out = execute(
         &q,
-        &ZqValue::from_json(json!([
-            [1, 2],
-            ["a", "b", "c"],
-            [5, 6],
-            ["foo", "bar"],
-            [7]
-        ])),
+        &ZqValue::from_json(json!([[1, 2], ["a", "b", "c"], [5, 6], ["foo", "bar"], [7]])),
     )
     .expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!([[7], [1, 2], ["a", "b", "c"]])
-    );
+    assert_eq!(out[0].clone().into_json(), json!([[7], [1, 2], ["a", "b", "c"]]));
 }
 
 #[test]
@@ -4314,10 +3899,7 @@ fn sort_unique_type_errors_match_jq() {
 
     let q = compile("unique").expect("compile");
     let err = execute(&q, &ZqValue::from_json(json!(true))).expect_err("must fail");
-    assert_eq!(
-        err,
-        "boolean (true) cannot be sorted, as it is not an array"
-    );
+    assert_eq!(err, "boolean (true) cannot be sorted, as it is not an array");
 }
 
 #[test]
@@ -4349,10 +3931,7 @@ fn min_max_match_upstream_cases() {
         &ZqValue::from_json(json!([[4, 2, "a"], [3, 1, "a"], [2, 4, "a"], [1, 3, "a"]])),
     )
     .expect("execute");
-    assert_eq!(
-        out[0].clone().into_json(),
-        json!([[1, 3, "a"], [4, 2, "a"]])
-    );
+    assert_eq!(out[0].clone().into_json(), json!([[1, 3, "a"], [4, 2, "a"]]));
 
     let out = execute(&q, &ZqValue::from_json(json!([]))).expect("execute");
     assert_eq!(out[0].clone().into_json(), json!([null, null]));
@@ -4370,14 +3949,7 @@ fn min_by_max_by_match_upstream_cases() {
     .expect("execute");
     assert_eq!(
         out[0].clone().into_json(),
-        json!([
-            [1, 3, "a"],
-            [4, 2, "a"],
-            [3, 1, "a"],
-            [2, 4, "a"],
-            [4, 2, "a"],
-            [1, 3, "a"]
-        ])
+        json!([[1, 3, "a"], [4, 2, "a"], [3, 1, "a"], [2, 4, "a"], [4, 2, "a"], [1, 3, "a"]])
     );
 
     let q = compile("[min,max,min_by(.),max_by(.)]").expect("compile");
@@ -4398,18 +3970,14 @@ fn min_max_by_impl_errors_match_jq() {
     let out = execute(&q, &ZqValue::from_json(json!([1, 2]))).expect("execute");
     assert_eq!(
         out,
-        vec![ZqValue::from_json(json!(
-            "array ([1,2]) and array ([0]) have wrong length"
-        ))]
+        vec![ZqValue::from_json(json!("array ([1,2]) and array ([0]) have wrong length"))]
     );
 
     let q = compile("try _max_by_impl(1) catch .").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([1, 2]))).expect("execute");
     assert_eq!(
         out,
-        vec![ZqValue::from_json(json!(
-            "array ([1,2]) and number (1) cannot be iterated over"
-        ))]
+        vec![ZqValue::from_json(json!("array ([1,2]) and number (1) cannot be iterated over"))]
     );
 }
 
@@ -4439,11 +4007,8 @@ fn bsearch_matches_upstream_scalar_and_multivalue_cases() {
 #[test]
 fn bsearch_matches_upstream_object_case() {
     let q = compile("bsearch({x:1})").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([{ "x": 0 }, { "x": 1 }, { "x": 2 }])),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!([{ "x": 0 }, { "x": 1 }, { "x": 2 }])))
+        .expect("execute");
     assert_eq!(out, vec![ZqValue::from(1)]);
 }
 
@@ -4453,10 +4018,7 @@ fn bsearch_type_error_matches_upstream() {
     let out = execute(&q, &ZqValue::from_json(json!("aa"))).expect("execute");
     assert_eq!(
         out,
-        vec![ZqValue::from_json(json!([
-            "KO",
-            "string (\"aa\") cannot be searched from"
-        ]))]
+        vec![ZqValue::from_json(json!(["KO", "string (\"aa\") cannot be searched from"]))]
     );
 }
 
@@ -4659,9 +4221,7 @@ fn unary_and_binary_stream_semantics_match_upstream_jq_cases() {
     .expect("execute");
     assert_eq!(
         out,
-        vec![ZqValue::from_json(json!([
-            0, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 0
-        ]))]
+        vec![ZqValue::from_json(json!([0, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 0]))]
     );
 
     // jq runtime ordering for stream binary ops:
@@ -4670,12 +4230,7 @@ fn unary_and_binary_stream_semantics_match_upstream_jq_cases() {
     let out = execute(&q, &ZqValue::from_json(json!([1, 2]))).expect("execute");
     assert_eq!(
         out,
-        vec![
-            ZqValue::from(1),
-            ZqValue::from(2),
-            ZqValue::from_json(json!(0.5)),
-            ZqValue::from(1)
-        ]
+        vec![ZqValue::from(1), ZqValue::from(2), ZqValue::from_json(json!(0.5)), ZqValue::from(1)]
     );
 }
 
@@ -4684,11 +4239,8 @@ fn getpath_setpath_delpaths_match_upstream_jq_cases() {
     // jq/tests/jq.test
     let q = compile("[\"foo\",1] as $p | getpath($p), setpath($p; 20), delpaths([$p])")
         .expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!({"bar": 42, "foo": ["a", "b", "c", "d"]})),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!({"bar": 42, "foo": ["a", "b", "c", "d"]})))
+        .expect("execute");
     assert_eq!(
         out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
         vec![
@@ -4701,11 +4253,7 @@ fn getpath_setpath_delpaths_match_upstream_jq_cases() {
     let out = execute(&q, &ZqValue::from_json(json!({"bar": false}))).expect("execute");
     assert_eq!(
         out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
-        vec![
-            json!(null),
-            json!({"bar":false, "foo":[null, 20]}),
-            json!({"bar":false})
-        ]
+        vec![json!(null), json!({"bar":false, "foo":[null, 20]}), json!({"bar":false})]
     );
 
     // jq/tests/jq.test
@@ -4723,11 +4271,8 @@ fn getpath_setpath_delpaths_match_upstream_jq_cases() {
 
     // jq/tests/jq.test
     let q = compile("map(delpaths([[0,\"foo\"]]))").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([[{"foo":2, "x":1}], [{"bar":2}]])),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!([[{"foo":2, "x":1}], [{"bar":2}]])))
+        .expect("execute");
     assert_eq!(
         out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
         vec![json!([[{"x":1}], [{"bar":2}]])]
@@ -4736,10 +4281,7 @@ fn getpath_setpath_delpaths_match_upstream_jq_cases() {
     // jq/tests/jq.test
     let q = compile("delpaths([[-200]])").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([1, 2, 3]))).expect("execute");
-    assert_eq!(
-        out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
-        vec![json!([1, 2, 3])]
-    );
+    assert_eq!(out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(), vec![json!([1, 2, 3])]);
 
     // jq/tests/jq.test
     let q = compile("try delpaths(0) catch .").expect("compile");
@@ -4759,10 +4301,7 @@ fn getpath_setpath_delpaths_match_upstream_jq_cases() {
     // jq/tests/jq.test
     let q = compile("setpath([-1]; 1)").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([0]))).expect("execute");
-    assert_eq!(
-        out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
-        vec![json!([1])]
-    );
+    assert_eq!(out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(), vec![json!([1])]);
 }
 
 #[test]
@@ -4772,11 +4311,8 @@ fn del_and_pick_match_upstream_jq_cases() {
             "del(.), del(empty), del((.foo,.bar,.baz) | .[2,3,0]), del(.foo[0], .bar[0], .foo, .baz.bar[0].x)",
         )
         .expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!({"foo": [0,1,2,3,4], "bar": [0,1]})),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!({"foo": [0,1,2,3,4], "bar": [0,1]})))
+        .expect("execute");
     assert_eq!(
         out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
         vec![
@@ -4789,11 +4325,8 @@ fn del_and_pick_match_upstream_jq_cases() {
 
     // jq/tests/jq.test
     let q = compile("del(.[1], .[-6], .[2], .[-3:9])").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])),
-    )
-    .expect("execute");
+    let out =
+        execute(&q, &ZqValue::from_json(json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]))).expect("execute");
     assert_eq!(
         out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
         vec![json!([0, 3, 5, 6, 9])]
@@ -4801,11 +4334,8 @@ fn del_and_pick_match_upstream_jq_cases() {
 
     // jq/tests/man.test
     let q = compile("pick(.a, .b.c, .x)").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!({"a": 1, "b": {"c": 2, "d": 3}, "e": 4})),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!({"a": 1, "b": {"c": 2, "d": 3}, "e": 4})))
+        .expect("execute");
     assert_eq!(
         out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
         vec![json!({"a": 1, "b": {"c": 2}, "x": null})]
@@ -4822,18 +4352,12 @@ fn del_and_pick_match_upstream_jq_cases() {
     // jq/tests/jq.test
     let q = compile("pick(first)").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([1, 2]))).expect("execute");
-    assert_eq!(
-        out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
-        vec![json!([1])]
-    );
+    assert_eq!(out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(), vec![json!([1])]);
 
     // jq/tests/jq.test
     let q = compile("pick(first|first)").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([[10, 20], 30]))).expect("execute");
-    assert_eq!(
-        out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
-        vec![json!([[10]])]
-    );
+    assert_eq!(out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(), vec![json!([[10]])]);
 
     // jq/tests/jq.test
     let q = compile("try pick(last) catch .").expect("compile");
@@ -4883,11 +4407,7 @@ fn assign_operator_matches_upstream_jq_cases() {
     let out = execute(&q, &ZqValue::Null).expect("execute");
     assert_eq!(
         out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
-        vec![
-            json!({"a":0,"b":0}),
-            json!({"a":1,"b":1}),
-            json!({"a":2,"b":2}),
-        ]
+        vec![json!({"a":0,"b":0}), json!({"a":1,"b":1}), json!({"a":2,"b":2}),]
     );
 }
 
@@ -4962,18 +4482,12 @@ fn update_assignment_operators_match_upstream_jq_cases() {
     // jq/tests/jq.test
     let q = compile("(.[] | select(. >= 2)) |= empty").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([1, 5, 3, 0, 7]))).expect("execute");
-    assert_eq!(
-        out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
-        vec![json!([1, 0])]
-    );
+    assert_eq!(out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(), vec![json!([1, 0])]);
 
     // jq/tests/jq.test
     let q = compile(".[] |= select(. % 2 == 0)").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([0, 1, 2, 3, 4, 5]))).expect("execute");
-    assert_eq!(
-        out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
-        vec![json!([0, 2, 4])]
-    );
+    assert_eq!(out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(), vec![json!([0, 2, 4])]);
 
     // jq/tests/jq.test
     let q = compile(".foo[1,4,2,3] |= empty").expect("compile");
@@ -5046,18 +4560,14 @@ fn update_assignment_operators_match_upstream_jq_cases() {
     let out = execute(&q, &ZqValue::from_json(json!([{"a":0},{"a":1}]))).expect("execute");
     assert_eq!(
         out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
-        vec![json!(
-            "Invalid path expression near attempt to iterate through [{\"a\":1}]"
-        )]
+        vec![json!("Invalid path expression near attempt to iterate through [{\"a\":1}]")]
     );
 
     let q = compile("try ((map(select(.a == 1))[].a) |= .+1) catch .").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([{"a":0},{"a":1}]))).expect("execute");
     assert_eq!(
         out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
-        vec![json!(
-            "Invalid path expression near attempt to iterate through [{\"a\":1}]"
-        )]
+        vec![json!("Invalid path expression near attempt to iterate through [{\"a\":1}]")]
     );
 }
 
@@ -5091,17 +4601,11 @@ fn path_and_paths_match_upstream_jq_cases() {
 
     let q = compile("path(.[] | select(.>3))").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([1, 5, 3]))).expect("execute");
-    assert_eq!(
-        out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
-        vec![json!([1])]
-    );
+    assert_eq!(out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(), vec![json!([1])]);
 
     let q = compile("path(.)").expect("compile");
     let out = execute(&q, &ZqValue::from(42)).expect("execute");
-    assert_eq!(
-        out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
-        vec![json!([])]
-    );
+    assert_eq!(out.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(), vec![json!([])]);
 
     let q = compile("[paths]").expect("compile");
     let out = execute(&q, &ZqValue::from_json(json!([1, [[], {"a": 2}]]))).expect("execute");
@@ -5148,11 +4652,8 @@ fn label_break_with_foreach_matches_upstream_jq_case() {
             "[label $out | foreach .[] as $item ([3, null]; if .[0] < 1 then break $out else [.[0] -1, $item] end; .[1])]",
         )
         .expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!([11, 22, 33, 44, 55, 66, 77, 88, 99])),
-    )
-    .expect("execute");
+    let out = execute(&q, &ZqValue::from_json(json!([11, 22, 33, 44, 55, 66, 77, 88, 99])))
+        .expect("execute");
     assert_eq!(out, vec![ZqValue::from_json(json!([11, 22, 33]))]);
 }
 
@@ -5174,11 +4675,8 @@ fn loc_token_matches_upstream_jq_shape() {
     // jq/tests/jq.test:
     // { a, $__loc__, c }
     let q = compile("{ a, $__loc__, c }").expect("compile");
-    let out = execute(
-        &q,
-        &ZqValue::from_json(json!({"a":[1,2,3], "c":{"hi":"hey"}})),
-    )
-    .expect("execute");
+    let out =
+        execute(&q, &ZqValue::from_json(json!({"a":[1,2,3], "c":{"hi":"hey"}}))).expect("execute");
     assert_eq!(
         out,
         vec![ZqValue::from_json(json!({
@@ -5190,10 +4688,7 @@ fn loc_token_matches_upstream_jq_shape() {
 
     let q = compile("$__loc__").expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::from_json(json!({"file":"<top-level>","line":1}))]
-    );
+    assert_eq!(out, vec![ZqValue::from_json(json!({"file":"<top-level>","line":1}))]);
 }
 
 #[test]
@@ -5235,9 +4730,7 @@ fn qqstring_interpolation_matches_upstream_jq_cases() {
     let out = execute(&q, &ZqValue::from(42)).expect("execute");
     assert_eq!(
         out,
-        vec![ZqValue::String(
-            "The input was 42, which is one less than 43".to_string()
-        )]
+        vec![ZqValue::String("The input was 42, which is one less than 43".to_string())]
     );
 }
 
@@ -5267,12 +4760,7 @@ fn loc_inside_qqstring_interpolation_matches_upstream_shape() {
     // try error("\($__loc__)") catch .
     let q = compile(r#"try error("\($__loc__)") catch ."#).expect("compile");
     let out = execute(&q, &ZqValue::Null).expect("execute");
-    assert_eq!(
-        out,
-        vec![ZqValue::String(
-            "{\"file\":\"<top-level>\",\"line\":1}".to_string()
-        )]
-    );
+    assert_eq!(out, vec![ZqValue::String("{\"file\":\"<top-level>\",\"line\":1}".to_string())]);
 }
 
 #[test]

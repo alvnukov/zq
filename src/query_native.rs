@@ -1,6 +1,9 @@
 #[cfg(test)]
 use crate::c_compat::{math as c_math, time as c_time};
-use crate::value::{ValueError as NativeValueError, ZqValue};
+use crate::value::{
+    install_active_native_value_recycle_context, NativeValueRecycleContext,
+    ValueError as NativeValueError, ZqValue,
+};
 #[cfg(test)]
 use base64::Engine as _;
 #[cfg(test)]
@@ -160,13 +163,11 @@ pub fn run_query_stream_native_with_paths_and_options(
 ) -> Result<Vec<ZqValue>, Error> {
     let query = strip_jq_comments(query);
     let query = query.as_str();
-    match crate::native_engine::try_execute_native_with_paths(
+    match crate::native_engine::try_execute_native_with_paths_owned(
         query,
-        &input_stream,
+        input_stream,
         library_paths,
-        crate::native_engine::RunOptions {
-            null_input: run_options.null_input,
-        },
+        crate::native_engine::RunOptions { null_input: run_options.null_input },
     ) {
         crate::native_engine::TryExecuteNative::Executed(Ok(values)) => Ok(values),
         crate::native_engine::TryExecuteNative::Executed(Err(e)) => Err(Error::Runtime(e)),
@@ -202,9 +203,7 @@ impl PreparedQuery {
             &self.library_paths,
             RunOptions::default(),
         )?;
-        out.into_iter()
-            .map(|v| stringify_jsonish_value_native(&v))
-            .collect::<Result<Vec<_>, _>>()
+        out.into_iter().map(|v| stringify_jsonish_value_native(&v)).collect::<Result<Vec<_>, _>>()
     }
 
     pub fn run_jsonish_lenient(&self, input_jsonish: &str) -> Result<Vec<String>, Error> {
@@ -217,10 +216,7 @@ pub fn prepare_query_with_paths(
     library_paths: &[String],
 ) -> Result<PreparedQuery, Error> {
     validate_query_with_paths(query, library_paths)?;
-    Ok(PreparedQuery {
-        query: query.to_string(),
-        library_paths: library_paths.to_vec(),
-    })
+    Ok(PreparedQuery { query: query.to_string(), library_paths: library_paths.to_vec() })
 }
 
 pub fn validate_query(query: &str) -> Result<(), Error> {
@@ -278,10 +274,7 @@ pub fn parse_input_values_with_format(
     format: InputFormat,
 ) -> Result<ParsedInput, Error> {
     let parsed = parse_input_values_with_format_native(input, format)?;
-    Ok(ParsedInput {
-        kind: parsed.kind,
-        values: native_values_to_json(parsed.values),
-    })
+    Ok(ParsedInput { kind: parsed.kind, values: native_values_to_json(parsed.values) })
 }
 
 pub fn parse_input_values_auto_native(input: &str) -> Result<ParsedNativeInput, Error> {
@@ -295,31 +288,18 @@ pub fn parse_input_values_with_format_native(
     match format {
         InputFormat::Auto => parse_input_values_auto_native_impl(input),
         InputFormat::Json => parse_json_value_stream_native(input)
-            .map(|values| ParsedNativeInput {
-                kind: InputKind::JsonStream,
-                values,
-            })
+            .map(|values| ParsedNativeInput { kind: InputKind::JsonStream, values })
             .map_err(Error::Json),
-        InputFormat::Yaml => {
-            parse_yaml_native_docs_with_merge(input).map(|values| ParsedNativeInput {
-                kind: InputKind::YamlDocs,
-                values,
-            })
-        }
-        InputFormat::Toml => parse_toml_native_doc(input).map(|value| ParsedNativeInput {
-            kind: InputKind::JsonStream,
-            values: vec![value],
-        }),
+        InputFormat::Yaml => parse_yaml_native_docs_with_merge(input)
+            .map(|values| ParsedNativeInput { kind: InputKind::YamlDocs, values }),
+        InputFormat::Toml => parse_toml_native_doc(input)
+            .map(|value| ParsedNativeInput { kind: InputKind::JsonStream, values: vec![value] }),
         // Forced CSV must accept valid one-column CSV as well; strict delimiter
         // probing is reserved for auto-detection to avoid false positives.
-        InputFormat::Csv => parse_csv_native_rows(input, false).map(|values| ParsedNativeInput {
-            kind: InputKind::JsonStream,
-            values,
-        }),
-        InputFormat::Xml => parse_xml_native_doc(input).map(|value| ParsedNativeInput {
-            kind: InputKind::JsonStream,
-            values: vec![value],
-        }),
+        InputFormat::Csv => parse_csv_native_rows(input, false)
+            .map(|values| ParsedNativeInput { kind: InputKind::JsonStream, values }),
+        InputFormat::Xml => parse_xml_native_doc(input)
+            .map(|value| ParsedNativeInput { kind: InputKind::JsonStream, values: vec![value] }),
     }
 }
 
@@ -335,10 +315,14 @@ pub fn parse_json_values_only_native(input: &str) -> Result<Vec<ZqValue>, serde_
 pub fn parse_input_docs_prefer_yaml(input: &str) -> Result<Vec<JsonValue>, Error> {
     match parse_input_docs_prefer_yaml_native(input) {
         Ok(values) => Ok(native_values_to_json(values)),
-        Err(Error::Yaml(yaml_err)) => match serde_json::from_str::<ZqValue>(input) {
-            Ok(v) => Ok(vec![v.into_json()]),
-            Err(_) => Err(Error::Yaml(yaml_err)),
-        },
+        Err(Error::Yaml(yaml_err)) => {
+            let mut recycle_ctx = NativeValueRecycleContext::default();
+            let _recycle_guard = install_active_native_value_recycle_context(&mut recycle_ctx);
+            match serde_json::from_str::<ZqValue>(input) {
+                Ok(v) => Ok(vec![v.into_json()]),
+                Err(_) => Err(Error::Yaml(yaml_err)),
+            }
+        }
         Err(e) => Err(e),
     }
 }
@@ -355,6 +339,8 @@ fn parse_yaml_native_with_merge(input: &str) -> Result<ZqValue, Error> {
 }
 
 fn parse_single_native_json_first(input: &str) -> Result<ZqValue, Error> {
+    let mut recycle_ctx = NativeValueRecycleContext::default();
+    let _recycle_guard = install_active_native_value_recycle_context(&mut recycle_ctx);
     match serde_json::from_str::<ZqValue>(input) {
         Ok(v) => Ok(v),
         Err(json_err) => match parse_yaml_native_with_merge(input) {
@@ -368,10 +354,14 @@ fn parse_single_native_json_first(input: &str) -> Result<ZqValue, Error> {
 fn parse_single_native_yaml_first(input: &str) -> Result<ZqValue, Error> {
     match parse_yaml_native_with_merge(input) {
         Ok(v) => Ok(v),
-        Err(Error::Yaml(yaml_err)) => match serde_json::from_str::<ZqValue>(input) {
-            Ok(v) => Ok(v),
-            Err(_) => Err(Error::Yaml(yaml_err)),
-        },
+        Err(Error::Yaml(yaml_err)) => {
+            let mut recycle_ctx = NativeValueRecycleContext::default();
+            let _recycle_guard = install_active_native_value_recycle_context(&mut recycle_ctx);
+            match serde_json::from_str::<ZqValue>(input) {
+                Ok(v) => Ok(v),
+                Err(_) => Err(Error::Yaml(yaml_err)),
+            }
+        }
         Err(e) => Err(e),
     }
 }
@@ -385,18 +375,12 @@ fn parse_yaml_native_docs_with_merge(input: &str) -> Result<Vec<ZqValue>, Error>
 
 fn parse_input_values_auto_native_impl(input: &str) -> Result<ParsedNativeInput, Error> {
     match parse_json_value_stream_strict_native(input) {
-        Ok(values) => Ok(ParsedNativeInput {
-            kind: InputKind::JsonStream,
-            values,
-        }),
+        Ok(values) => Ok(ParsedNativeInput { kind: InputKind::JsonStream, values }),
         Err(strict_json_err) => {
             match parse_yaml_native_docs_with_merge(input) {
                 Ok(values) => {
                     if yaml_native_docs_compatible_with_json_preference(&values) {
-                        return Ok(ParsedNativeInput {
-                            kind: InputKind::YamlDocs,
-                            values,
-                        });
+                        return Ok(ParsedNativeInput { kind: InputKind::YamlDocs, values });
                     }
                 }
                 Err(Error::Yaml(_)) | Err(Error::Unsupported(_)) => {}
@@ -404,10 +388,7 @@ fn parse_input_values_auto_native_impl(input: &str) -> Result<ParsedNativeInput,
             }
 
             match parse_json_value_stream_from_strict_failure(input, strict_json_err) {
-                Ok(values) => Ok(ParsedNativeInput {
-                    kind: InputKind::JsonStream,
-                    values,
-                }),
+                Ok(values) => Ok(ParsedNativeInput { kind: InputKind::JsonStream, values }),
                 Err(json_err) => {
                     if let Ok(value) = parse_toml_native_doc(input) {
                         return Ok(ParsedNativeInput {
@@ -427,10 +408,7 @@ fn parse_input_values_auto_native_impl(input: &str) -> Result<ParsedNativeInput,
                         });
                     }
                     if let Some(values) = parse_csv_native_rows_auto(input) {
-                        return Ok(ParsedNativeInput {
-                            kind: InputKind::JsonStream,
-                            values,
-                        });
+                        return Ok(ParsedNativeInput { kind: InputKind::JsonStream, values });
                     }
                     if let Some(Err(xml_err)) = xml_result {
                         return Err(xml_err);
@@ -507,9 +485,11 @@ fn parse_json_value_stream_from_strict_failure(
 }
 
 fn parse_json_value_stream_strict_native(input: &str) -> Result<Vec<ZqValue>, serde_json::Error> {
+    let mut recycle_ctx = NativeValueRecycleContext::default();
+    let _recycle_guard = install_active_native_value_recycle_context(&mut recycle_ctx);
     let mut out = Vec::new();
-    for next in serde_json::Deserializer::from_str(input).into_iter::<serde_json::Value>() {
-        out.push(ZqValue::from_json(next?));
+    for next in serde_json::Deserializer::from_str(input).into_iter::<ZqValue>() {
+        out.push(next?);
     }
     Ok(out)
 }

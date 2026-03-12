@@ -7,14 +7,7 @@ use std::cmp::Ordering;
 
 // moved-from: src/native_engine/vm_core/vm.rs::type_name
 pub(crate) fn type_name_jq(value: &ZqValue) -> &'static str {
-    match value {
-        ZqValue::Null => "null",
-        ZqValue::Bool(_) => "boolean",
-        ZqValue::Number(_) => "number",
-        ZqValue::String(_) => "string",
-        ZqValue::Array(_) => "array",
-        ZqValue::Object(_) => "object",
-    }
+    value.jq_type_name()
 }
 
 // moved-from: src/native_engine/vm_core/vm.rs::value_for_error
@@ -115,14 +108,8 @@ mod tests {
 
     #[test]
     fn compare_jq_orders_scalars_and_arrays() {
-        assert_eq!(
-            compare_jq(&ZqValue::Null, &ZqValue::Bool(false)),
-            Ordering::Less
-        );
-        assert_eq!(
-            compare_jq(&ZqValue::from(1), &ZqValue::from(2)),
-            Ordering::Less
-        );
+        assert_eq!(compare_jq(&ZqValue::Null, &ZqValue::Bool(false)), Ordering::Less);
+        assert_eq!(compare_jq(&ZqValue::from(1), &ZqValue::from(2)), Ordering::Less);
         assert_eq!(
             compare_jq(
                 &ZqValue::Array(vec![ZqValue::from(1)]),

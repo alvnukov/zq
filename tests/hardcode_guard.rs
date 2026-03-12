@@ -22,15 +22,9 @@ fn run_cli_json(query: &str, input_stream: &[JsonValue], null_input: bool) -> Ve
         cmd.arg("-n");
     }
     // Ensure filters starting with '-' are interpreted as filters, not flags.
-    cmd.arg("--")
-        .arg(query)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.arg("--").arg(query).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let mut child = cmd
-        .spawn()
-        .unwrap_or_else(|e| panic!("spawn zq failed for `{query}`: {e}"));
+    let mut child = cmd.spawn().unwrap_or_else(|e| panic!("spawn zq failed for `{query}`: {e}"));
     if !null_input {
         let mut stdin = child.stdin.take().expect("stdin handle");
         for value in input_stream {
@@ -43,9 +37,8 @@ fn run_cli_json(query: &str, input_stream: &[JsonValue], null_input: bool) -> Ve
                 .unwrap_or_else(|e| panic!("write stdin newline failed for `{query}`: {e}"));
         }
     }
-    let out = child
-        .wait_with_output()
-        .unwrap_or_else(|e| panic!("wait zq failed for `{query}`: {e}"));
+    let out =
+        child.wait_with_output().unwrap_or_else(|e| panic!("wait zq failed for `{query}`: {e}"));
     assert!(
         out.status.success(),
         "cli run failed for `{query}`\nstatus={:?}\nstdout:\n{}\nstderr:\n{}",
@@ -193,11 +186,7 @@ fn as_stream_expr(values: &[NumTok]) -> String {
     if values.len() == 1 {
         return values[0].as_query_token();
     }
-    let joined = values
-        .iter()
-        .map(|t| t.as_query_token())
-        .collect::<Vec<_>>()
-        .join(",");
+    let joined = values.iter().map(|t| t.as_query_token()).collect::<Vec<_>>().join(",");
     format!("({joined})")
 }
 
@@ -206,42 +195,20 @@ fn hardcode_guard_modulo_parametric_semantics() {
     let cases = vec![
         (
             vec![NumTok::PosInf, NumTok::NegInf],
-            vec![
-                NumTok::Int(1),
-                NumTok::Int(-1),
-                NumTok::Int(2),
-                NumTok::Int(-2),
-            ],
+            vec![NumTok::Int(1), NumTok::Int(-1), NumTok::Int(2), NumTok::Int(-2)],
             false,
         ),
-        (
-            vec![NumTok::Nan, NumTok::Int(1)],
-            vec![NumTok::Int(1), NumTok::Nan],
-            false,
-        ),
-        (
-            vec![NumTok::Nan, NumTok::Int(1)],
-            vec![NumTok::Int(1), NumTok::Nan],
-            true,
-        ),
+        (vec![NumTok::Nan, NumTok::Int(1)], vec![NumTok::Int(1), NumTok::Nan], false),
+        (vec![NumTok::Nan, NumTok::Int(1)], vec![NumTok::Int(1), NumTok::Nan], true),
     ];
 
     for (lhs, rhs, apply_isnan) in cases {
         let suffix = if apply_isnan { " | isnan" } else { "" };
-        let query = format!(
-            "[{} % {}{}]",
-            as_stream_expr(&lhs),
-            as_stream_expr(&rhs),
-            suffix
-        );
+        let query = format!("[{} % {}{}]", as_stream_expr(&lhs), as_stream_expr(&rhs), suffix);
         let expected =
             expected_modulo_array(&lhs, &rhs, apply_isnan).unwrap_or_else(|e| panic!("{e}"));
         let out = run_lib(&query, Vec::new(), true);
-        assert_eq!(
-            out,
-            vec![expected],
-            "parametric modulo failed for `{query}`"
-        );
+        assert_eq!(out, vec![expected], "parametric modulo failed for `{query}`");
     }
 
     let zero_div_query = "[(infinite, -infinite) % (0)]";
@@ -252,10 +219,7 @@ fn hardcode_guard_modulo_parametric_semantics() {
         EngineRunOptions { null_input: true },
     )
     .expect_err("zero divisor must fail");
-    assert!(
-        err.to_string().contains("divisor is zero"),
-        "unexpected zero divisor error: {err}"
-    );
+    assert!(err.to_string().contains("divisor is zero"), "unexpected zero divisor error: {err}");
 }
 
 fn html_escape(s: &str) -> String {
@@ -275,11 +239,8 @@ fn html_escape(s: &str) -> String {
 
 #[test]
 fn hardcode_guard_parametric_html_and_object_shorthand() {
-    let html_cases = vec![
-        ("<b>", "</b>", "<x&y>"),
-        ("pre:", ":post", "\"quote\""),
-        ("[", "]", "alpha'beta"),
-    ];
+    let html_cases =
+        vec![("<b>", "</b>", "<x&y>"), ("pre:", ":post", "\"quote\""), ("[", "]", "alpha'beta")];
     for (prefix, suffix, input) in html_cases {
         let query = format!("@html \"{prefix}\\(.){suffix}\"");
         let expected = JsonValue::String(format!("{prefix}{}{suffix}", html_escape(input)));
@@ -321,37 +282,13 @@ fn hardcode_guard_parametric_html_and_object_shorthand() {
 #[test]
 fn hardcode_guard_cli_library_cross_path_cases() {
     let cases = vec![
-        (
-            ".",
-            vec![serde_json::json!({"a":1}), serde_json::json!([1, 2, 3])],
-            false,
-        ),
-        (
-            ".a",
-            vec![serde_json::json!({"a":7}), serde_json::json!({"a":8})],
-            false,
-        ),
+        (".", vec![serde_json::json!({"a":1}), serde_json::json!([1, 2, 3])], false),
+        (".a", vec![serde_json::json!({"a":7}), serde_json::json!({"a":8})], false),
         (".[]", vec![serde_json::json!([0, 1, 2, 3])], false),
-        (
-            "[.[]|tojson|fromjson]",
-            vec![serde_json::json!([1, "x", {"k":true}])],
-            false,
-        ),
-        (
-            "@html \"<i>\\(.)!</i>\"",
-            vec![JsonValue::String("<x>".to_string())],
-            false,
-        ),
-        (
-            "{a,b,(.d):.a,e:.b}",
-            vec![serde_json::json!({"a":1,"b":2,"d":"k"})],
-            false,
-        ),
-        (
-            "[(infinite, -infinite) % (1, -1, infinite)]",
-            Vec::new(),
-            true,
-        ),
+        ("[.[]|tojson|fromjson]", vec![serde_json::json!([1, "x", {"k":true}])], false),
+        ("@html \"<i>\\(.)!</i>\"", vec![JsonValue::String("<x>".to_string())], false),
+        ("{a,b,(.d):.a,e:.b}", vec![serde_json::json!({"a":1,"b":2,"d":"k"})], false),
+        ("[(infinite, -infinite) % (1, -1, infinite)]", Vec::new(), true),
         ("[nan % 1, 1 % nan | isnan]", Vec::new(), true),
         (
             "[.[1:4], .[:2], .[-3:], .[1:3][1:]]",

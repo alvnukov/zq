@@ -15,10 +15,7 @@ fn render_xml_doc_native(value: &zq::NativeValue) -> Result<String, Error> {
     let mut out = String::new();
     match value {
         zq::NativeValue::Object(map) if map.len() == 1 => {
-            let (root, content) = map
-                .iter()
-                .next()
-                .expect("single-key object must have one entry");
+            let (root, content) = map.iter().next().expect("single-key object must have one entry");
             if root != "#text" && !root.starts_with('@') && is_valid_xml_name(root) {
                 write_xml_field_native(&mut out, root, content)?;
             } else {
@@ -52,9 +49,7 @@ fn write_xml_element_native(
     value: &zq::NativeValue,
 ) -> Result<(), Error> {
     if !is_valid_xml_name(name) {
-        return Err(Error::Query(format!(
-            "encode xml: invalid element name `{name}`"
-        )));
+        return Err(Error::Query(format!("encode xml: invalid element name `{name}`")));
     }
 
     match value {
@@ -139,9 +134,9 @@ fn xml_scalar_text(value: &zq::NativeValue) -> Result<String, Error> {
         zq::NativeValue::Bool(v) => Ok(v.to_string()),
         zq::NativeValue::Number(v) => Ok(v.to_string()),
         zq::NativeValue::String(v) => Ok(v.clone()),
-        zq::NativeValue::Array(_) | zq::NativeValue::Object(_) => Err(Error::Query(
-            "encode xml: scalar value expected".to_string(),
-        )),
+        zq::NativeValue::Array(_) | zq::NativeValue::Object(_) => {
+            Err(Error::Query("encode xml: scalar value expected".to_string()))
+        }
     }
 }
 
@@ -158,14 +153,9 @@ fn is_valid_xml_name(name: &str) -> bool {
 }
 
 fn escape_xml_text(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 fn escape_xml_attribute(value: &str) -> String {
-    escape_xml_text(value)
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+    escape_xml_text(value).replace('"', "&quot;").replace('\'', "&apos;")
 }

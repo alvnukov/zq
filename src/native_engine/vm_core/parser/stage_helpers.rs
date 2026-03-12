@@ -45,10 +45,7 @@ pub(super) fn abs_stage() -> Stage {
 
 pub(super) fn loc_stage(line: usize) -> Stage {
     Stage::Literal(ZqValue::Object(IndexMap::from([
-        (
-            "file".to_string(),
-            ZqValue::String("<top-level>".to_string()),
-        ),
+        ("file".to_string(), ZqValue::String("<top-level>".to_string())),
         ("line".to_string(), ZqValue::from(line as i64)),
     ])))
 }
@@ -78,9 +75,7 @@ pub(super) fn isfinite_stage() -> Stage {
         lhs: Box::new(type_eq_stage("number")),
         rhs: Box::new(Stage::Binary {
             op: BinaryOp::And,
-            lhs: Box::new(Stage::UnaryNot(Box::new(Stage::Builtin(
-                Builtin::IsInfinite,
-            )))),
+            lhs: Box::new(Stage::UnaryNot(Box::new(Stage::Builtin(Builtin::IsInfinite)))),
             rhs: Box::new(Stage::UnaryNot(Box::new(Stage::Builtin(Builtin::IsNan)))),
         }),
     }

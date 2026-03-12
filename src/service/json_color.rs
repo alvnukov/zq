@@ -39,10 +39,7 @@ pub(super) fn resolve_json_color_options(cli: &Cli) -> JsonColorOptions {
     };
 
     if !enabled {
-        return JsonColorOptions {
-            indent,
-            ..JsonColorOptions::default()
-        };
+        return JsonColorOptions { indent, ..JsonColorOptions::default() };
     }
 
     let mut out = JsonColorOptions {
@@ -93,6 +90,7 @@ pub(super) fn render_raw_output0(
     values: &[JsonValue],
     compact: bool,
 ) -> Result<(Vec<u8>, Option<Error>), Error> {
+    let tool = super::cli_error_tool_name();
     let mut out = Vec::new();
     for value in values {
         if let Some(s) = value.as_str() {
@@ -100,7 +98,9 @@ pub(super) fn render_raw_output0(
                 return Ok((
                     out,
                     Some(Error::Query(
-                        "zq: error (at <stdin>:0): Cannot dump a string containing NUL with --raw-output0 option".to_string(),
+                        format!(
+                            "{tool}: error (at <stdin>:0): Cannot dump a string containing NUL with --raw-output0 option"
+                        ),
                     )),
                 ));
             }
@@ -139,14 +139,7 @@ pub(super) fn write_json_output<W: Write>(
         if idx > 0 && !join_output {
             writer.write_all(b"\n")?;
         }
-        write_json_value_line(
-            writer,
-            value,
-            compact,
-            raw_output,
-            &mut json_scratch,
-            color_opts,
-        )?;
+        write_json_value_line(writer, value, compact, raw_output, &mut json_scratch, color_opts)?;
     }
     if !join_output {
         writer.write_all(b"\n")?;
@@ -192,9 +185,7 @@ pub(super) fn write_json_value_line<W: Write>(
         let indent = vec![b' '; color_opts.indent];
         let formatter = serde_json::ser::PrettyFormatter::with_indent(&indent);
         let mut serializer = serde_json::Serializer::with_formatter(&mut *scratch, formatter);
-        value
-            .serialize(&mut serializer)
-            .map_err(|e| Error::Query(format!("encode json: {e}")))?;
+        value.serialize(&mut serializer).map_err(|e| Error::Query(format!("encode json: {e}")))?;
     }
     write_jq_style_escaped_del(writer, scratch)?;
     Ok(())

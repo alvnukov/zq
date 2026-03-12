@@ -1,14 +1,13 @@
-# Temporary and build artifacts
+# Build and temporary artifacts
+/target/
 **/target/
-.tmp/
-/.tmp/
-/target
+/rust_out/
 rust_out
+/.tmp/
 
-.tmp
-
-# OS/editor junk
+# OS and editor junk
 .DS_Store
 .idea/
+.vscode/
 *.swp
 *.swo

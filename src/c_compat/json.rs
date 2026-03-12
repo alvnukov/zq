@@ -222,9 +222,7 @@ mod tests {
 
     #[test]
     fn normalize_for_tojson_expands_negative_exponent_numbers() {
-        let value = ZqValue::Number(serde_json::Number::from_string_unchecked(
-            "1e-2".to_string(),
-        ));
+        let value = ZqValue::Number(serde_json::Number::from_string_unchecked("1e-2".to_string()));
         let out = normalize_for_tojson(value);
         assert_eq!(out.into_json(), serde_json::json!(0.01));
     }

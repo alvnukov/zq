@@ -98,10 +98,9 @@ impl Parser {
                 self.bump();
                 Ok(ImportAlias::Binding(name))
             }
-            other => Err(format!(
-                "parse error: expected alias after `as` in import, found {:?}",
-                other
-            )),
+            other => {
+                Err(format!("parse error: expected alias after `as` in import, found {:?}", other))
+            }
         }
     }
 
@@ -155,10 +154,7 @@ impl Parser {
         if let Some(expr) = parsed? {
             return Ok(expr);
         }
-        Err(format!(
-            "parse error: expected import/include path string, found {:?}",
-            self.peek()
-        ))
+        Err(format!("parse error: expected import/include path string, found {:?}", self.peek()))
     }
 
     fn parse_import_metadata(&mut self) -> Result<ImportMetadata, String> {
@@ -201,19 +197,10 @@ impl Parser {
             Some(ZqValue::Object(object)) => object,
             _ => IndexMap::new(),
         };
-        desc.insert(
-            "deps".to_string(),
-            ZqValue::Array(self.module_decl_deps.clone()),
-        );
+        desc.insert("deps".to_string(), ZqValue::Array(self.module_decl_deps.clone()));
         desc.insert(
             "defs".to_string(),
-            ZqValue::Array(
-                self.local_function_defs
-                    .iter()
-                    .cloned()
-                    .map(ZqValue::String)
-                    .collect(),
-            ),
+            ZqValue::Array(self.local_function_defs.iter().cloned().map(ZqValue::String).collect()),
         );
         ZqValue::Object(desc)
     }

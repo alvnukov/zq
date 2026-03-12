@@ -45,10 +45,7 @@ fn append_tostream_events(value: &ZqValue, path: &mut Vec<ZqValue>, out: &mut Ve
             close_path.push(ZqValue::String(last_key));
             out.push(ZqValue::Array(vec![ZqValue::Array(close_path)]));
         }
-        _ => out.push(ZqValue::Array(vec![
-            ZqValue::Array(path.clone()),
-            value.clone(),
-        ])),
+        _ => out.push(ZqValue::Array(vec![ZqValue::Array(path.clone()), value.clone()])),
     }
 }
 
@@ -127,10 +124,8 @@ struct StreamEventValue {
 
 pub(super) fn run_fromstream(stream: &Op, input: ZqValue) -> Result<Vec<ZqValue>, String> {
     let raw_events = eval_many(stream, &input)?;
-    let events = raw_events
-        .into_iter()
-        .map(parse_stream_event_value)
-        .collect::<Result<Vec<_>, _>>()?;
+    let events =
+        raw_events.into_iter().map(parse_stream_event_value).collect::<Result<Vec<_>, _>>()?;
 
     let mut out = Vec::new();
     let mut idx = 0usize;
@@ -245,10 +240,7 @@ fn parse_stream_event_value(value: ZqValue) -> Result<StreamEventValue, String> 
         return Err("fromstream: stream event must be an array".to_string());
     };
     match items.len() {
-        1 => Ok(StreamEventValue {
-            path: parse_stream_path_value(items[0].clone())?,
-            value: None,
-        }),
+        1 => Ok(StreamEventValue { path: parse_stream_path_value(items[0].clone())?, value: None }),
         2 => Ok(StreamEventValue {
             path: parse_stream_path_value(items[0].clone())?,
             value: Some(items[1].clone()),

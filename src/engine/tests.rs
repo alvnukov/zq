@@ -2,23 +2,11 @@ use super::*;
 
 #[test]
 fn parse_doc_mode_contract() {
-    assert_eq!(
-        parse_doc_mode("first", None).expect("first"),
-        DocMode::First
-    );
+    assert_eq!(parse_doc_mode("first", None).expect("first"), DocMode::First);
     assert_eq!(parse_doc_mode("all", None).expect("all"), DocMode::All);
-    assert_eq!(
-        parse_doc_mode("index", Some(3)).expect("index"),
-        DocMode::Index(3)
-    );
-    assert!(matches!(
-        parse_doc_mode("index", None),
-        Err(Error::MissingDocIndex)
-    ));
-    assert!(matches!(
-        parse_doc_mode("x", None),
-        Err(Error::InvalidDocMode(_))
-    ));
+    assert_eq!(parse_doc_mode("index", Some(3)).expect("index"), DocMode::Index(3));
+    assert!(matches!(parse_doc_mode("index", None), Err(Error::MissingDocIndex)));
+    assert!(matches!(parse_doc_mode("x", None), Err(Error::InvalidDocMode(_))));
 }
 
 #[test]
@@ -28,11 +16,27 @@ fn run_jq_api_works_on_yaml_input() {
     assert_eq!(out, vec![serde_json::json!(1)]);
     let native = run_jq_native(".a", input, QueryOptions::default()).expect("run jq native");
     assert_eq!(
-        native
-            .into_iter()
-            .map(ZqValue::into_json)
-            .collect::<Vec<_>>(),
+        native.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
         vec![serde_json::json!(1)]
+    );
+}
+
+#[test]
+fn run_jq_type_on_yaml_repos_uses_jq_type_names() {
+    let input = r#"
+repos:
+  - !!str https://example.com/charts
+  - !!map
+    name: stable
+    url: https://charts.example.com
+"#;
+    let out = run_jq(".repos[] | type", input, QueryOptions::default()).expect("run jq");
+    assert_eq!(out, vec![serde_json::json!("string"), serde_json::json!("object")]);
+    let native =
+        run_jq_native(".repos[] | type", input, QueryOptions::default()).expect("run jq native");
+    assert_eq!(
+        native.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
+        vec![serde_json::json!("string"), serde_json::json!("object")]
     );
 }
 
@@ -43,10 +47,7 @@ fn run_jq_api_reads_json_stream_even_with_default_doc_mode() {
     assert_eq!(out, vec![serde_json::json!(1), serde_json::json!(2)]);
     let native = run_jq_native(".a", input, QueryOptions::default()).expect("run jq native stream");
     assert_eq!(
-        native
-            .into_iter()
-            .map(ZqValue::into_json)
-            .collect::<Vec<_>>(),
+        native.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
         vec![serde_json::json!(1), serde_json::json!(2)]
     );
 }
@@ -68,20 +69,11 @@ fn yaml_output_uses_anchors_for_repeated_subtrees() {
             "left": {"x": [1, 2]},
             "right": {"x": [1, 2]}
         })],
-        YamlFormatOptions {
-            use_anchors: true,
-            ..YamlFormatOptions::default()
-        },
+        YamlFormatOptions { use_anchors: true, ..YamlFormatOptions::default() },
     )
     .expect("yaml output");
-    assert!(
-        out.contains("&left"),
-        "yaml output must define a readable anchor name"
-    );
-    assert!(
-        out.contains("*left"),
-        "yaml output must emit alias with the same readable name"
-    );
+    assert!(out.contains("&left"), "yaml output must define a readable anchor name");
+    assert!(out.contains("*left"), "yaml output must emit alias with the same readable name");
 
     let decoded: serde_yaml::Value = serde_yaml::from_str(&out).expect("decode anchored yaml");
     let expected: serde_yaml::Value =
@@ -97,10 +89,7 @@ fn yaml_output_uses_merge_for_mapping_extensions() {
             "base": {"a": 1, "b": 2},
             "derived": {"a": 1, "b": 2, "c": 3}
         })],
-        YamlFormatOptions {
-            use_anchors: true,
-            ..YamlFormatOptions::default()
-        },
+        YamlFormatOptions { use_anchors: true, ..YamlFormatOptions::default() },
     )
     .expect("yaml output");
 
@@ -108,12 +97,7 @@ fn yaml_output_uses_merge_for_mapping_extensions() {
         .lines()
         .find_map(|line| {
             let (_, tail) = line.split_once('&')?;
-            Some(
-                tail.split(|c: char| c.is_whitespace())
-                    .next()
-                    .unwrap_or_default()
-                    .to_string(),
-            )
+            Some(tail.split(|c: char| c.is_whitespace()).next().unwrap_or_default().to_string())
         })
         .filter(|name| !name.is_empty())
         .expect("merge source anchor name");
@@ -143,20 +127,11 @@ fn yaml_output_uses_anchors_for_repeated_large_scalars() {
             "backup_title": "global-shared-configuration",
             "fallback_title": "global-shared-configuration"
         })],
-        YamlFormatOptions {
-            use_anchors: true,
-            ..YamlFormatOptions::default()
-        },
+        YamlFormatOptions { use_anchors: true, ..YamlFormatOptions::default() },
     )
     .expect("yaml output");
-    assert!(
-        out.contains("&title"),
-        "yaml output must define readable scalar anchor"
-    );
-    assert!(
-        out.contains("*title"),
-        "yaml output must reuse readable scalar anchor"
-    );
+    assert!(out.contains("&title"), "yaml output must define readable scalar anchor");
+    assert!(out.contains("*title"), "yaml output must reuse readable scalar anchor");
 }
 
 #[test]
@@ -167,20 +142,11 @@ fn yaml_output_does_not_anchor_short_scalars_even_when_enabled() {
             "default_env": "dev",
             "current_env": "dev"
         })],
-        YamlFormatOptions {
-            use_anchors: true,
-            ..YamlFormatOptions::default()
-        },
+        YamlFormatOptions { use_anchors: true, ..YamlFormatOptions::default() },
     )
     .expect("yaml output");
-    assert!(
-        !out.contains('&'),
-        "short scalar aliases should stay disabled for readability"
-    );
-    assert!(
-        !out.contains('*'),
-        "short scalar aliases should stay disabled for readability"
-    );
+    assert!(!out.contains('&'), "short scalar aliases should stay disabled for readability");
+    assert!(!out.contains('*'), "short scalar aliases should stay disabled for readability");
 }
 
 #[test]
@@ -201,10 +167,7 @@ fn yaml_anchor_names_are_sanitized_and_key_based() {
             "service-config": {"cfg": {"ports": [80, 443]}},
             "backup-config": {"cfg": {"ports": [80, 443]}}
         })],
-        YamlFormatOptions {
-            use_anchors: true,
-            ..YamlFormatOptions::default()
-        },
+        YamlFormatOptions { use_anchors: true, ..YamlFormatOptions::default() },
     )
     .expect("yaml output");
     assert!(
@@ -246,12 +209,7 @@ fn yaml_strict_friendly_mode_makes_anchor_names_shorter() {
         text.lines().find_map(|line| {
             let amp = line.find('&')?;
             let tail = &line[amp + 1..];
-            Some(
-                tail.split(|c: char| c.is_whitespace())
-                    .next()
-                    .unwrap_or_default()
-                    .to_string(),
-            )
+            Some(tail.split(|c: char| c.is_whitespace()).next().unwrap_or_default().to_string())
         })
     };
 
@@ -272,10 +230,7 @@ fn yaml_anchor_name_dictionaries_load_from_assets() {
         "common stopwords dictionary should be loaded from assets"
     );
     assert_eq!(
-        dicts
-            .canonical_common
-            .get("configuration")
-            .map(String::as_str),
+        dicts.canonical_common.get("configuration").map(String::as_str),
         Some("config"),
         "common canonical dictionary should be loaded from assets"
     );
@@ -296,10 +251,7 @@ fn yaml_anchor_strict_mode_keeps_first_context_token() {
         "default_sa"
     );
     assert_eq!(
-        normalize_anchor_component(
-            "common_serviceaccount_map",
-            YamlAnchorNameMode::StrictFriendly
-        ),
+        normalize_anchor_component("common_serviceaccount_map", YamlAnchorNameMode::StrictFriendly),
         "common_sa"
     );
 }
@@ -310,10 +262,8 @@ fn yaml_anchor_strict_mode_keeps_default_and_common_distinct() {
         "default_serviceaccount_map",
         YamlAnchorNameMode::StrictFriendly,
     );
-    let common_name = normalize_anchor_component(
-        "common_serviceaccount_map",
-        YamlAnchorNameMode::StrictFriendly,
-    );
+    let common_name =
+        normalize_anchor_component("common_serviceaccount_map", YamlAnchorNameMode::StrictFriendly);
     assert_eq!(default_name, "default_sa");
     assert_eq!(common_name, "common_sa");
     assert_ne!(
@@ -332,10 +282,7 @@ fn yaml_anchor_strict_dictionary_covers_k8s_openapi_and_ci_terms() {
         "crd"
     );
     assert_eq!(
-        canonicalize_anchor_token(
-            "requestbody".to_string(),
-            YamlAnchorNameMode::StrictFriendly
-        ),
+        canonicalize_anchor_token("requestbody".to_string(), YamlAnchorNameMode::StrictFriendly),
         "reqbody"
     );
     assert_eq!(
@@ -357,20 +304,14 @@ fn yaml_anchor_strict_mode_avoids_single_letter_tokens() {
         "strict mode should avoid single-letter tokens"
     );
     assert_eq!(
-        normalize_anchor_component(
-            "kind_serviceaccount_map",
-            YamlAnchorNameMode::StrictFriendly
-        ),
+        normalize_anchor_component("kind_serviceaccount_map", YamlAnchorNameMode::StrictFriendly),
         "kind_sa"
     );
     assert_eq!(
         normalize_anchor_component("f_available_map", YamlAnchorNameMode::StrictFriendly),
         "available"
     );
-    assert_eq!(
-        normalize_anchor_component("f", YamlAnchorNameMode::StrictFriendly),
-        "field"
-    );
+    assert_eq!(normalize_anchor_component("f", YamlAnchorNameMode::StrictFriendly), "field");
     assert_eq!(
         normalize_anchor_component("source_repourl_map", YamlAnchorNameMode::StrictFriendly),
         "source_repo_url"
@@ -380,15 +321,9 @@ fn yaml_anchor_strict_mode_avoids_single_letter_tokens() {
 #[test]
 fn split_anchor_tokens_handles_camel_case_and_acronyms() {
     assert_eq!(split_anchor_tokens("apiVersion"), vec!["api", "version"]);
-    assert_eq!(
-        split_anchor_tokens("managedFieldsTime"),
-        vec!["managed", "fields", "time"]
-    );
+    assert_eq!(split_anchor_tokens("managedFieldsTime"), vec!["managed", "fields", "time"]);
     assert_eq!(split_anchor_tokens("HTTPRoute"), vec!["http", "route"]);
-    assert_eq!(
-        split_anchor_tokens("ipv6Address"),
-        vec!["ipv", "6", "address"]
-    );
+    assert_eq!(split_anchor_tokens("ipv6Address"), vec!["ipv", "6", "address"]);
 }
 
 #[test]
@@ -418,10 +353,7 @@ fn format_query_error_string_key_after_object_start_matches_jq_text() {
     let input = "{{\"a\":\"b\"}}";
     let err = serde_json::from_str::<serde_json::Value>(input).expect_err("must fail");
     let msg = format_query_error("jq", input, &crate::QueryError::Json(err));
-    assert_eq!(
-        msg,
-        "jq: parse error: Expected string key after '{', not '{' at line 1, column 2"
-    );
+    assert_eq!(msg, "jq: parse error: Expected string key after '{', not '{' at line 1, column 2");
 }
 
 #[test]
@@ -440,10 +372,7 @@ fn format_query_error_string_key_array_after_object_start_matches_jq_text() {
     let input = "{[\"a\",\"b\"]}";
     let err = serde_json::from_str::<serde_json::Value>(input).expect_err("must fail");
     let msg = format_query_error("jq", input, &crate::QueryError::Json(err));
-    assert_eq!(
-        msg,
-        "jq: parse error: Expected string key after '{', not '[' at line 1, column 2"
-    );
+    assert_eq!(msg, "jq: parse error: Expected string key after '{', not '[' at line 1, column 2");
 }
 
 #[test]
@@ -458,11 +387,20 @@ fn format_query_error_string_key_array_after_comma_matches_jq_text() {
 }
 
 #[test]
-fn strip_serde_line_col_suffix_only_removes_valid_suffix() {
-    assert_eq!(
-        strip_serde_line_col_suffix("expected value at line 1 column 2"),
-        "expected value"
+fn format_query_error_string_key_after_comma_handles_utf8_weird_sequences() {
+    let input = "{\"🚀\":\"ok\",{\"a\":1}}";
+    let err = serde_json::from_str::<serde_json::Value>(input).expect_err("must fail");
+    let msg = format_query_error("jq", input, &crate::QueryError::Json(err));
+    assert!(
+        msg.contains("Expected string key after ',' in object, not '{'")
+            || msg.contains("key must be a string")
     );
+    assert!(msg.contains("line 1, column"));
+}
+
+#[test]
+fn strip_serde_line_col_suffix_only_removes_valid_suffix() {
+    assert_eq!(strip_serde_line_col_suffix("expected value at line 1 column 2"), "expected value");
     assert_eq!(
         strip_serde_line_col_suffix("hello at line nope column 2"),
         "hello at line nope column 2"
@@ -494,10 +432,7 @@ fn format_runtime_error_matches_jq_prefix() {
         "",
         &crate::QueryError::Runtime("Cannot index object with number".to_string()),
     );
-    assert_eq!(
-        msg,
-        "jq: error (at <stdin>:1): Cannot index object with number"
-    );
+    assert_eq!(msg, "jq: error (at <stdin>:1): Cannot index object with number");
 }
 
 #[test]
@@ -507,14 +442,9 @@ fn engine_wrapper_helpers_cover_contract() {
     assert!(validate_jq_query("if").is_err());
 
     let prepared = prepare_jq_query_with_paths(".", &[]).expect("prepare query");
+    assert_eq!(prepared.run_jsonish_lines("1").expect("prepared run"), vec!["1".to_string()]);
     assert_eq!(
-        prepared.run_jsonish_lines("1").expect("prepared run"),
-        vec!["1".to_string()]
-    );
-    assert_eq!(
-        prepared
-            .run_jsonish_lines_lenient("1")
-            .expect("prepared run lenient"),
+        prepared.run_jsonish_lines_lenient("1").expect("prepared run lenient"),
         vec!["1".to_string()]
     );
     assert_eq!(
@@ -535,10 +465,7 @@ fn parse_json_only_and_doc_selection_contract() {
     let values_native =
         parse_jq_json_values_only_native("1\n2\n").expect("parse json stream native");
     assert_eq!(
-        values_native
-            .into_iter()
-            .map(ZqValue::into_json)
-            .collect::<Vec<_>>(),
+        values_native.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
         vec![serde_json::json!(1), serde_json::json!(2)]
     );
     assert!(parse_jq_json_values_only("a: 1\n").is_err());
@@ -550,23 +477,13 @@ fn parse_json_only_and_doc_selection_contract() {
     let selected_native = parse_jq_input_values_native(yaml_docs, DocMode::Index(1), "jq")
         .expect("select yaml doc by index native");
     assert_eq!(
-        selected_native
-            .into_iter()
-            .map(ZqValue::into_json)
-            .collect::<Vec<_>>(),
+        selected_native.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
         vec![serde_json::json!({"a": 2})]
     );
 
     let out_of_range = parse_jq_input_values(yaml_docs, DocMode::Index(3), "jq")
         .expect_err("doc index out of range");
-    assert!(matches!(
-        out_of_range,
-        Error::DocIndexOutOfRange {
-            tool: "jq",
-            index: 3,
-            total: 2
-        }
-    ));
+    assert!(matches!(out_of_range, Error::DocIndexOutOfRange { tool: "jq", index: 3, total: 2 }));
 }
 
 #[test]
@@ -587,10 +504,7 @@ fn stream_wrappers_and_output_formatters_contract() {
     )
     .expect("run jq stream native with null-input");
     assert_eq!(
-        out_native
-            .into_iter()
-            .map(ZqValue::into_json)
-            .collect::<Vec<_>>(),
+        out_native.into_iter().map(ZqValue::into_json).collect::<Vec<_>>(),
         vec![JsonValue::Null]
     );
 
@@ -631,21 +545,14 @@ fn stream_wrappers_and_output_formatters_contract() {
     );
 
     let json_out = format_output_json_lines(
-        &[
-            serde_json::json!("x"),
-            serde_json::json!(1),
-            serde_json::json!(" ~\u{007f}"),
-        ],
+        &[serde_json::json!("x"), serde_json::json!(1), serde_json::json!(" ~\u{007f}")],
         true,
         true,
     )
     .expect("format json");
     assert_eq!(json_out, "x\n1\n ~\u{7f}");
 
-    assert_eq!(
-        format_output_yaml_documents(&[]).expect("yaml empty"),
-        String::new()
-    );
+    assert_eq!(format_output_yaml_documents(&[]).expect("yaml empty"), String::new());
 }
 
 #[test]
@@ -722,4 +629,19 @@ fn format_query_error_adds_context_and_compile_forms() {
     assert!(msg.contains("unexpected end of file at <top-level>"));
     assert!(msg.contains("line 1, column 3"));
     assert!(msg.contains("jq: 1 compile error"));
+}
+
+#[test]
+fn format_query_error_unterminated_try_if_with_utf8_weird_sequences() {
+    let query = "😀\ntry if .message == \"👩‍💻\" then 1 else 2\ncatch ]";
+    let msg = format_query_error_with_sources(
+        "jq",
+        query,
+        "",
+        &crate::QueryError::Unsupported("parse error: expected EndKw, found Catch".to_string()),
+    );
+    assert!(msg.contains("unexpected catch"));
+    assert!(msg.contains("Possibly unterminated 'if' statement"));
+    assert!(msg.contains("Possibly unterminated 'try' statement"));
+    assert!(msg.contains("jq: 3 compile errors"));
 }

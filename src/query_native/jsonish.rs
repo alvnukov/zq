@@ -70,11 +70,7 @@ pub(super) fn normalize_legacy_number_tokens(input: &str) -> Cow<'_, str> {
 }
 
 fn normalize_legacy_number_token(token: &str) -> String {
-    let (sign, rest) = if let Some(r) = token.strip_prefix('-') {
-        ("-", r)
-    } else {
-        ("", token)
-    };
+    let (sign, rest) = if let Some(r) = token.strip_prefix('-') { ("-", r) } else { ("", token) };
 
     let int_end = rest.find(['.', 'e', 'E']).unwrap_or(rest.len());
     let int_part = &rest[..int_end];
@@ -112,7 +108,7 @@ pub(super) fn stringify_jsonish_value(value: &JsonValue) -> Result<String, Error
 }
 
 pub(super) fn stringify_jsonish_value_native(value: &ZqValue) -> Result<String, Error> {
-    serde_json::to_string(value).map_err(Error::Json)
+    serde_json::to_string(&value.clone().into_json()).map_err(Error::Json)
 }
 
 pub(super) fn canonicalize_jsonish_tokens(input: &str) -> String {
@@ -126,9 +122,7 @@ pub(super) fn canonicalize_jsonish_tokens(input: &str) -> String {
         if rest.len() < pat.len() {
             return false;
         }
-        rest.iter()
-            .zip(pat.chars())
-            .all(|(l, r)| l.eq_ignore_ascii_case(&r))
+        rest.iter().zip(pat.chars()).all(|(l, r)| l.eq_ignore_ascii_case(&r))
     }
     fn match_special(rest: &[char]) -> Option<(&'static str, usize)> {
         if starts_with_ci(rest, "nan") {

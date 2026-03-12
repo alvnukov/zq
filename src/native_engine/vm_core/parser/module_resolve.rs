@@ -74,12 +74,7 @@ pub(super) fn import_metadata_from_object(
         None
     };
 
-    Ok(ImportMetadata {
-        raw_object: Some(object.clone()),
-        search_dirs,
-        optional,
-        raw,
-    })
+    Ok(ImportMetadata { raw_object: Some(object.clone()), search_dirs, optional, raw })
 }
 
 fn resolve_import_search_path_like_jq(
@@ -108,9 +103,7 @@ fn resolve_import_search_path_like_jq(
 }
 
 pub(super) fn jq_origin_dir() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
+    std::env::current_exe().ok().and_then(|path| path.parent().map(Path::to_path_buf))
 }
 
 pub(super) fn home_dir_like_jq() -> Option<PathBuf> {
@@ -213,9 +206,7 @@ pub(super) fn validate_module_relpath(path: &str) -> Result<(), String> {
             ));
         }
         if idx > 0 && components[idx - 1] == *component {
-            return Err(format!(
-                "module names must not have equal consecutive components: {path}"
-            ));
+            return Err(format!("module names must not have equal consecutive components: {path}"));
         }
     }
     Ok(())

@@ -2,9 +2,7 @@ use super::*;
 
 impl Parser {
     fn function_by_id(&self, function_id: usize) -> Option<&FunctionDef> {
-        self.functions
-            .iter()
-            .find(|function| function.id == function_id)
+        self.functions.iter().find(|function| function.id == function_id)
     }
 
     fn stage_is_param_filter_call(stage: &Stage, param_id: usize) -> bool {
@@ -41,12 +39,11 @@ impl Parser {
         let cond_param_id = function.param_ids[0];
         let update_param_id = function.param_ids[1];
         let helper_id = match &function.body {
-            Stage::Call {
-                function_id: Some(helper_id),
-                param_id: None,
-                args,
-                ..
-            } if args.is_empty() => *helper_id,
+            Stage::Call { function_id: Some(helper_id), param_id: None, args, .. }
+                if args.is_empty() =>
+            {
+                *helper_id
+            }
             _ => return false,
         };
         let Some(helper) = self.function_by_id(helper_id) else {
@@ -56,11 +53,7 @@ impl Parser {
             return false;
         }
         match &helper.body {
-            Stage::IfElse {
-                cond,
-                then_expr,
-                else_expr,
-            } => {
+            Stage::IfElse { cond, then_expr, else_expr } => {
                 if !Self::stage_is_param_filter_call(cond, cond_param_id)
                     || !matches!(else_expr.as_ref(), Stage::Empty)
                 {
@@ -95,12 +88,11 @@ impl Parser {
         let cond_param_id = function.param_ids[0];
         let next_param_id = function.param_ids[1];
         let helper_id = match &function.body {
-            Stage::Call {
-                function_id: Some(helper_id),
-                param_id: None,
-                args,
-                ..
-            } if args.is_empty() => *helper_id,
+            Stage::Call { function_id: Some(helper_id), param_id: None, args, .. }
+                if args.is_empty() =>
+            {
+                *helper_id
+            }
             _ => return false,
         };
         let Some(helper) = self.function_by_id(helper_id) else {
@@ -110,11 +102,7 @@ impl Parser {
             return false;
         }
         match &helper.body {
-            Stage::IfElse {
-                cond,
-                then_expr,
-                else_expr,
-            } => {
+            Stage::IfElse { cond, then_expr, else_expr } => {
                 if !Self::stage_is_param_filter_call(cond, cond_param_id)
                     || !matches!(then_expr.as_ref(), Stage::Identity)
                 {

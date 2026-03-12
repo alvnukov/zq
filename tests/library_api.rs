@@ -16,10 +16,7 @@ fn library_native_yaml_json_processing_contract() {
 
     let parsed = parse_native_input_values_auto("a: 1\n---\na: 2\n").expect("auto parse");
     assert_eq!(parsed.kind, NativeInputKind::YamlDocs);
-    assert_eq!(
-        parsed.values,
-        vec![serde_json::json!({"a": 1}), serde_json::json!({"a": 2})]
-    );
+    assert_eq!(parsed.values, vec![serde_json::json!({"a": 1}), serde_json::json!({"a": 2})]);
 }
 
 #[test]
@@ -39,10 +36,8 @@ fn library_jq_functions_contract() {
 
 #[test]
 fn library_semantic_compare_contract() {
-    assert!(
-        jsonish_equal(r#"{"a":[1,2],"b":3}"#, r#"{"b":3,"a":[1,2]}"#)
-            .expect("semantic object compare")
-    );
+    assert!(jsonish_equal(r#"{"a":[1,2],"b":3}"#, r#"{"b":3,"a":[1,2]}"#)
+        .expect("semantic object compare"));
     assert!(!jsonish_equal("1", "2").expect("semantic inequality compare"));
 
     let out = run_native_query_stream_with_paths_and_options(
@@ -60,10 +55,7 @@ fn library_auto_parse_supports_toml_and_csv() {
     let toml = "name = \"svc\"\nport = 8080\n";
     let parsed_toml = parse_native_input_values_auto(toml).expect("toml auto parse");
     assert_eq!(parsed_toml.kind, NativeInputKind::JsonStream);
-    assert_eq!(
-        parsed_toml.values,
-        vec![serde_json::json!({"name": "svc", "port": 8080})]
-    );
+    assert_eq!(parsed_toml.values, vec![serde_json::json!({"name": "svc", "port": 8080})]);
 
     let csv = "name,port\nsvc-a,8080\nsvc-b,9090\n";
     let parsed_csv = parse_native_input_values_auto(csv).expect("csv auto parse");
@@ -79,10 +71,7 @@ fn library_auto_parse_supports_toml_and_csv() {
     let xml = "<catalog><book><title>Rust</title></book></catalog>";
     let parsed_xml = parse_native_input_values_auto(xml).expect("xml auto parse");
     assert_eq!(parsed_xml.kind, NativeInputKind::JsonStream);
-    assert_eq!(
-        parsed_xml.values,
-        vec![serde_json::json!({"catalog":{"book":{"title":"Rust"}}})]
-    );
+    assert_eq!(parsed_xml.values, vec![serde_json::json!({"catalog":{"book":{"title":"Rust"}}})]);
 
     let xml_scalars = "<root><n>10</n><flag>true</flag><none>null</none></root>";
     let parsed_xml_scalars = parse_native_input_values_auto(xml_scalars).expect("xml scalar parse");
@@ -122,10 +111,7 @@ fn library_forced_input_format_contract() {
     )
     .expect("forced xml parse");
     assert_eq!(parsed_xml.kind, NativeInputKind::JsonStream);
-    assert_eq!(
-        parsed_xml.values,
-        vec![serde_json::json!({"catalog":{"book":{"title":"Rust"}}})]
-    );
+    assert_eq!(parsed_xml.values, vec![serde_json::json!({"catalog":{"book":{"title":"Rust"}}})]);
 
     let parsed_xml_scalars = parse_native_input_values_with_format(
         "<root><n>10</n><flag>true</flag><none>null</none></root>",

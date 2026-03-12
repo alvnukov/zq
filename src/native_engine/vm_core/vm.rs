@@ -8,13 +8,13 @@ use crate::c_compat::{
     container as c_container, json as c_json, math as c_math, string as c_string, time as c_time,
     value as c_value,
 };
-use crate::value::ZqValue;
+use crate::value::{take_pooled_object_map_with_capacity, ZqValue};
 use fancy_regex::{Captures as FancyCaptures, Regex};
 use indexmap::IndexMap;
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -50,7 +50,7 @@ thread_local! {
     static APPLY_OP_DEPTH: RefCell<usize> = const { RefCell::new(0) };
     static ROOT_APPLY_CONTEXT: RefCell<usize> = const { RefCell::new(0) };
     static REGEX_CACHE: RefCell<HashMap<String, CachedRegex>> = RefCell::new(HashMap::new());
-    static VALUE_VEC_POOL: RefCell<Vec<Vec<ZqValue>>> = const { RefCell::new(Vec::new()) };
+    static ACTIVE_VM_EXEC_CONTEXT: Cell<usize> = const { Cell::new(0) };
 }
 
 static NEXT_LABEL_ID: AtomicU64 = AtomicU64::new(1);
@@ -86,15 +86,52 @@ struct ApplyOpDepthGuard;
 
 struct RootApplyContextGuard;
 
+#[derive(Default)]
+struct VmExecutionContext {
+    value_vec_pool: Vec<Vec<ZqValue>>,
+}
+
+struct VmExecutionContextGuard {
+    prev: usize,
+}
+
+impl Drop for VmExecutionContextGuard {
+    fn drop(&mut self) {
+        ACTIVE_VM_EXEC_CONTEXT.with(|slot| slot.set(self.prev));
+    }
+}
+
+fn install_vm_execution_context(ctx: &mut VmExecutionContext) -> VmExecutionContextGuard {
+    let ptr = (ctx as *mut VmExecutionContext).cast::<()>() as usize;
+    let prev = ACTIVE_VM_EXEC_CONTEXT.with(|slot| {
+        let prev = slot.get();
+        slot.set(ptr);
+        prev
+    });
+    VmExecutionContextGuard { prev }
+}
+
+fn with_active_vm_execution_context<R>(f: impl FnOnce(&mut VmExecutionContext) -> R) -> Option<R> {
+    ACTIVE_VM_EXEC_CONTEXT.with(|slot| {
+        let ptr = slot.get();
+        if ptr == 0 {
+            return None;
+        }
+        let ctx_ptr = ptr as *mut VmExecutionContext;
+        // SAFETY: pointer is installed from a live stack context and restored by
+        // VmExecutionContextGuard; all access is on the same thread.
+        Some(unsafe { f(&mut *ctx_ptr) })
+    })
+}
+
 struct PooledValueVec {
     inner: Vec<ZqValue>,
 }
 
 impl PooledValueVec {
     fn acquire() -> Self {
-        let inner = VALUE_VEC_POOL
-            .with(|pool| pool.borrow_mut().pop())
-            .unwrap_or_default();
+        let inner =
+            with_active_vm_execution_context(|ctx| ctx.value_vec_pool.pop()).flatten().unwrap_or_default();
         Self { inner }
     }
 
@@ -125,10 +162,9 @@ impl Drop for PooledValueVec {
         self.inner.clear();
         let mut returned = Vec::new();
         std::mem::swap(&mut returned, &mut self.inner);
-        VALUE_VEC_POOL.with(|pool| {
-            let mut pool = pool.borrow_mut();
-            if pool.len() < VALUE_VEC_POOL_LIMIT {
-                pool.push(returned);
+        let _ = with_active_vm_execution_context(|ctx| {
+            if ctx.value_vec_pool.len() < VALUE_VEC_POOL_LIMIT {
+                ctx.value_vec_pool.push(returned);
             }
         });
     }
@@ -213,10 +249,7 @@ struct JsonTextInputSource {
 impl JsonTextInputSource {
     fn from_reader(reader: JsonInputReader, replay: Vec<ZqValue>) -> Self {
         let parser = serde_json::Deserializer::from_reader(reader);
-        Self {
-            replay: replay.into(),
-            parser,
-        }
+        Self { replay: replay.into(), parser }
     }
 
     fn from_json_text(input: &str, replay: Vec<ZqValue>) -> Self {
@@ -291,6 +324,8 @@ pub(crate) fn execute_prepared_with<F>(
 where
     F: FnMut(ZqValue) -> Result<(), String>,
 {
+    let mut exec_context = VmExecutionContext::default();
+    let _exec_context_guard = install_vm_execution_context(&mut exec_context);
     if let Some((last_branch, head_branches)) = program.branches.split_last() {
         for branch in head_branches {
             execute_branch(branch, input.clone(), emit)?;
@@ -304,6 +339,26 @@ fn execute_branch<F>(branch: &super::ir::Branch, input: ZqValue, emit: &mut F) -
 where
     F: FnMut(ZqValue) -> Result<(), String>,
 {
+    if branch.ops.is_empty() {
+        emit(input)?;
+        return Ok(());
+    }
+
+    if let [op] = branch.ops.as_slice() {
+        let _root_apply_guard = push_root_apply_context();
+        let mut emitted = false;
+        let mut tracked_emit = |produced: ZqValue| {
+            emitted = true;
+            emit(produced)
+        };
+        if let Err(err) = apply_op_terminal(op, input, &mut tracked_emit) {
+            if !emitted {
+                return Err(render_public_error(err));
+            }
+        }
+        return Ok(());
+    }
+
     let mut current = PooledValueVec::acquire();
     let mut next = PooledValueVec::acquire();
     current.push(input);
@@ -356,6 +411,69 @@ fn apply_op_terminal<F>(op: &Op, input: ZqValue, emit: &mut F) -> Result<(), Str
 where
     F: FnMut(ZqValue) -> Result<(), String>,
 {
+    match op {
+        Op::Identity => {
+            emit(input)?;
+            return Ok(());
+        }
+        Op::GetField { name, optional } => {
+            match input {
+                ZqValue::Object(mut map) => emit(map.swap_remove(name).unwrap_or(ZqValue::Null))?,
+                ZqValue::Null => emit(ZqValue::Null)?,
+                other if *optional => {
+                    let _ = other;
+                }
+                other => {
+                    return Err(format!(
+                        "Cannot index {} with string {:?}",
+                        type_name(&other),
+                        name
+                    ))
+                }
+            }
+            return Ok(());
+        }
+        Op::GetIndex { index, optional } => {
+            match input {
+                ZqValue::Array(mut values) => {
+                    let value = c_string::normalize_index_jq(values.len(), *index)
+                        .map(|idx| values.swap_remove(idx))
+                        .unwrap_or(ZqValue::Null);
+                    emit(value)?;
+                }
+                ZqValue::String(text) => {
+                    emit(c_string::string_index_like_jq(&text, *index).unwrap_or(ZqValue::Null))?;
+                }
+                ZqValue::Null => emit(ZqValue::Null)?,
+                other if *optional => {
+                    let _ = other;
+                }
+                other => return Err(format!("Cannot index {} with number", type_name(&other))),
+            }
+            return Ok(());
+        }
+        Op::Select(arg) => match eval_single_borrowed(arg, &input)? {
+            BorrowedEvalSingle::Value(cond) => {
+                if jq_truthy(&cond) {
+                    emit(input)?;
+                }
+                return Ok(());
+            }
+            BorrowedEvalSingle::Empty => return Ok(()),
+            BorrowedEvalSingle::Unsupported => {}
+        },
+        _ => {}
+    }
+
+    match eval_single_borrowed(op, &input)? {
+        BorrowedEvalSingle::Value(value) => {
+            emit(value)?;
+            return Ok(());
+        }
+        BorrowedEvalSingle::Empty => return Ok(()),
+        BorrowedEvalSingle::Unsupported => {}
+    }
+
     // jq_next() yields top-level results one-by-one while continuing execution
     // through backtracking points. The terminal path mirrors that style here:
     // emit as soon as values appear instead of accumulating full stage output.
@@ -375,17 +493,15 @@ where
         }
         Op::Comma(items) => {
             let _apply_depth_guard = push_apply_op_depth();
-            for item in items {
-                apply_op_terminal(item, input.clone(), emit)?;
+            if let Some((last, head)) = items.split_last() {
+                for item in head {
+                    apply_op_terminal(item, input.clone(), emit)?;
+                }
+                apply_op_terminal(last, input, emit)?;
             }
             Ok(())
         }
-        Op::Call {
-            function_id,
-            param_id,
-            name,
-            args,
-        } => {
+        Op::Call { function_id, param_id, name, args } => {
             let _apply_depth_guard = push_apply_op_depth();
             let arity = args.len();
             if function_id.is_none() {
@@ -408,9 +524,8 @@ where
             }
             let captured_args: Vec<CapturedFilter> =
                 args.iter().map(capture_call_argument).collect();
-            let frame = CallFrame {
-                params: function.param_ids.into_iter().zip(captured_args).collect(),
-            };
+            let frame =
+                CallFrame { params: function.param_ids.into_iter().zip(captured_args).collect() };
             let _call_frame_guard = push_call_frame(frame);
             let mut body_values = PooledValueVec::acquire();
             apply_op_with_borrowed_fast_path(&function.body, &input, &mut body_values)?;
@@ -580,10 +695,7 @@ pub(crate) fn install_input_stream_json_parser(
         std::mem::replace(
             &mut *state,
             InputState {
-                source: InputSource::Stream(JsonTextInputSource {
-                    replay: replay.into(),
-                    parser,
-                }),
+                source: InputSource::Stream(JsonTextInputSource { replay: replay.into(), parser }),
                 cursor: 0,
                 has_stream_context,
             },
@@ -597,11 +709,7 @@ pub(crate) fn install_input_metadata_context() -> InputStateGuard {
         let mut state = state.borrow_mut();
         std::mem::replace(
             &mut *state,
-            InputState {
-                source: InputSource::None,
-                cursor: 0,
-                has_stream_context: true,
-            },
+            InputState { source: InputSource::None, cursor: 0, has_stream_context: true },
         )
     });
     InputStateGuard { previous }
@@ -678,10 +786,7 @@ fn current_module_search_dirs() -> Vec<PathBuf> {
 fn lookup_binding(name: &str) -> Option<ZqValue> {
     let found = BINDING_STACK.with(|stack| {
         let stack = stack.borrow();
-        stack
-            .iter()
-            .rev()
-            .find_map(|(key, value)| (key == name).then(|| value.clone()))
+        stack.iter().rev().find_map(|(key, value)| (key == name).then(|| value.clone()))
     });
     if found.is_some() {
         return found;
@@ -695,9 +800,7 @@ fn lookup_binding(name: &str) -> Option<ZqValue> {
 fn lookup_function_by_id(id: usize) -> Option<ProgramFunction> {
     FUNCTION_TABLE.with(|table| {
         let table = table.borrow();
-        table
-            .iter()
-            .find_map(|function| (function.id == id).then(|| function.clone()))
+        table.iter().find_map(|function| (function.id == id).then(|| function.clone()))
     })
 }
 
@@ -708,11 +811,7 @@ fn lookup_param_closure(param_id: usize, arity: usize) -> Option<CapturedFilter>
     CALL_FRAME_STACK.with(|stack| {
         let stack = stack.borrow();
         stack.iter().rev().find_map(|frame| {
-            frame
-                .params
-                .iter()
-                .rev()
-                .find_map(|(id, arg)| (*id == param_id).then(|| arg.clone()))
+            frame.params.iter().rev().find_map(|(id, arg)| (*id == param_id).then(|| arg.clone()))
         })
     })
 }
@@ -723,31 +822,25 @@ fn snapshot_bindings() -> Vec<(String, ZqValue)> {
 
 fn capture_call_argument(arg: &Op) -> CapturedFilter {
     match arg {
-        Op::Call {
-            function_id: None,
-            param_id: Some(param_id),
-            args,
-            ..
-        } if args.is_empty() => lookup_param_closure(*param_id, 0)
-            .filter(|captured| {
-                !matches!(
-                    &captured.op,
-                    Op::Call {
-                        function_id: None,
-                        param_id: Some(captured_id),
-                        args,
-                        ..
-                    } if captured_id == param_id && args.is_empty()
-                )
-            })
-            .unwrap_or_else(|| CapturedFilter {
-                op: arg.clone(),
-                bindings: snapshot_bindings(),
-            }),
-        _ => CapturedFilter {
-            op: arg.clone(),
-            bindings: snapshot_bindings(),
-        },
+        Op::Call { function_id: None, param_id: Some(param_id), args, .. } if args.is_empty() => {
+            lookup_param_closure(*param_id, 0)
+                .filter(|captured| {
+                    !matches!(
+                        &captured.op,
+                        Op::Call {
+                            function_id: None,
+                            param_id: Some(captured_id),
+                            args,
+                            ..
+                        } if captured_id == param_id && args.is_empty()
+                    )
+                })
+                .unwrap_or_else(|| CapturedFilter {
+                    op: arg.clone(),
+                    bindings: snapshot_bindings(),
+                })
+        }
+        _ => CapturedFilter { op: arg.clone(), bindings: snapshot_bindings() },
     }
 }
 
@@ -759,14 +852,15 @@ fn map_with_shared_input<T, F>(
 where
     F: FnMut(ZqValue, T) -> Result<ZqValue, String>,
 {
-    let mut out = Vec::with_capacity(items.len());
+    let mut out = PooledValueVec::acquire();
+    out.reserve(items.len());
     if let Some(last) = items.pop() {
         for item in items {
             out.push(f(input.clone(), item)?);
         }
         out.push(f(input, last)?);
     }
-    Ok(out)
+    Ok(out.into_vec())
 }
 
 enum BorrowedEvalSingle {
@@ -775,9 +869,51 @@ enum BorrowedEvalSingle {
     Unsupported,
 }
 
+fn eval_pipe_single_borrowed(stages: &[Op], input: &ZqValue) -> Result<BorrowedEvalSingle, String> {
+    let mut current = input.clone();
+    for stage in stages {
+        match eval_single_borrowed(stage, &current)? {
+            BorrowedEvalSingle::Value(next) => current = next,
+            BorrowedEvalSingle::Empty => return Ok(BorrowedEvalSingle::Empty),
+            BorrowedEvalSingle::Unsupported => return Ok(BorrowedEvalSingle::Unsupported),
+        }
+    }
+    Ok(BorrowedEvalSingle::Value(current))
+}
+
+fn eval_chain_single_borrowed(steps: &[Op], input: &ZqValue) -> Result<BorrowedEvalSingle, String> {
+    let mut current = input.clone();
+    for step in steps {
+        if matches!(step, Op::DynamicIndex { .. }) {
+            return Ok(BorrowedEvalSingle::Unsupported);
+        }
+        match eval_single_borrowed(step, &current)? {
+            BorrowedEvalSingle::Value(next) => current = next,
+            BorrowedEvalSingle::Empty => return Ok(BorrowedEvalSingle::Empty),
+            BorrowedEvalSingle::Unsupported => return Ok(BorrowedEvalSingle::Unsupported),
+        }
+    }
+    Ok(BorrowedEvalSingle::Value(current))
+}
+
 fn eval_single_borrowed(op: &Op, input: &ZqValue) -> Result<BorrowedEvalSingle, String> {
     match op {
+        Op::Identity => Ok(BorrowedEvalSingle::Value(input.clone())),
         Op::Literal(value) => Ok(BorrowedEvalSingle::Value(value.clone())),
+        Op::Pipe(stages) => eval_pipe_single_borrowed(stages, input),
+        Op::Chain(steps) => eval_chain_single_borrowed(steps, input),
+        Op::Builtin(Builtin::Length) => Ok(BorrowedEvalSingle::Value(run_length(input.clone())?)),
+        Op::Select(arg) => match eval_single_borrowed(arg, input)? {
+            BorrowedEvalSingle::Value(cond) => {
+                if jq_truthy(&cond) {
+                    Ok(BorrowedEvalSingle::Value(input.clone()))
+                } else {
+                    Ok(BorrowedEvalSingle::Empty)
+                }
+            }
+            BorrowedEvalSingle::Empty => Ok(BorrowedEvalSingle::Empty),
+            BorrowedEvalSingle::Unsupported => Ok(BorrowedEvalSingle::Unsupported),
+        },
         Op::Var(name) => {
             if let Some(value) = lookup_binding(name) {
                 Ok(BorrowedEvalSingle::Value(value))
@@ -856,6 +992,26 @@ fn eval_single_borrowed(op: &Op, input: &ZqValue) -> Result<BorrowedEvalSingle, 
     }
 }
 
+fn object_literal_can_move_projection(entries: &[(OpObjectKey, Op)]) -> bool {
+    if entries.is_empty() {
+        return false;
+    }
+    let mut seen_source_fields = HashSet::with_capacity(entries.len());
+    for (key_expr, value_expr) in entries {
+        if !matches!(key_expr, OpObjectKey::Static(_)) {
+            return false;
+        }
+        let Op::GetField { name, optional: false } = value_expr else {
+            return false;
+        };
+        if !seen_source_fields.insert(name.as_str()) {
+            // Duplicate source field needs clone semantics (e.g. `{a:.x,b:.x}`).
+            return false;
+        }
+    }
+    true
+}
+
 fn apply_op_with_borrowed_fast_path(
     op: &Op,
     input: &ZqValue,
@@ -883,12 +1039,7 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
             apply_chain_steps(steps, &root, input, out)
         }
         Op::Pipe(stages) => apply_pipe_stages(stages, input, out),
-        Op::Call {
-            function_id,
-            param_id,
-            name,
-            args,
-        } => {
+        Op::Call { function_id, param_id, name, args } => {
             let arity = args.len();
             if function_id.is_none() {
                 if let Some(arg_filter) = param_id.and_then(|id| lookup_param_closure(id, arity)) {
@@ -908,9 +1059,8 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
             }
             let captured_args: Vec<CapturedFilter> =
                 args.iter().map(capture_call_argument).collect();
-            let frame = CallFrame {
-                params: function.param_ids.into_iter().zip(captured_args).collect(),
-            };
+            let frame =
+                CallFrame { params: function.param_ids.into_iter().zip(captured_args).collect() };
             let _call_frame_guard = push_call_frame(frame);
             let mut body_values = PooledValueVec::acquire();
             apply_op_with_borrowed_fast_path(&function.body, &input, &mut body_values)?;
@@ -977,13 +1127,33 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
             Ok(())
         }
         Op::ObjectLiteral(entries) => {
+            // Move-based projection fast path for `{a: .x, b: .y}` with unique source fields.
+            // This avoids per-field clones on the hottest projection shape.
+            if object_literal_can_move_projection(entries) {
+                if let ZqValue::Object(_) = &input {
+                    let ZqValue::Object(mut source) = input else {
+                        unreachable!("checked above");
+                    };
+                    let mut object = take_pooled_object_map_with_capacity(entries.len());
+                    for (key_expr, value_expr) in entries {
+                        let OpObjectKey::Static(key) = key_expr else {
+                            unreachable!("validated by object_literal_can_move_projection");
+                        };
+                        let Op::GetField { name, .. } = value_expr else {
+                            unreachable!("validated by object_literal_can_move_projection");
+                        };
+                        object.insert(key.clone(), source.swap_remove(name).unwrap_or(ZqValue::Null));
+                    }
+                    out.push(ZqValue::Object(object));
+                    return Ok(());
+                }
+            }
+
             // Fast path for the common projection form: `{a: .a, b: .b, ...}`.
             if !entries.is_empty()
-                && entries
-                    .iter()
-                    .all(|(key_expr, _)| matches!(key_expr, OpObjectKey::Static(_)))
+                && entries.iter().all(|(key_expr, _)| matches!(key_expr, OpObjectKey::Static(_)))
             {
-                let mut object = IndexMap::with_capacity(entries.len());
+                let mut object = take_pooled_object_map_with_capacity(entries.len());
                 let mut fast_path = true;
                 for (key_expr, value_expr) in entries {
                     let OpObjectKey::Static(key) = key_expr else {
@@ -1038,7 +1208,7 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
             }
 
             if single_output_candidate {
-                let mut object = IndexMap::with_capacity(prepared.len());
+                let mut object = take_pooled_object_map_with_capacity(prepared.len());
                 for (keys, mut values) in prepared {
                     let key = keys.into_iter().next().expect("single key");
                     let value = values.pop().expect("single value");
@@ -1048,7 +1218,7 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
                 return Ok(());
             }
 
-            let mut objects = vec![IndexMap::new()];
+            let mut objects = vec![take_pooled_object_map_with_capacity(prepared.len())];
             for (keys, values) in prepared {
                 if keys.is_empty() || values.is_empty() {
                     objects.clear();
@@ -1056,10 +1226,7 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
                 }
 
                 let mut next_objects = Vec::with_capacity(
-                    objects
-                        .len()
-                        .saturating_mul(keys.len())
-                        .saturating_mul(values.len()),
+                    objects.len().saturating_mul(keys.len()).saturating_mul(values.len()),
                 );
                 for object in &objects {
                     for key in &keys {
@@ -1090,38 +1257,24 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
         }
         Op::In(arg) => {
             let containers = eval_many(arg, &input)?;
-            out.extend(map_with_shared_input(
-                input,
-                containers,
-                |key, container| c_container::has_jq(container, key),
-            )?);
+            out.extend(map_with_shared_input(input, containers, |key, container| {
+                c_container::has_jq(container, key)
+            })?);
             Ok(())
         }
         Op::StartsWith(arg) => {
             let prefixes = eval_many(arg, &input)?;
-            out.extend(map_with_shared_input(
-                input,
-                prefixes,
-                c_string::startswith_jq,
-            )?);
+            out.extend(map_with_shared_input(input, prefixes, c_string::startswith_jq)?);
             Ok(())
         }
         Op::EndsWith(arg) => {
             let suffixes = eval_many(arg, &input)?;
-            out.extend(map_with_shared_input(
-                input,
-                suffixes,
-                c_string::endswith_jq,
-            )?);
+            out.extend(map_with_shared_input(input, suffixes, c_string::endswith_jq)?);
             Ok(())
         }
         Op::Split(arg) => {
             let separators = eval_many(arg, &input)?;
-            out.extend(map_with_shared_input(
-                input,
-                separators,
-                c_string::split_jq,
-            )?);
+            out.extend(map_with_shared_input(input, separators, c_string::split_jq)?);
             Ok(())
         }
         Op::Join(arg) => {
@@ -1131,29 +1284,17 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
         }
         Op::LTrimStr(arg) => {
             let patterns = eval_many(arg, &input)?;
-            out.extend(map_with_shared_input(
-                input,
-                patterns,
-                c_string::ltrimstr_jq,
-            )?);
+            out.extend(map_with_shared_input(input, patterns, c_string::ltrimstr_jq)?);
             Ok(())
         }
         Op::RTrimStr(arg) => {
             let patterns = eval_many(arg, &input)?;
-            out.extend(map_with_shared_input(
-                input,
-                patterns,
-                c_string::rtrimstr_jq,
-            )?);
+            out.extend(map_with_shared_input(input, patterns, c_string::rtrimstr_jq)?);
             Ok(())
         }
         Op::TrimStr(arg) => {
             let patterns = eval_many(arg, &input)?;
-            out.extend(map_with_shared_input(
-                input,
-                patterns,
-                c_string::trimstr_jq,
-            )?);
+            out.extend(map_with_shared_input(input, patterns, c_string::trimstr_jq)?);
             Ok(())
         }
         Op::Indices(arg) => {
@@ -1179,29 +1320,19 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
         }
         Op::Contains(arg) => {
             let needles = eval_many(arg, &input)?;
-            out.extend(map_with_shared_input(
-                input,
-                needles,
-                c_container::contains_jq,
-            )?);
+            out.extend(map_with_shared_input(input, needles, c_container::contains_jq)?);
             Ok(())
         }
         Op::Inside(arg) => {
             let containers = eval_many(arg, &input)?;
-            out.extend(map_with_shared_input(
-                input,
-                containers,
-                |value, container| c_container::contains_jq(container, value),
-            )?);
+            out.extend(map_with_shared_input(input, containers, |value, container| {
+                c_container::contains_jq(container, value)
+            })?);
             Ok(())
         }
         Op::BSearch(arg) => {
             let targets = eval_many(arg, &input)?;
-            out.extend(map_with_shared_input(
-                input,
-                targets,
-                c_container::bsearch_jq,
-            )?);
+            out.extend(map_with_shared_input(input, targets, c_container::bsearch_jq)?);
             Ok(())
         }
         Op::SortByImpl(arg) => {
@@ -1211,20 +1342,12 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
         }
         Op::GroupByImpl(arg) => {
             let keys = eval_many(arg, &input)?;
-            out.extend(map_with_shared_input(
-                input,
-                keys,
-                c_container::group_by_jq,
-            )?);
+            out.extend(map_with_shared_input(input, keys, c_container::group_by_jq)?);
             Ok(())
         }
         Op::UniqueByImpl(arg) => {
             let keys = eval_many(arg, &input)?;
-            out.extend(map_with_shared_input(
-                input,
-                keys,
-                c_container::unique_by_jq,
-            )?);
+            out.extend(map_with_shared_input(input, keys, c_container::unique_by_jq)?);
             Ok(())
         }
         Op::MinByImpl(arg) => {
@@ -1241,12 +1364,7 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
             })?);
             Ok(())
         }
-        Op::RegexMatch {
-            spec,
-            flags,
-            test,
-            tuple_mode,
-        } => {
+        Op::RegexMatch { spec, flags, test, tuple_mode } => {
             let mut specs = PooledValueVec::acquire();
             apply_op_with_borrowed_fast_path(spec, &input, &mut specs)?;
             let mut flag_values = PooledValueVec::acquire();
@@ -1268,11 +1386,7 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
             }
             Ok(())
         }
-        Op::RegexCapture {
-            spec,
-            flags,
-            tuple_mode,
-        } => {
+        Op::RegexCapture { spec, flags, tuple_mode } => {
             let mut specs = PooledValueVec::acquire();
             apply_op_with_borrowed_fast_path(spec, &input, &mut specs)?;
             let mut flag_values = PooledValueVec::acquire();
@@ -1333,12 +1447,7 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
             }
             Ok(())
         }
-        Op::RegexSub {
-            regex,
-            replacement,
-            flags,
-            global,
-        } => {
+        Op::RegexSub { regex, replacement, flags, global } => {
             let mut regex_values = PooledValueVec::acquire();
             apply_op_with_borrowed_fast_path(regex, &input, &mut regex_values)?;
             let mut flag_values = PooledValueVec::acquire();
@@ -1367,8 +1476,12 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
         Op::GetPath(arg) => {
             let mut paths = PooledValueVec::acquire();
             apply_op_with_borrowed_fast_path(arg, &input, &mut paths)?;
-            for path in paths.drain(..) {
-                out.push(run_getpath(input.clone(), path)?);
+            let mut paths = paths.into_vec();
+            if let Some(last_path) = paths.pop() {
+                for path in paths {
+                    out.push(run_getpath(input.clone(), path)?);
+                }
+                out.push(run_getpath(input, last_path)?);
             }
             Ok(())
         }
@@ -1377,11 +1490,31 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
             apply_op_with_borrowed_fast_path(path, &input, &mut paths)?;
             let mut values = PooledValueVec::acquire();
             apply_op_with_borrowed_fast_path(value, &input, &mut values)?;
-            for path in paths.iter() {
-                for value in values.iter() {
+            let mut paths = paths.into_vec();
+            let mut values = values.into_vec();
+            if let (Some(path), Some(value)) = (paths.pop(), values.pop()) {
+                if paths.is_empty() && values.is_empty() {
+                    out.push(run_setpath(input, path, value)?);
+                    return Ok(());
+                }
+                paths.push(path);
+                values.push(value);
+            }
+            let Some((last_path, head_paths)) = paths.split_last() else {
+                return Ok(());
+            };
+            let Some((last_value, head_values)) = values.split_last() else {
+                return Ok(());
+            };
+            for path in head_paths {
+                for value in &values {
                     out.push(run_setpath(input.clone(), path.clone(), value.clone())?);
                 }
             }
+            for value in head_values {
+                out.push(run_setpath(input.clone(), last_path.clone(), value.clone())?);
+            }
+            out.push(run_setpath(input, last_path.clone(), last_value.clone())?);
             Ok(())
         }
         Op::Modify(path, update) => {
@@ -1391,8 +1524,12 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
         Op::DelPaths(arg) => {
             let mut paths = PooledValueVec::acquire();
             apply_op_with_borrowed_fast_path(arg, &input, &mut paths)?;
-            for path in paths.drain(..) {
-                out.push(run_delpaths(input.clone(), path)?);
+            let mut paths = paths.into_vec();
+            if let Some(last_path) = paths.pop() {
+                for path in paths {
+                    out.push(run_delpaths(input.clone(), path)?);
+                }
+                out.push(run_delpaths(input, last_path)?);
             }
             Ok(())
         }
@@ -1473,22 +1610,11 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
             out.extend(run_until(cond, next, input)?);
             Ok(())
         }
-        Op::Reduce {
-            source,
-            pattern,
-            init,
-            update,
-        } => {
+        Op::Reduce { source, pattern, init, update } => {
             out.extend(run_reduce(source, pattern, init, update, &input)?);
             Ok(())
         }
-        Op::Foreach {
-            source,
-            pattern,
-            init,
-            update,
-            extract,
-        } => {
+        Op::Foreach { source, pattern, init, update, extract } => {
             run_foreach(source, pattern, init, update, extract, &input, out)?;
             Ok(())
         }
@@ -1627,11 +1753,7 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
             }
             Ok(())
         }
-        Op::IfElse {
-            cond,
-            then_expr,
-            else_expr,
-        } => {
+        Op::IfElse { cond, then_expr, else_expr } => {
             let mut cond_values = PooledValueVec::acquire();
             apply_op_with_borrowed_fast_path(cond, &input, &mut cond_values)?;
             for cond_value in cond_values.drain(..) {
@@ -1735,10 +1857,7 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
                 (Op::Literal(ZqValue::Number(a)), Op::Literal(ZqValue::Number(b)))
                     if a.is_f64() || b.is_f64()
             );
-            match (
-                eval_single_borrowed(lhs, &input)?,
-                eval_single_borrowed(rhs, &input)?,
-            ) {
+            match (eval_single_borrowed(lhs, &input)?, eval_single_borrowed(rhs, &input)?) {
                 (BorrowedEvalSingle::Empty, _) | (_, BorrowedEvalSingle::Empty) => {
                     return Ok(());
                 }
@@ -1800,10 +1919,7 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
         }
         Op::MathBinary { op, lhs, rhs } => {
             // Follow jq stream cartesian semantics (rhs-major order).
-            match (
-                eval_single_borrowed(lhs, &input)?,
-                eval_single_borrowed(rhs, &input)?,
-            ) {
+            match (eval_single_borrowed(lhs, &input)?, eval_single_borrowed(rhs, &input)?) {
                 (BorrowedEvalSingle::Empty, _) | (_, BorrowedEvalSingle::Empty) => {
                     return Ok(());
                 }
@@ -1881,10 +1997,7 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
             }
 
             out.reserve(
-                a_values
-                    .len()
-                    .saturating_mul(b_values.len())
-                    .saturating_mul(c_values.len()),
+                a_values.len().saturating_mul(b_values.len()).saturating_mul(c_values.len()),
             );
             for c_value in c_values.drain(..) {
                 for b_value in b_values.iter() {
@@ -1910,19 +2023,15 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
         }
         Op::GetField { name, optional } => {
             let res = match input {
-                ZqValue::Object(map) => {
-                    out.push(map.get(name).cloned().unwrap_or(ZqValue::Null));
+                ZqValue::Object(mut map) => {
+                    out.push(map.swap_remove(name).unwrap_or(ZqValue::Null));
                     Ok(())
                 }
                 ZqValue::Null => {
                     out.push(ZqValue::Null);
                     Ok(())
                 }
-                other => Err(format!(
-                    "Cannot index {} with string {:?}",
-                    type_name(&other),
-                    name
-                )),
+                other => Err(format!("Cannot index {} with string {:?}", type_name(&other), name)),
             };
             if *optional {
                 res.or(Ok(()))
@@ -1932,9 +2041,9 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
         }
         Op::GetIndex { index, optional } => {
             let res = match input {
-                ZqValue::Array(arr) => {
+                ZqValue::Array(mut arr) => {
                     if let Some(idx) = c_string::normalize_index_jq(arr.len(), *index) {
-                        out.push(arr[idx].clone());
+                        out.push(arr.swap_remove(idx));
                     } else {
                         out.push(ZqValue::Null);
                     }
@@ -1957,14 +2066,11 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
             }
         }
         Op::DynamicIndex { key, optional } => {
-            run_dynamic_index(input.clone(), key, &input, *optional, out)?;
+            let keys = eval_many(key, &input)?;
+            run_dynamic_index_with_keys(input, keys, *optional, out)?;
             Ok(())
         }
-        Op::Slice {
-            start,
-            end,
-            optional,
-        } => {
+        Op::Slice { start, end, optional } => {
             let res = run_slice(input, *start, *end).map(|value| {
                 out.push(value);
             });
@@ -1974,11 +2080,7 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
                 res
             }
         }
-        Op::Bind {
-            source,
-            pattern,
-            body,
-        } => {
+        Op::Bind { source, pattern, body } => {
             let mut bindings_source = PooledValueVec::acquire();
             apply_op_with_borrowed_fast_path(source, &input, &mut bindings_source)?;
             for bound in bindings_source.drain(..) {
@@ -2179,9 +2281,7 @@ fn render_public_error(err: String) -> String {
     if decode_halt_error(&err).is_some() {
         return err;
     }
-    decode_thrown_value(&err)
-        .map(error_to_string)
-        .unwrap_or(err)
+    decode_thrown_value(&err).map(error_to_string).unwrap_or(err)
 }
 
 fn eval_single(op: &Op, input: &ZqValue) -> Result<ZqValue, String> {
@@ -2249,10 +2349,8 @@ fn bind_pattern(
             };
             let mut out = Vec::new();
             for (idx, item_pattern) in items.iter().enumerate() {
-                let item = elements
-                    .and_then(|values| values.get(idx))
-                    .cloned()
-                    .unwrap_or(ZqValue::Null);
+                let item =
+                    elements.and_then(|values| values.get(idx)).cloned().unwrap_or(ZqValue::Null);
                 out.extend(bind_pattern(item_pattern, &item)?);
             }
             Ok(out)
@@ -2269,21 +2367,15 @@ fn bind_pattern(
                             OpBindingKeySpec::Expr(_) => None,
                         })
                         .unwrap_or("");
-                    return Err(format!(
-                        "Cannot index {} with string {:?}",
-                        type_name(other),
-                        key
-                    ));
+                    return Err(format!("Cannot index {} with string {:?}", type_name(other), key));
                 }
             };
 
             let mut out = Vec::new();
             for entry in entries {
                 let key = eval_binding_key(&entry.key, value)?;
-                let entry_value = map
-                    .and_then(|obj| obj.get(&key))
-                    .cloned()
-                    .unwrap_or(ZqValue::Null);
+                let entry_value =
+                    map.and_then(|obj| obj.get(&key)).cloned().unwrap_or(ZqValue::Null);
                 if let Some(name) = &entry.store_var {
                     out.push((name.clone(), entry_value.clone()));
                 }
@@ -2350,10 +2442,7 @@ fn merge_bindings_with_null_defaults(
     bindings: Vec<(String, ZqValue)>,
     vars: &[String],
 ) -> Vec<(String, ZqValue)> {
-    let mut merged = vars
-        .iter()
-        .map(|name| (name.clone(), ZqValue::Null))
-        .collect::<Vec<_>>();
+    let mut merged = vars.iter().map(|name| (name.clone(), ZqValue::Null)).collect::<Vec<_>>();
     for (name, value) in bindings {
         if let Some((_, slot)) = merged.iter_mut().find(|(existing, _)| existing == &name) {
             *slot = value;
@@ -2385,8 +2474,12 @@ fn error_to_string(value: ZqValue) -> String {
     }
 }
 
-fn apply_binary(op: BinaryOp, lhs: ZqValue, rhs: ZqValue) -> Result<ZqValue, String> {
+pub(crate) fn apply_binary(op: BinaryOp, lhs: ZqValue, rhs: ZqValue) -> Result<ZqValue, String> {
     apply_binary_with_flags(op, lhs, rhs, false, false)
+}
+
+pub(crate) fn jq_run_length(input: ZqValue) -> Result<ZqValue, String> {
+    run_length(input)
 }
 
 fn apply_binary_with_flags(
@@ -2408,16 +2501,12 @@ fn apply_binary_with_flags(
         BinaryOp::Gt => Ok(ZqValue::Bool(jq_cmp(&lhs, &rhs) == Ordering::Greater)),
         BinaryOp::Ge => {
             let ord = jq_cmp(&lhs, &rhs);
-            Ok(ZqValue::Bool(
-                ord == Ordering::Greater || ord == Ordering::Equal,
-            ))
+            Ok(ZqValue::Bool(ord == Ordering::Greater || ord == Ordering::Equal))
         }
         BinaryOp::Lt => Ok(ZqValue::Bool(jq_cmp(&lhs, &rhs) == Ordering::Less)),
         BinaryOp::Le => {
             let ord = jq_cmp(&lhs, &rhs);
-            Ok(ZqValue::Bool(
-                ord == Ordering::Less || ord == Ordering::Equal,
-            ))
+            Ok(ZqValue::Bool(ord == Ordering::Less || ord == Ordering::Equal))
         }
         BinaryOp::And | BinaryOp::Or | BinaryOp::DefinedOr => {
             unreachable!("boolean/defined-or ops handled separately")
@@ -2467,11 +2556,7 @@ fn flatten_impl(input: ZqValue, depth: ZqValue) -> Result<ZqValue, String> {
     }
 
     let mut out = Vec::new();
-    let mut stack = vec![FlattenFrame {
-        values: iter_values_like_jq(input)?,
-        index: 0,
-        depth,
-    }];
+    let mut stack = vec![FlattenFrame { values: iter_values_like_jq(input)?, index: 0, depth }];
 
     while let Some(frame) = stack.last_mut() {
         if frame.index >= frame.values.len() {
@@ -2479,7 +2564,7 @@ fn flatten_impl(input: ZqValue, depth: ZqValue) -> Result<ZqValue, String> {
             continue;
         }
 
-        let value = frame.values[frame.index].clone();
+        let value = std::mem::replace(&mut frame.values[frame.index], ZqValue::Null);
         frame.index += 1;
 
         if matches!(value, ZqValue::Array(_))
@@ -2505,7 +2590,11 @@ fn run_transpose(input: ZqValue) -> Result<ZqValue, String> {
     let rows = iter_values_like_jq(input)?;
     let mut max_len = 0.0f64;
     for row in &rows {
-        let length = run_length(row.clone())?;
+        let length = match row {
+            ZqValue::Array(values) => ZqValue::from(values.len() as u64),
+            ZqValue::Object(values) => ZqValue::from(values.len() as u64),
+            _ => run_length(row.clone())?,
+        };
         let ZqValue::Number(n) = length else {
             return Err("length() result must be numeric".to_string());
         };
@@ -2521,8 +2610,9 @@ fn run_transpose(input: ZqValue) -> Result<ZqValue, String> {
     let mut i = 0usize;
     while (i as f64) < max_len {
         let mut col = Vec::with_capacity(rows.len());
+        let key = ZqValue::from(i as i64);
         for row in &rows {
-            col.push(jq_get_dynamic(row.clone(), ZqValue::from(i as i64))?);
+            col.push(jq_get_dynamic_ref(row, &key)?);
         }
         out.push(ZqValue::Array(col));
         i += 1;
@@ -2646,8 +2736,11 @@ fn run_while_inner(
 ) -> Result<(), String> {
     let cond_value = eval_single(cond, &input)?;
     if jq_truthy(&cond_value) {
-        out.push(input.clone());
-        let next_values = eval_many(update, &input)?;
+        out.push(input);
+        let next_values = {
+            let current = out.last().expect("just pushed current while value");
+            eval_many(update, current)?
+        };
         for next in next_values {
             run_while_inner(cond, update, next, out)?;
         }
@@ -2960,10 +3053,7 @@ fn jq_get_dynamic_ref(container: &ZqValue, key: &ZqValue) -> Result<ZqValue, Str
                 return Ok(ZqValue::Null);
             }
             if raw.fract() != 0.0 {
-                return Err(format!(
-                    "Cannot index string with number ({})",
-                    value_for_error(key)
-                ));
+                return Err(format!("Cannot index string with number ({})", value_for_error(key)));
             }
             let idx = c_math::dtoi_compat(raw);
             Ok(c_string::string_index_like_jq(text, idx).unwrap_or(ZqValue::Null))
@@ -2979,10 +3069,9 @@ fn jq_get_dynamic_ref(container: &ZqValue, key: &ZqValue) -> Result<ZqValue, Str
             let (start, end) = parse_slice_key_like_jq(chars.len(), slice)?;
             Ok(ZqValue::String(chars[start..end].iter().collect()))
         }
-        (ZqValue::Array(values), ZqValue::Array(pattern)) => Ok(c_container::indices_array_jq(
-            values.clone(),
-            pattern.clone(),
-        )),
+        (ZqValue::Array(values), ZqValue::Array(pattern)) => {
+            Ok(c_container::indices_array_jq(values.clone(), pattern.clone()))
+        }
         (ZqValue::Null, ZqValue::String(_) | ZqValue::Number(_) | ZqValue::Object(_)) => {
             Ok(ZqValue::Null)
         }
@@ -3060,7 +3149,7 @@ fn run_map_values(arg: &Op, input: ZqValue) -> Result<ZqValue, String> {
             Ok(ZqValue::Array(out))
         }
         ZqValue::Object(map) => {
-            let mut out = IndexMap::with_capacity(map.len());
+            let mut out = take_pooled_object_map_with_capacity(map.len());
             for (key, value) in map {
                 let mapped = eval_many(arg, &value)?;
                 if let Some(first) = mapped.into_iter().next() {
@@ -3069,11 +3158,9 @@ fn run_map_values(arg: &Op, input: ZqValue) -> Result<ZqValue, String> {
             }
             Ok(ZqValue::Object(out))
         }
-        other => Err(format!(
-            "Cannot iterate over {} ({})",
-            type_name(&other),
-            value_for_error(&other)
-        )),
+        other => {
+            Err(format!("Cannot iterate over {} ({})", type_name(&other), value_for_error(&other)))
+        }
     }
 }
 
@@ -3101,15 +3188,16 @@ fn run_recurse_inner(
     input: ZqValue,
     out: &mut Vec<ZqValue>,
 ) -> Result<(), String> {
-    out.push(input.clone());
-    let next_values = eval_many(next, &input)?;
+    out.push(input);
+    let next_values = {
+        let current = out.last().expect("just pushed recurse value");
+        eval_many(next, current)?
+    };
     match cond {
         Some(cond) => {
             for next_value in next_values {
-                let truthy_count = eval_many(cond, &next_value)?
-                    .into_iter()
-                    .filter(jq_truthy)
-                    .count();
+                let truthy_count =
+                    eval_many(cond, &next_value)?.into_iter().filter(jq_truthy).count();
                 if truthy_count == 0 {
                     continue;
                 }
@@ -3147,7 +3235,7 @@ fn run_walk(arg: &Op, input: ZqValue) -> Result<Vec<ZqValue>, String> {
             ZqValue::Array(mapped)
         }
         ZqValue::Object(map) => {
-            let mut mapped = IndexMap::with_capacity(map.len());
+            let mut mapped = take_pooled_object_map_with_capacity(map.len());
             for (key, value) in map {
                 let walked = run_walk(arg, value)?;
                 if let Some(first) = walked.into_iter().next() {
@@ -3204,10 +3292,7 @@ fn binop_sub(lhs: ZqValue, rhs: ZqValue, force_numeric_float: bool) -> Result<Zq
                 .ok_or_else(|| "number is out of range".to_string())?;
             let bf = c_math::jq_number_to_f64_lossy(&b)
                 .ok_or_else(|| "number is out of range".to_string())?;
-            Ok(c_math::number_to_value_with_hint(
-                af - bf,
-                force_numeric_float,
-            ))
+            Ok(c_math::number_to_value_with_hint(af - bf, force_numeric_float))
         }
         (ZqValue::Array(a), ZqValue::Array(b)) => {
             let mut out = Vec::with_capacity(a.len());
@@ -3235,10 +3320,7 @@ fn binop_mul(lhs: ZqValue, rhs: ZqValue, force_numeric_float: bool) -> Result<Zq
                 .ok_or_else(|| "number is out of range".to_string())?;
             let bf = c_math::jq_number_to_f64_lossy(&b)
                 .ok_or_else(|| "number is out of range".to_string())?;
-            Ok(c_math::number_to_value_with_hint(
-                af * bf,
-                force_numeric_float,
-            ))
+            Ok(c_math::number_to_value_with_hint(af * bf, force_numeric_float))
         }
         (ZqValue::String(s), ZqValue::Number(n)) | (ZqValue::Number(n), ZqValue::String(s)) => {
             let count = c_math::jq_number_to_f64_lossy(&n)
@@ -3246,9 +3328,9 @@ fn binop_mul(lhs: ZqValue, rhs: ZqValue, force_numeric_float: bool) -> Result<Zq
             let repeat = c_string::string_repeat_count_jq(count);
             c_string::string_repeat_jq(s, repeat)
         }
-        (ZqValue::Object(a), ZqValue::Object(b)) => Ok(ZqValue::Object(
-            c_container::object_merge_recursive_jq(a, b),
-        )),
+        (ZqValue::Object(a), ZqValue::Object(b)) => {
+            Ok(ZqValue::Object(c_container::object_merge_recursive_jq(a, b)))
+        }
         (l, r) => Err(format!(
             "{} ({}) and {} ({}) cannot be multiplied",
             type_name(&l),
@@ -3277,10 +3359,7 @@ fn binop_div(lhs: ZqValue, rhs: ZqValue, force_numeric_float: bool) -> Result<Zq
                     value_for_error(&right)
                 ));
             }
-            Ok(c_math::number_to_value_with_hint(
-                af / bf,
-                force_numeric_float,
-            ))
+            Ok(c_math::number_to_value_with_hint(af / bf, force_numeric_float))
         }
         (ZqValue::String(a), ZqValue::String(b)) => {
             c_string::split_jq(ZqValue::String(a), ZqValue::String(b))
@@ -3333,10 +3412,7 @@ fn binop_pow(lhs: ZqValue, rhs: ZqValue, force_numeric_float: bool) -> Result<Zq
                 .ok_or_else(|| "number is out of range".to_string())?;
             let bf = c_math::jq_number_to_f64_lossy(&b)
                 .ok_or_else(|| "number is out of range".to_string())?;
-            Ok(c_math::number_to_value_with_hint(
-                af.powf(bf),
-                force_numeric_float,
-            ))
+            Ok(c_math::number_to_value_with_hint(af.powf(bf), force_numeric_float))
         }
         (l, r) => Err(format!(
             "{} ({}) and {} ({}) cannot be exponentiated",
@@ -3371,7 +3447,16 @@ fn run_dynamic_index(
     optional: bool,
     out: &mut Vec<ZqValue>,
 ) -> Result<(), String> {
-    let mut keys = eval_many(key_op, key_input)?;
+    let keys = eval_many(key_op, key_input)?;
+    run_dynamic_index_with_keys(indexed, keys, optional, out)
+}
+
+fn run_dynamic_index_with_keys(
+    indexed: ZqValue,
+    mut keys: Vec<ZqValue>,
+    optional: bool,
+    out: &mut Vec<ZqValue>,
+) -> Result<(), String> {
     let Some(last_key) = keys.pop() else {
         return Ok(());
     };
@@ -3416,9 +3501,7 @@ fn unary_negate(input: ZqValue) -> Result<ZqValue, String> {
                 format!("-{raw}")
             };
             if raw.contains('e') || raw.contains('E') {
-                return Ok(ZqValue::Number(serde_json::Number::from_string_unchecked(
-                    negated_raw,
-                )));
+                return Ok(ZqValue::Number(serde_json::Number::from_string_unchecked(negated_raw)));
             }
             if let Ok(serde_json::Value::Number(number)) =
                 serde_json::from_str::<serde_json::Value>(&negated_raw)
@@ -3429,15 +3512,13 @@ fn unary_negate(input: ZqValue) -> Result<ZqValue, String> {
                 .ok_or_else(|| "number is out of range".to_string())?;
             Ok(c_math::number_to_value(-value))
         }
-        other => Err(format!(
-            "{} ({}) cannot be negated",
-            type_name(&other),
-            value_for_error(&other)
-        )),
+        other => {
+            Err(format!("{} ({}) cannot be negated", type_name(&other), value_for_error(&other)))
+        }
     }
 }
 
-fn jq_truthy(value: &ZqValue) -> bool {
+pub(crate) fn jq_truthy(value: &ZqValue) -> bool {
     !matches!(value, ZqValue::Null | ZqValue::Bool(false))
 }
 

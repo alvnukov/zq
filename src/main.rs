@@ -5,6 +5,7 @@ use std::io::Write;
 use std::process;
 
 fn main() {
+    zq::initialize_process_locale_from_env();
     match service::run() {
         Ok(code) => process::exit(code),
         Err(service::Error::Query(msg)) => {
@@ -22,7 +23,8 @@ fn main() {
             process::exit(if is_compile_error { 3 } else { 5 });
         }
         Err(service::Error::Io(err)) => {
-            eprintln!("zq: error: {err}");
+            let tool = service::cli_error_tool_name();
+            eprintln!("{tool}: error: {err}");
             process::exit(2);
         }
     };

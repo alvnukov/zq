@@ -14,10 +14,7 @@ struct BenchData {
 }
 
 fn bench_rows() -> usize {
-    env::var("BENCH_ROWS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(60_000)
+    env::var("BENCH_ROWS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(60_000)
 }
 
 fn dataset() -> &'static BenchData {
@@ -62,19 +59,16 @@ fn dataset() -> &'static BenchData {
 }
 
 fn json_checksum(values: &[JsonValue]) -> i64 {
-    values
-        .iter()
-        .filter_map(|v| v.get("id").and_then(JsonValue::as_i64))
-        .sum::<i64>()
+    values.iter().filter_map(|v| v.get("id").and_then(JsonValue::as_i64)).sum::<i64>()
 }
 
 fn yaml_checksum(values: &[YamlValue]) -> i64 {
     values
         .iter()
         .filter_map(|v| match v {
-            YamlValue::Mapping(map) => map
-                .get(YamlValue::String("id".to_string()))
-                .and_then(YamlValue::as_i64),
+            YamlValue::Mapping(map) => {
+                map.get(YamlValue::String("id".to_string())).and_then(YamlValue::as_i64)
+            }
             _ => None,
         })
         .sum::<i64>()

@@ -21,9 +21,7 @@ fn run_program(program: &str, args: &[String], stdin: &[u8], cwd: &Path) -> Outp
             .write_all(stdin)
             .unwrap_or_else(|e| panic!("stdin write for `{program}` failed: {e}"));
     }
-    child
-        .wait_with_output()
-        .unwrap_or_else(|e| panic!("wait for `{program}` failed: {e}"))
+    child.wait_with_output().unwrap_or_else(|e| panic!("wait for `{program}` failed: {e}"))
 }
 
 fn cmd_line(program: &str, args: &[String]) -> String {

@@ -37,17 +37,15 @@ pub(crate) fn has_jq(container: ZqValue, key: ZqValue) -> Result<ZqValue, String
 // moved-from: src/native_engine/vm_core/vm.rs::run_keys
 pub(crate) fn keys_jq(input: ZqValue, sorted: bool) -> Result<ZqValue, String> {
     match input {
-        ZqValue::Array(arr) => Ok(ZqValue::Array(
-            (0..arr.len()).map(|i| ZqValue::from(i as i64)).collect(),
-        )),
+        ZqValue::Array(arr) => {
+            Ok(ZqValue::Array((0..arr.len()).map(|i| ZqValue::from(i as i64)).collect()))
+        }
         ZqValue::Object(map) => {
             let mut keys = map.keys().cloned().collect::<Vec<_>>();
             if sorted {
                 keys.sort();
             }
-            Ok(ZqValue::Array(
-                keys.into_iter().map(ZqValue::String).collect(),
-            ))
+            Ok(ZqValue::Array(keys.into_iter().map(ZqValue::String).collect()))
         }
         other => Err(format!(
             "{} ({}) has no keys",
@@ -168,10 +166,7 @@ pub(crate) fn object_merge_recursive_jq(
     for (key, rhs_value) in rhs {
         match (lhs.swap_remove(&key), rhs_value) {
             (Some(ZqValue::Object(left_obj)), ZqValue::Object(right_obj)) => {
-                lhs.insert(
-                    key,
-                    ZqValue::Object(object_merge_recursive_jq(left_obj, right_obj)),
-                );
+                lhs.insert(key, ZqValue::Object(object_merge_recursive_jq(left_obj, right_obj)));
             }
             (Some(_), value) | (None, value) => {
                 lhs.insert(key, value);
@@ -200,9 +195,7 @@ pub(crate) fn sort_jq(input: ZqValue) -> Result<ZqValue, String> {
             ord
         }
     });
-    Ok(ZqValue::Array(
-        indexed.into_iter().map(|(_, value)| value).collect(),
-    ))
+    Ok(ZqValue::Array(indexed.into_iter().map(|(_, value)| value).collect()))
 }
 
 // moved-from: src/native_engine/vm_core/vm.rs::run_unique
@@ -310,9 +303,7 @@ fn collect_by_entries_jq(values: ZqValue, keys: ZqValue) -> Result<Vec<BySortEnt
 // moved-from: src/native_engine/vm_core/vm.rs::run_sort_by_impl
 pub(crate) fn sort_by_jq(values: ZqValue, keys: ZqValue) -> Result<ZqValue, String> {
     let entries = collect_by_entries_jq(values, keys)?;
-    Ok(ZqValue::Array(
-        entries.into_iter().map(|entry| entry.object).collect(),
-    ))
+    Ok(ZqValue::Array(entries.into_iter().map(|entry| entry.object).collect()))
 }
 
 // moved-from: src/native_engine/vm_core/vm.rs::run_group_by_impl
@@ -369,11 +360,7 @@ pub(crate) fn minmax_by_jq(
     let keys = match keys {
         ZqValue::Array(keys) => keys,
         other => {
-            return Err(type_error2_jq(
-                &ZqValue::Array(values),
-                &other,
-                "cannot be iterated over",
-            ));
+            return Err(type_error2_jq(&ZqValue::Array(values), &other, "cannot be iterated over"));
         }
     };
     if values.len() != keys.len() {
@@ -446,12 +433,12 @@ pub(crate) fn contains_jq(haystack: ZqValue, needle: ZqValue) -> Result<ZqValue,
 // moved-from: src/native_engine/vm_core/vm.rs::value_contains
 pub(crate) fn value_contains_jq(haystack: &ZqValue, needle: &ZqValue) -> bool {
     match (haystack, needle) {
-        (ZqValue::Object(h), ZqValue::Object(n)) => n
-            .iter()
-            .all(|(k, nv)| h.get(k).is_some_and(|hv| value_contains_jq(hv, nv))),
-        (ZqValue::Array(h), ZqValue::Array(n)) => n
-            .iter()
-            .all(|nv| h.iter().any(|hv| value_contains_jq(hv, nv))),
+        (ZqValue::Object(h), ZqValue::Object(n)) => {
+            n.iter().all(|(k, nv)| h.get(k).is_some_and(|hv| value_contains_jq(hv, nv)))
+        }
+        (ZqValue::Array(h), ZqValue::Array(n)) => {
+            n.iter().all(|nv| h.iter().any(|hv| value_contains_jq(hv, nv)))
+        }
         (ZqValue::String(h), ZqValue::String(n)) => n.is_empty() || h.contains(n),
         _ => c_value::compare_jq(haystack, needle) == Ordering::Equal,
     }
@@ -527,24 +514,18 @@ mod tests {
         map.insert("k".to_string(), ZqValue::from(1));
         let obj = ZqValue::Object(map);
         assert_eq!(
-            has_jq(obj, ZqValue::String("k".to_string()))
-                .expect("object has")
-                .into_json(),
+            has_jq(obj, ZqValue::String("k".to_string())).expect("object has").into_json(),
             serde_json::json!(true)
         );
 
         let arr = ZqValue::Array(vec![ZqValue::from(1), ZqValue::from(2)]);
         assert_eq!(
-            has_jq(arr, ZqValue::from(1))
-                .expect("array has")
-                .into_json(),
+            has_jq(arr, ZqValue::from(1)).expect("array has").into_json(),
             serde_json::json!(true)
         );
 
         assert_eq!(
-            has_jq(ZqValue::Null, ZqValue::String("x".to_string()))
-                .expect("null has")
-                .into_json(),
+            has_jq(ZqValue::Null, ZqValue::String("x".to_string())).expect("null has").into_json(),
             serde_json::json!(false)
         );
     }
@@ -599,10 +580,7 @@ mod tests {
             ZqValue::Object(IndexMap::from([("y".to_string(), ZqValue::from(2))])),
         )]);
         let merged = object_merge_recursive_jq(left, right);
-        assert_eq!(
-            ZqValue::Object(merged).into_json(),
-            serde_json::json!({"a": {"x": 1, "y": 2}})
-        );
+        assert_eq!(ZqValue::Object(merged).into_json(), serde_json::json!({"a": {"x": 1, "y": 2}}));
     }
 
     #[test]
@@ -611,12 +589,9 @@ mod tests {
             sort_jq(ZqValue::Array(vec![ZqValue::from(2), ZqValue::from(1)])).expect("sort");
         assert_eq!(sorted.into_json(), serde_json::json!([1, 2]));
 
-        let unique = unique_jq(ZqValue::Array(vec![
-            ZqValue::from(2),
-            ZqValue::from(1),
-            ZqValue::from(2),
-        ]))
-        .expect("unique");
+        let unique =
+            unique_jq(ZqValue::Array(vec![ZqValue::from(2), ZqValue::from(1), ZqValue::from(2)]))
+                .expect("unique");
         assert_eq!(unique.into_json(), serde_json::json!([1, 2]));
 
         let min = minmax_jq(
@@ -640,17 +615,10 @@ mod tests {
         assert_eq!(sorted.into_json(), serde_json::json!(["a", "b", "c"]));
 
         let grouped = group_by_jq(values.clone(), keys.clone()).expect("group_by");
-        assert_eq!(
-            grouped.into_json(),
-            serde_json::json!([["a"], ["b"], ["c"]])
-        );
+        assert_eq!(grouped.into_json(), serde_json::json!([["a"], ["b"], ["c"]]));
 
         let unique = unique_by_jq(
-            ZqValue::Array(vec![
-                ZqValue::from(10),
-                ZqValue::from(11),
-                ZqValue::from(20),
-            ]),
+            ZqValue::Array(vec![ZqValue::from(10), ZqValue::from(11), ZqValue::from(20)]),
             ZqValue::Array(vec![ZqValue::from(1), ZqValue::from(1), ZqValue::from(2)]),
         )
         .expect("unique_by");
@@ -694,11 +662,9 @@ mod tests {
         .expect("contains object");
         assert_eq!(obj_contains.into_json(), serde_json::json!(true));
 
-        let str_contains = contains_jq(
-            ZqValue::String("abc".to_string()),
-            ZqValue::String("b".to_string()),
-        )
-        .expect("contains string");
+        let str_contains =
+            contains_jq(ZqValue::String("abc".to_string()), ZqValue::String("b".to_string()))
+                .expect("contains string");
         assert_eq!(str_contains.into_json(), serde_json::json!(true));
     }
 

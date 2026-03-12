@@ -184,10 +184,8 @@ impl ParsedNumberText {
 
 pub(crate) fn plain_integer_digit_count(raw: &str) -> Option<usize> {
     let trimmed = raw.trim();
-    let unsigned = trimmed
-        .strip_prefix('-')
-        .or_else(|| trimmed.strip_prefix('+'))
-        .unwrap_or(trimmed);
+    let unsigned =
+        trimmed.strip_prefix('-').or_else(|| trimmed.strip_prefix('+')).unwrap_or(trimmed);
     (!unsigned.is_empty() && unsigned.chars().all(|ch| ch.is_ascii_digit()))
         .then_some(unsigned.len())
 }
@@ -210,10 +208,9 @@ pub(crate) fn compare_json_numbers_like_jq(
 ) -> Ordering {
     let left_raw = a.to_string();
     let right_raw = b.to_string();
-    if let (Some(left_digits), Some(right_digits)) = (
-        plain_integer_digit_count(&left_raw),
-        plain_integer_digit_count(&right_raw),
-    ) {
+    if let (Some(left_digits), Some(right_digits)) =
+        (plain_integer_digit_count(&left_raw), plain_integer_digit_count(&right_raw))
+    {
         if left_digits > 20 || right_digits > 20 {
             return compare_number_texts(&left_raw, &right_raw);
         }
@@ -235,11 +232,8 @@ pub(crate) fn parse_number_text(source: &str) -> Option<ParsedNumberText> {
         text = rest;
     }
 
-    let (mantissa, exp_part) = if let Some((m, e)) = text.split_once(['e', 'E']) {
-        (m, e)
-    } else {
-        (text, "0")
-    };
+    let (mantissa, exp_part) =
+        if let Some((m, e)) = text.split_once(['e', 'E']) { (m, e) } else { (text, "0") };
     let mut exponent = exp_part.parse::<i64>().ok()?;
 
     let mut digits = String::with_capacity(mantissa.len());
@@ -267,17 +261,9 @@ pub(crate) fn parse_number_text(source: &str) -> Option<ParsedNumberText> {
     exponent -= frac_len;
     let trimmed = digits.trim_start_matches('0').to_string();
     if trimmed.is_empty() {
-        return Some(ParsedNumberText {
-            sign: 0,
-            digits: "0".to_string(),
-            exponent: 0,
-        });
+        return Some(ParsedNumberText { sign: 0, digits: "0".to_string(), exponent: 0 });
     }
-    Some(ParsedNumberText {
-        sign,
-        digits: trimmed,
-        exponent,
-    })
+    Some(ParsedNumberText { sign, digits: trimmed, exponent })
 }
 
 fn compare_number_magnitude(left: &ParsedNumberText, right: &ParsedNumberText) -> Ordering {
@@ -336,11 +322,7 @@ pub(crate) fn slice_bounds_from_f64_like_jq(
     if dstart > lenf {
         dstart = lenf;
     }
-    let mut start_i = if dstart > i32::MAX as f64 {
-        i32::MAX as i64
-    } else {
-        dstart as i64
-    };
+    let mut start_i = if dstart > i32::MAX as f64 { i32::MAX as i64 } else { dstart as i64 };
     if start_i < 0 {
         start_i = 0;
     }
@@ -358,11 +340,7 @@ pub(crate) fn slice_bounds_from_f64_like_jq(
     if dend < 0.0 {
         dend = start_i as f64;
     }
-    let mut end_i = if dend > i32::MAX as f64 {
-        i32::MAX as i64
-    } else {
-        dend as i64
-    };
+    let mut end_i = if dend > i32::MAX as f64 { i32::MAX as i64 } else { dend as i64 };
     if end_i > len as i64 {
         end_i = len as i64;
     }
@@ -398,11 +376,7 @@ pub(crate) fn classify_special_number(n: &serde_json::Number) -> Option<SpecialN
         return Some(SpecialNumber::Nan);
     }
     if lower == "inf" || lower == "infinity" {
-        return Some(if sign < 0 {
-            SpecialNumber::NegInf
-        } else {
-            SpecialNumber::PosInf
-        });
+        return Some(if sign < 0 { SpecialNumber::NegInf } else { SpecialNumber::PosInf });
     }
     None
 }
@@ -482,11 +456,8 @@ fn expand_negative_exponent_literal(raw: &str) -> Option<String> {
         return None;
     }
 
-    let (int_part, frac_part) = if let Some((lhs, rhs)) = mantissa.split_once('.') {
-        (lhs, rhs)
-    } else {
-        (mantissa, "")
-    };
+    let (int_part, frac_part) =
+        if let Some((lhs, rhs)) = mantissa.split_once('.') { (lhs, rhs) } else { (mantissa, "") };
     if (int_part.is_empty() && frac_part.is_empty())
         || !int_part.chars().all(|c| c.is_ascii_digit())
         || !frac_part.chars().all(|c| c.is_ascii_digit())
@@ -531,22 +502,14 @@ pub(crate) fn negate_special_number_literal(
     let raw = number.to_string();
     let lowered = raw.to_ascii_lowercase();
     if lowered.starts_with("nan") || lowered.starts_with("-nan") {
-        let negated = if lowered.starts_with('-') {
-            "nan"
-        } else {
-            "-nan"
-        };
-        return Some(serde_json::Number::from_string_unchecked(
-            negated.to_string(),
-        ));
+        let negated = if lowered.starts_with('-') { "nan" } else { "-nan" };
+        return Some(serde_json::Number::from_string_unchecked(negated.to_string()));
     }
     match classify_special_number(number)? {
-        SpecialNumber::Nan => Some(serde_json::Number::from_string_unchecked(
-            "-nan".to_string(),
-        )),
-        SpecialNumber::PosInf => Some(serde_json::Number::from_string_unchecked(
-            "-inf".to_string(),
-        )),
+        SpecialNumber::Nan => Some(serde_json::Number::from_string_unchecked("-nan".to_string())),
+        SpecialNumber::PosInf => {
+            Some(serde_json::Number::from_string_unchecked("-inf".to_string()))
+        }
         SpecialNumber::NegInf => Some(serde_json::Number::from_string_unchecked("inf".to_string())),
     }
 }
@@ -671,13 +634,7 @@ pub(crate) fn path_number_for_delete(number: &serde_json::Number) -> Option<i64>
     if let Some(raw) = number.as_i64() {
         return Some(raw);
     }
-    number.as_u64().map(|raw| {
-        if raw > i64::MAX as u64 {
-            i64::MAX
-        } else {
-            raw as i64
-        }
-    })
+    number.as_u64().map(|raw| if raw > i64::MAX as u64 { i64::MAX } else { raw as i64 })
 }
 
 pub(crate) type SliceComponentBounds = (Option<f64>, Option<f64>);
@@ -768,20 +725,16 @@ mod tests {
             .expect("must return number");
         assert_eq!(inf.to_string(), "inf");
 
-        let ninf = parse_jq_non_finite_number("-inf")
-            .expect("must parse")
-            .expect("must return number");
+        let ninf =
+            parse_jq_non_finite_number("-inf").expect("must parse").expect("must return number");
         assert_eq!(ninf.to_string(), "-inf");
 
-        let nan = parse_jq_non_finite_number("nan1234")
-            .expect("must parse")
-            .expect("must return number");
+        let nan =
+            parse_jq_non_finite_number("nan1234").expect("must parse").expect("must return number");
         assert_eq!(nan.to_string(), "nan");
 
         assert!(parse_jq_non_finite_number("NaN1").is_err());
-        assert!(parse_jq_non_finite_number("42")
-            .expect("finite should be ignored")
-            .is_none());
+        assert!(parse_jq_non_finite_number("42").expect("finite should be ignored").is_none());
     }
 
     #[test]
@@ -794,10 +747,7 @@ mod tests {
     #[test]
     fn classify_and_negate_special_numbers_are_consistent() {
         let pos_inf = serde_json::Number::from_string_unchecked("inf".to_string());
-        assert_eq!(
-            classify_special_number(&pos_inf),
-            Some(SpecialNumber::PosInf)
-        );
+        assert_eq!(classify_special_number(&pos_inf), Some(SpecialNumber::PosInf));
         let neg = negate_special_number_literal(&pos_inf).expect("negated");
         assert_eq!(neg.to_string(), "-inf");
     }

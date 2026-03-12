@@ -69,12 +69,7 @@ pub(super) fn rewrite_stage_symbol_ids(
     param_id_map: &BTreeMap<usize, usize>,
 ) {
     match stage {
-        Stage::Call {
-            function_id,
-            param_id,
-            name,
-            args,
-        } => {
+        Stage::Call { function_id, param_id, name, args } => {
             if let Some(old) = *function_id {
                 if let Some(new_id) = function_id_map.get(&old).copied() {
                     *function_id = Some(new_id);
@@ -125,19 +120,9 @@ pub(super) fn rewrite_stage_symbol_ids(
                 rewrite_stage_symbol_ids(flags, function_id_map, function_name_map, param_id_map);
             }
         }
-        Stage::RegexSub {
-            regex,
-            replacement,
-            flags,
-            ..
-        } => {
+        Stage::RegexSub { regex, replacement, flags, .. } => {
             rewrite_stage_symbol_ids(regex, function_id_map, function_name_map, param_id_map);
-            rewrite_stage_symbol_ids(
-                replacement,
-                function_id_map,
-                function_name_map,
-                param_id_map,
-            );
+            rewrite_stage_symbol_ids(replacement, function_id_map, function_name_map, param_id_map);
             rewrite_stage_symbol_ids(flags, function_id_map, function_name_map, param_id_map);
         }
         Stage::Label { body, .. } | Stage::Format { expr: body, .. } => {
@@ -207,12 +192,7 @@ pub(super) fn rewrite_stage_symbol_ids(
             rewrite_stage_symbol_ids(end, function_id_map, function_name_map, param_id_map);
             rewrite_stage_symbol_ids(step, function_id_map, function_name_map, param_id_map);
         }
-        Stage::Reduce {
-            source,
-            pattern,
-            init,
-            update,
-        } => {
+        Stage::Reduce { source, pattern, init, update } => {
             rewrite_stage_symbol_ids(source, function_id_map, function_name_map, param_id_map);
             rewrite_binding_pattern_symbol_ids(
                 pattern,
@@ -223,13 +203,7 @@ pub(super) fn rewrite_stage_symbol_ids(
             rewrite_stage_symbol_ids(init, function_id_map, function_name_map, param_id_map);
             rewrite_stage_symbol_ids(update, function_id_map, function_name_map, param_id_map);
         }
-        Stage::Foreach {
-            source,
-            pattern,
-            init,
-            update,
-            extract,
-        } => {
+        Stage::Foreach { source, pattern, init, update, extract } => {
             rewrite_stage_symbol_ids(source, function_id_map, function_name_map, param_id_map);
             rewrite_binding_pattern_symbol_ids(
                 pattern,
@@ -245,11 +219,7 @@ pub(super) fn rewrite_stage_symbol_ids(
             rewrite_stage_symbol_ids(inner, function_id_map, function_name_map, param_id_map);
             rewrite_stage_symbol_ids(catcher, function_id_map, function_name_map, param_id_map);
         }
-        Stage::IfElse {
-            cond,
-            then_expr,
-            else_expr,
-        } => {
+        Stage::IfElse { cond, then_expr, else_expr } => {
             rewrite_stage_symbol_ids(cond, function_id_map, function_name_map, param_id_map);
             rewrite_stage_symbol_ids(then_expr, function_id_map, function_name_map, param_id_map);
             rewrite_stage_symbol_ids(else_expr, function_id_map, function_name_map, param_id_map);
@@ -267,11 +237,7 @@ pub(super) fn rewrite_stage_symbol_ids(
             rewrite_stage_symbol_ids(b, function_id_map, function_name_map, param_id_map);
             rewrite_stage_symbol_ids(c, function_id_map, function_name_map, param_id_map);
         }
-        Stage::Bind {
-            source,
-            pattern,
-            body,
-        } => {
+        Stage::Bind { source, pattern, body } => {
             rewrite_stage_symbol_ids(source, function_id_map, function_name_map, param_id_map);
             rewrite_binding_pattern_symbol_ids(
                 pattern,

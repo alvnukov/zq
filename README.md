@@ -8,6 +8,15 @@
 
 `zq` is a standalone jq-compatible query engine with a native in-repo runtime.
 
+## Project Standards
+
+- Rust MSRV: `1.94` (see `rust-toolchain.toml`)
+- Security policy: [SECURITY.md](SECURITY.md)
+- Contributing guide: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Code of conduct: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
+- Full docs index: [docs/README.md](docs/README.md)
+
 ## Current Capabilities
 
 - Runs jq filters on JSON, YAML, TOML, CSV, and XML input.

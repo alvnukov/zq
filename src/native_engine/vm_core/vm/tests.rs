@@ -67,10 +67,7 @@ fn execute_terminal_repeat_keeps_break_hard_without_outputs() {
 
     let err = execute(&program, &ZqValue::from(1))
         .expect_err("terminal repeat without outputs must return hard error");
-    assert!(
-        err.contains("break"),
-        "unexpected terminal repeat hard error: {err}"
-    );
+    assert!(err.contains("break"), "unexpected terminal repeat hard error: {err}");
 }
 
 #[test]
@@ -99,9 +96,7 @@ fn execute_terminal_trycatch_repeat_input_matches_inputs_contract() {
 #[test]
 fn execute_terminal_trycatch_reraises_non_break_errors() {
     let op = Op::TryCatch {
-        inner: Box::new(Op::Error(Box::new(Op::Literal(ZqValue::String(
-            "boom".to_string(),
-        ))))),
+        inner: Box::new(Op::Error(Box::new(Op::Literal(ZqValue::String("boom".to_string()))))),
         catcher: Box::new(Op::IfElse {
             cond: Box::new(Op::Binary {
                 op: BinaryOp::Eq,
@@ -115,10 +110,7 @@ fn execute_terminal_trycatch_reraises_non_break_errors() {
 
     let err = execute(&program_with_ops(vec![op]), &ZqValue::Null)
         .expect_err("non-break errors must be re-raised");
-    assert!(
-        err.contains("boom"),
-        "unexpected try/catch re-raise text: {err}"
-    );
+    assert!(err.contains("boom"), "unexpected try/catch re-raise text: {err}");
 }
 
 #[test]
@@ -137,12 +129,7 @@ fn binary_cartesian_order_is_rhs_major() {
     let out = execute_single(op, ZqValue::Null).expect("binary execute");
     assert_eq!(
         out,
-        vec![
-            ZqValue::from(11),
-            ZqValue::from(12),
-            ZqValue::from(21),
-            ZqValue::from(22)
-        ]
+        vec![ZqValue::from(11), ZqValue::from(12), ZqValue::from(21), ZqValue::from(22)]
     );
 }
 
@@ -151,24 +138,15 @@ fn object_literal_single_output_fast_path_matches_shape() {
     let op = Op::ObjectLiteral(vec![
         (
             OpObjectKey::Static("id".to_string()),
-            Op::GetField {
-                name: "id".to_string(),
-                optional: false,
-            },
+            Op::GetField { name: "id".to_string(), optional: false },
         ),
         (
             OpObjectKey::Static("group".to_string()),
-            Op::GetField {
-                name: "group".to_string(),
-                optional: false,
-            },
+            Op::GetField { name: "group".to_string(), optional: false },
         ),
         (
             OpObjectKey::Static("value".to_string()),
-            Op::GetField {
-                name: "value".to_string(),
-                optional: false,
-            },
+            Op::GetField { name: "value".to_string(), optional: false },
         ),
     ]);
 
@@ -189,21 +167,43 @@ fn object_literal_single_output_fast_path_matches_shape() {
 }
 
 #[test]
+fn object_literal_projection_with_duplicate_source_field_keeps_both_values() {
+    let op = Op::ObjectLiteral(vec![
+        (
+            OpObjectKey::Static("left".to_string()),
+            Op::GetField { name: "x".to_string(), optional: false },
+        ),
+        (
+            OpObjectKey::Static("right".to_string()),
+            Op::GetField { name: "x".to_string(), optional: false },
+        ),
+    ]);
+
+    let input = object(&[("x", ZqValue::from(11))]);
+    let out = execute_single(op, input).expect("duplicate projection execute");
+    assert_eq!(
+        out,
+        vec![object(&[("left", ZqValue::from(11)), ("right", ZqValue::from(11))])]
+    );
+}
+
+#[test]
+fn optional_field_access_on_scalar_yields_empty_stream() {
+    let op = Op::GetField { name: "k".to_string(), optional: true };
+    let out = execute_single(op, ZqValue::from(1)).expect("optional field execute");
+    assert!(out.is_empty(), "optional getfield on scalar must be empty");
+}
+
+#[test]
 fn object_literal_cartesian_shape_is_preserved() {
     let op = Op::ObjectLiteral(vec![
         (
             OpObjectKey::Static("a".to_string()),
-            Op::Comma(vec![
-                Op::Literal(ZqValue::from(1)),
-                Op::Literal(ZqValue::from(2)),
-            ]),
+            Op::Comma(vec![Op::Literal(ZqValue::from(1)), Op::Literal(ZqValue::from(2))]),
         ),
         (
             OpObjectKey::Static("b".to_string()),
-            Op::Comma(vec![
-                Op::Literal(ZqValue::from(3)),
-                Op::Literal(ZqValue::from(4)),
-            ]),
+            Op::Comma(vec![Op::Literal(ZqValue::from(3)), Op::Literal(ZqValue::from(4))]),
         ),
     ]);
 
@@ -222,10 +222,7 @@ fn object_literal_cartesian_shape_is_preserved() {
 #[test]
 fn run_dynamic_index_keeps_key_order() {
     let indexed = ZqValue::Array(vec![ZqValue::from(10), ZqValue::from(20)]);
-    let key_op = Op::Comma(vec![
-        Op::Literal(ZqValue::from(0)),
-        Op::Literal(ZqValue::from(1)),
-    ]);
+    let key_op = Op::Comma(vec![Op::Literal(ZqValue::from(0)), Op::Literal(ZqValue::from(1))]);
     let mut out = Vec::new();
     run_dynamic_index(indexed, &key_op, &ZqValue::Null, false, &mut out).expect("dynamic index");
     assert_eq!(out, vec![ZqValue::from(10), ZqValue::from(20)]);
@@ -235,20 +232,12 @@ fn run_dynamic_index_keeps_key_order() {
 fn select_gt_pipe_keeps_only_matching_inputs() {
     let select = Op::Select(Box::new(Op::Binary {
         op: BinaryOp::Gt,
-        lhs: Box::new(Op::GetField {
-            name: "id".to_string(),
-            optional: false,
-        }),
+        lhs: Box::new(Op::GetField { name: "id".to_string(), optional: false }),
         rhs: Box::new(Op::Literal(ZqValue::from(2))),
     }));
-    let extract_id = Op::GetField {
-        name: "id".to_string(),
-        optional: false,
-    };
+    let extract_id = Op::GetField { name: "id".to_string(), optional: false };
     let program = Program {
-        branches: vec![crate::native_engine::vm_core::ir::Branch {
-            ops: vec![select, extract_id],
-        }],
+        branches: vec![crate::native_engine::vm_core::ir::Branch { ops: vec![select, extract_id] }],
         functions: Vec::new(),
         module_search_dirs: Vec::new(),
     };
@@ -256,14 +245,51 @@ fn select_gt_pipe_keeps_only_matching_inputs() {
     let low = object(&[("id", ZqValue::from(2)), ("payload", ZqValue::from(1))]);
     let high = object(&[("id", ZqValue::from(3)), ("payload", ZqValue::from(1))]);
 
-    assert_eq!(
-        execute(&program, &low).expect("execute low"),
-        Vec::<ZqValue>::new()
-    );
-    assert_eq!(
-        execute(&program, &high).expect("execute high"),
-        vec![ZqValue::from(3)]
-    );
+    assert_eq!(execute(&program, &low).expect("execute low"), Vec::<ZqValue>::new());
+    assert_eq!(execute(&program, &high).expect("execute high"), vec![ZqValue::from(3)]);
+}
+
+#[test]
+fn single_op_pipe_length_keeps_expected_result() {
+    let op = Op::Pipe(vec![
+        Op::GetField { name: "tags".to_string(), optional: false },
+        Op::Builtin(Builtin::Length),
+    ]);
+    let input = object(&[
+        ("id", ZqValue::from(7)),
+        ("tags", ZqValue::Array(vec![ZqValue::from(1), ZqValue::from(2), ZqValue::from(3)])),
+    ]);
+    let out = execute_single(op, input).expect("pipe length execute");
+    assert_eq!(out, vec![ZqValue::from(3)]);
+}
+
+#[test]
+fn single_op_chain_field_access_keeps_expected_result() {
+    let op = Op::Chain(vec![
+        Op::GetField { name: "a".to_string(), optional: false },
+        Op::GetField { name: "b".to_string(), optional: false },
+    ]);
+    let input = object(&[("a", object(&[("b", ZqValue::from(3))]))]);
+    let out = execute_single(op, input).expect("chain execute");
+    assert_eq!(out, vec![ZqValue::from(3)]);
+}
+
+#[test]
+fn single_op_pipe_select_extract_keeps_expected_result() {
+    let op = Op::Pipe(vec![
+        Op::Select(Box::new(Op::Binary {
+            op: BinaryOp::Gt,
+            lhs: Box::new(Op::GetField { name: "id".to_string(), optional: false }),
+            rhs: Box::new(Op::Literal(ZqValue::from(2))),
+        })),
+        Op::GetField { name: "id".to_string(), optional: false },
+    ]);
+
+    let low = object(&[("id", ZqValue::from(2)), ("payload", ZqValue::from(1))]);
+    let high = object(&[("id", ZqValue::from(3)), ("payload", ZqValue::from(1))]);
+
+    assert_eq!(execute_single(op.clone(), low).expect("execute low"), Vec::<ZqValue>::new());
+    assert_eq!(execute_single(op, high).expect("execute high"), vec![ZqValue::from(3)]);
 }
 
 #[test]
@@ -292,10 +318,7 @@ fn math_binary_cartesian_order_is_rhs_major() {
 fn math_ternary_cartesian_order_has_last_arg_outermost() {
     let op = Op::MathTernary {
         op: MathTernaryOp::Fma,
-        a: Box::new(Op::Comma(vec![
-            Op::Literal(ZqValue::from(1)),
-            Op::Literal(ZqValue::from(2)),
-        ])),
+        a: Box::new(Op::Comma(vec![Op::Literal(ZqValue::from(1)), Op::Literal(ZqValue::from(2))])),
         b: Box::new(Op::Comma(vec![
             Op::Literal(ZqValue::from(10)),
             Op::Literal(ZqValue::from(20)),
@@ -321,10 +344,7 @@ fn regex_has_match_respects_no_empty_flag() {
         dot_matches_new_line: false,
         ignore_whitespace: false,
     };
-    let cfg_with_empty = RegexModeConfig {
-        no_empty: false,
-        ..cfg_no_empty.clone()
-    };
+    let cfg_with_empty = RegexModeConfig { no_empty: false, ..cfg_no_empty.clone() };
 
     assert!(!regex_has_match("abc", "", &cfg_no_empty).expect("regex no-empty"));
     assert!(regex_has_match("abc", "", &cfg_with_empty).expect("regex with-empty"));

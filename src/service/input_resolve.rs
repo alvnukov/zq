@@ -77,10 +77,10 @@ pub(super) fn resolve_base_query(cli: &Cli) -> Result<String, Error> {
         return fs::read_to_string(path).map_err(Error::from);
     }
     if requires_filter_for_interactive_stdin(cli, io::stdin().is_terminal()) {
-        return Err(Error::Query(
-            "zq: error: missing FILTER (run with a filter like '.' or pipe input into zq)"
-                .to_string(),
-        ));
+        let tool = cli_error_tool_name();
+        return Err(Error::Query(format!(
+            "{tool}: error: missing FILTER (run with a filter like '.' or pipe input into {tool})"
+        )));
     }
     Ok(cli.query.clone().unwrap_or_else(|| ".".to_string()))
 }

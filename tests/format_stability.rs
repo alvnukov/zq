@@ -82,34 +82,10 @@ fn forced_input_formats_are_stable_on_success_and_error() {
     }
 
     let ok_cases = [
-        OkCase {
-            id: "json_ok",
-            format: "json",
-            query: ".a",
-            input: "{\"a\":1}\n",
-            expected: "1",
-        },
-        OkCase {
-            id: "yaml_ok",
-            format: "yaml",
-            query: ".a",
-            input: "a: 1\n",
-            expected: "1",
-        },
-        OkCase {
-            id: "toml_ok",
-            format: "toml",
-            query: ".a",
-            input: "a = 1\n",
-            expected: "1",
-        },
-        OkCase {
-            id: "csv_ok",
-            format: "csv",
-            query: ".a",
-            input: "a,b\n1,2\n",
-            expected: "1",
-        },
+        OkCase { id: "json_ok", format: "json", query: ".a", input: "{\"a\":1}\n", expected: "1" },
+        OkCase { id: "yaml_ok", format: "yaml", query: ".a", input: "a: 1\n", expected: "1" },
+        OkCase { id: "toml_ok", format: "toml", query: ".a", input: "a = 1\n", expected: "1" },
+        OkCase { id: "csv_ok", format: "csv", query: ".a", input: "a,b\n1,2\n", expected: "1" },
         OkCase {
             id: "xml_ok",
             format: "xml",
@@ -120,10 +96,7 @@ fn forced_input_formats_are_stable_on_success_and_error() {
     ];
 
     for case in ok_cases {
-        let out = run_zq_stdin(
-            &["--input-format", case.format, "-r", case.query],
-            case.input,
-        );
+        let out = run_zq_stdin(&["--input-format", case.format, "-r", case.query], case.input);
         assert_ok(&out, case.id);
         assert_stdout_trim_eq(&out, case.expected, case.id);
     }
@@ -139,30 +112,10 @@ fn forced_input_formats_are_stable_on_success_and_error() {
     }
 
     let err_cases = [
-        ErrCase {
-            id: "json_err",
-            format: "json",
-            input: "{\n",
-            marker: "parse error",
-        },
-        ErrCase {
-            id: "yaml_err",
-            format: "yaml",
-            input: "a: [1\n",
-            marker: "yaml:",
-        },
-        ErrCase {
-            id: "toml_err",
-            format: "toml",
-            input: "a =\n",
-            marker: "toml:",
-        },
-        ErrCase {
-            id: "xml_err",
-            format: "xml",
-            input: "<root><a></root>",
-            marker: "xml:",
-        },
+        ErrCase { id: "json_err", format: "json", input: "{\n", marker: "parse error" },
+        ErrCase { id: "yaml_err", format: "yaml", input: "a: [1\n", marker: "yaml:" },
+        ErrCase { id: "toml_err", format: "toml", input: "a =\n", marker: "toml:" },
+        ErrCase { id: "xml_err", format: "xml", input: "<root><a></root>", marker: "xml:" },
     ];
 
     for case in err_cases {
@@ -173,72 +126,47 @@ fn forced_input_formats_are_stable_on_success_and_error() {
 
     let permissive_csv = run_zq_stdin(&["--input-format", "csv", "-c", "."], "a,b\n1,\"2\n");
     assert_ok(&permissive_csv, "csv_permissive_mode");
-    assert_stdout_trim_eq(
-        &permissive_csv,
-        r#"{"a":"1","b":"2\n"}"#,
-        "csv_permissive_mode",
-    );
+    assert_stdout_trim_eq(&permissive_csv, r#"{"a":"1","b":"2\n"}"#, "csv_permissive_mode");
 }
 
 #[test]
 fn output_formats_emit_machine_parseable_payloads() {
     let input_json = "{\"a\":1,\"b\":\"x\"}\n";
 
-    let json_out = run_zq_stdin(
-        &[
-            "--input-format",
-            "json",
-            "--output-format",
-            "json",
-            "-c",
-            ".",
-        ],
-        input_json,
-    );
+    let json_out =
+        run_zq_stdin(&["--input-format", "json", "--output-format", "json", "-c", "."], input_json);
     assert_ok(&json_out, "json output");
     let parsed_json: serde_json::Value =
         serde_json::from_str(stdout_text(&json_out).trim()).expect("parse json output");
     assert_eq!(parsed_json, serde_json::json!({"a": 1, "b": "x"}));
 
-    let yaml_out = run_zq_stdin(
-        &["--input-format", "json", "--output-format", "yaml", "."],
-        input_json,
-    );
+    let yaml_out =
+        run_zq_stdin(&["--input-format", "json", "--output-format", "yaml", "."], input_json);
     assert_ok(&yaml_out, "yaml output");
     let parsed_yaml: serde_yaml::Value =
         serde_yaml::from_str(&stdout_text(&yaml_out)).expect("parse yaml output");
     assert_eq!(parsed_yaml["a"], serde_yaml::Value::Number(1.into()));
 
-    let toml_out = run_zq_stdin(
-        &["--input-format", "json", "--output-format", "toml", "."],
-        input_json,
-    );
+    let toml_out =
+        run_zq_stdin(&["--input-format", "json", "--output-format", "toml", "."], input_json);
     assert_ok(&toml_out, "toml output");
     let parsed_toml: toml::Value =
         toml::from_str(&stdout_text(&toml_out)).expect("parse toml output");
     assert_eq!(parsed_toml["a"], toml::Value::Integer(1));
 
-    let csv_out = run_zq_stdin(
-        &["--input-format", "json", "--output-format", "csv", "."],
-        input_json,
-    );
+    let csv_out =
+        run_zq_stdin(&["--input-format", "json", "--output-format", "csv", "."], input_json);
     assert_ok(&csv_out, "csv output");
     let csv_text = stdout_text(&csv_out);
-    let mut csv_reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .from_reader(csv_text.as_bytes());
-    let rows = csv_reader
-        .records()
-        .collect::<Result<Vec<_>, _>>()
-        .expect("parse csv output");
+    let mut csv_reader =
+        csv::ReaderBuilder::new().has_headers(true).from_reader(csv_text.as_bytes());
+    let rows = csv_reader.records().collect::<Result<Vec<_>, _>>().expect("parse csv output");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get(0), Some("1"));
     assert_eq!(rows[0].get(1), Some("x"));
 
-    let xml_out = run_zq_stdin(
-        &["--input-format", "json", "--output-format", "xml", "."],
-        input_json,
-    );
+    let xml_out =
+        run_zq_stdin(&["--input-format", "json", "--output-format", "xml", "."], input_json);
     assert_ok(&xml_out, "xml output");
     let xml_text = stdout_text(&xml_out);
     let xml_doc = roxmltree::Document::parse(xml_text.trim()).expect("parse xml output");

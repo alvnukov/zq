@@ -307,9 +307,9 @@ where
     };
 
     if run_options.null_input || !program.supports_direct_json_stream_write() {
-        return Err(Error::Query(crate::QueryError::Unsupported(
-            format!("query is not supported by direct json stream writer: {query}"),
-        )));
+        return Err(Error::Query(crate::QueryError::Unsupported(format!(
+            "query is not supported by direct json stream writer: {query}"
+        ))));
     }
 
     program

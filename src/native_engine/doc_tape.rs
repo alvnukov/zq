@@ -3,10 +3,10 @@ use crate::value::{
 };
 use indexmap::IndexMap;
 use serde::de::{self, DeserializeSeed};
-use serde::ser::{SerializeMap, SerializeSeq};
-use serde::Serialize;
 use serde::de::{Error as DeError, MapAccess, SeqAccess, Visitor};
+use serde::ser::{SerializeMap, SerializeSeq};
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Number as JsonNumber;
 use std::cell::Cell;
 use std::cmp::Ordering;
@@ -499,15 +499,12 @@ impl<'de> Deserialize<'de> for DocNodeRef {
                             let mut entries =
                                 Vec::with_capacity(map.size_hint().unwrap_or(0).saturating_add(1));
                             let keep_first = !is_root_object
-                                || builder
-                                    .root_field_filter()
-                                    .is_none_or(|filter| filter.contains(builder.string(first_key)));
+                                || builder.root_field_filter().is_none_or(|filter| {
+                                    filter.contains(builder.string(first_key))
+                                });
                             if keep_first {
                                 let first_value = map.next_value::<DocNodeRef>()?;
-                                entries.push(ObjectEntry {
-                                    key: first_key,
-                                    value: first_value.0,
-                                });
+                                entries.push(ObjectEntry { key: first_key, value: first_value.0 });
                             } else {
                                 map.next_value::<serde::de::IgnoredAny>()?;
                             }
@@ -518,10 +515,7 @@ impl<'de> Deserialize<'de> for DocNodeRef {
                                     });
                                 if keep {
                                     let value = map.next_value::<DocNodeRef>()?;
-                                    entries.push(ObjectEntry {
-                                        key: key.0,
-                                        value: value.0,
-                                    });
+                                    entries.push(ObjectEntry { key: key.0, value: value.0 });
                                 } else {
                                     map.next_value::<serde::de::IgnoredAny>()?;
                                 }
@@ -843,10 +837,7 @@ impl Serialize for NodeCliJsonCompat<'_> {
                 for entry in &self.0.doc.object_entries[start..(start + len)] {
                     map.serialize_entry(
                         self.0.doc.string(entry.key),
-                        &NodeCliJsonCompat(NodeRef {
-                            doc: self.0.doc,
-                            id: entry.value,
-                        }),
+                        &NodeCliJsonCompat(NodeRef { doc: self.0.doc, id: entry.value }),
                     )?;
                 }
                 map.end()
@@ -994,10 +985,18 @@ impl<'a> DocNumberRef<'a> {
             (DocNumberRef::I64(left), DocNumberRef::I64(right)) => left.cmp(&right),
             (DocNumberRef::U64(left), DocNumberRef::U64(right)) => left.cmp(&right),
             (DocNumberRef::I64(left), DocNumberRef::U64(right)) => {
-                if left < 0 { Ordering::Less } else { (left as u64).cmp(&right) }
+                if left < 0 {
+                    Ordering::Less
+                } else {
+                    (left as u64).cmp(&right)
+                }
             }
             (DocNumberRef::U64(left), DocNumberRef::I64(right)) => {
-                if right < 0 { Ordering::Greater } else { left.cmp(&(right as u64)) }
+                if right < 0 {
+                    Ordering::Greater
+                } else {
+                    left.cmp(&(right as u64))
+                }
             }
             _ => crate::c_compat::math::compare_json_numbers_like_jq(
                 &self.to_json_number(),
@@ -1027,8 +1026,7 @@ mod tests {
     #[test]
     fn parse_json_with_root_filter_keeps_only_requested_root_fields() {
         let mut scratch = JsonDocScratch::default();
-        let mut parser =
-            serde_json::Deserializer::from_str(r#"{"id":7,"skip":9,"text":"alpha"}"#);
+        let mut parser = serde_json::Deserializer::from_str(r#"{"id":7,"skip":9,"text":"alpha"}"#);
         let doc = scratch
             .parse_json_with_root_filter(
                 &mut parser,

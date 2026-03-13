@@ -70,19 +70,11 @@ fn native_stream_direct_writer_emits_json_and_raw_string_output() {
         json_input,
         RunOptions::default(),
         &mut json_out,
-        NativeJsonWriteOptions {
-            compact: false,
-            raw_output: false,
-            join_output: false,
-            indent: 2,
-        },
+        NativeJsonWriteOptions { compact: false, raw_output: false, join_output: false, indent: 2 },
     )
     .expect("direct writer");
     assert_eq!(status, NativeStreamStatus::Executed);
-    assert_eq!(
-        String::from_utf8(json_out).expect("utf8"),
-        "{\n  \"id\": 7,\n  \"group\": 2\n}\n"
-    );
+    assert_eq!(String::from_utf8(json_out).expect("utf8"), "{\n  \"id\": 7,\n  \"group\": 2\n}\n");
 
     let mut raw_out = Vec::new();
     let raw_input = std::io::Cursor::new(br#"{"text":"svc"}"#.to_vec());
@@ -91,12 +83,7 @@ fn native_stream_direct_writer_emits_json_and_raw_string_output() {
         raw_input,
         RunOptions::default(),
         &mut raw_out,
-        NativeJsonWriteOptions {
-            compact: true,
-            raw_output: true,
-            join_output: false,
-            indent: 2,
-        },
+        NativeJsonWriteOptions { compact: true, raw_output: true, join_output: false, indent: 2 },
     )
     .expect("direct raw writer");
     assert_eq!(String::from_utf8(raw_out).expect("utf8"), "svc\n");
@@ -111,18 +98,10 @@ fn native_stream_direct_writer_preserves_large_raw_integer() {
         input,
         RunOptions::default(),
         &mut out,
-        NativeJsonWriteOptions {
-            compact: true,
-            raw_output: false,
-            join_output: false,
-            indent: 2,
-        },
+        NativeJsonWriteOptions { compact: true, raw_output: false, join_output: false, indent: 2 },
     )
     .expect("direct writer");
-    assert_eq!(
-        String::from_utf8(out).expect("utf8"),
-        "123456789012345678901234567890\n"
-    );
+    assert_eq!(String::from_utf8(out).expect("utf8"), "123456789012345678901234567890\n");
 }
 
 #[test]

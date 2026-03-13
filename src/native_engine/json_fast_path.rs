@@ -2,15 +2,15 @@ use super::doc_tape::{
     write_json_evaluated_line, DocNumberRef, DocTape, EvaluatedNode, JsonDocScratch,
     RootFieldFilter,
 };
-use super::JsonWriteOptions;
 use super::vm_core::ast::{BinaryOp, Builtin};
 use super::vm_core::ir::{Branch, Op, OpObjectKey, Program};
 use super::vm_core::vm::{apply_binary, jq_run_length, jq_truthy};
+use super::JsonWriteOptions;
 use crate::c_compat::math as c_math;
 use crate::c_compat::value::{type_name_jq, value_for_error_jq};
 use crate::value::ZqValue;
-use std::collections::BTreeSet;
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::io::Write;
 
 #[derive(Clone)]
@@ -72,7 +72,8 @@ impl FastProgram {
         let mut parser = serde_json::Deserializer::from_str(input);
         let mut scratch = JsonDocScratch::default();
         loop {
-            match scratch.parse_json_with_root_filter(&mut parser, self.root_field_filter.as_ref()) {
+            match scratch.parse_json_with_root_filter(&mut parser, self.root_field_filter.as_ref())
+            {
                 Ok(doc) => {
                     self.execute_doc(&doc, emit)?;
                     scratch.recycle(doc);
@@ -95,7 +96,8 @@ impl FastProgram {
         let mut parser = serde_json::Deserializer::from_reader(reader);
         let mut scratch = JsonDocScratch::default();
         loop {
-            match scratch.parse_json_with_root_filter(&mut parser, self.root_field_filter.as_ref()) {
+            match scratch.parse_json_with_root_filter(&mut parser, self.root_field_filter.as_ref())
+            {
                 Ok(doc) => {
                     self.execute_doc(&doc, emit)?;
                     scratch.recycle(doc);
@@ -119,7 +121,8 @@ impl FastProgram {
         let pretty_indent = (!options.compact).then(|| vec![b' '; options.indent]);
         let mut wrote_any = false;
         loop {
-            match scratch.parse_json_with_root_filter(&mut parser, self.root_field_filter.as_ref()) {
+            match scratch.parse_json_with_root_filter(&mut parser, self.root_field_filter.as_ref())
+            {
                 Ok(doc) => {
                     self.execute_doc_write_json(
                         &doc,
@@ -200,7 +203,8 @@ impl FastBranch {
         for stage in &self.stages {
             match stage {
                 FastStage::Expr(expr) => {
-                    let (stage_fields, next_is_root) = analyze_expr_root_fields(expr, current_is_root)?;
+                    let (stage_fields, next_is_root) =
+                        analyze_expr_root_fields(expr, current_is_root)?;
                     fields.extend(stage_fields);
                     current_is_root = next_is_root;
                 }
@@ -508,7 +512,9 @@ fn compare_evaluated_jq(lhs: &EvaluatedNode<'_>, rhs: &EvaluatedNode<'_>) -> Ord
         (Some(ScalarRef::Bool), Some(ScalarRef::Bool)) => Ordering::Equal,
         (Some(ScalarRef::Number(a)), Some(ScalarRef::Number(b))) => a.compare_jq(b),
         (Some(ScalarRef::String(a)), Some(ScalarRef::String(b))) => a.cmp(b),
-        _ => crate::c_compat::value::compare_jq(&lhs.clone().into_owned(), &rhs.clone().into_owned()),
+        _ => {
+            crate::c_compat::value::compare_jq(&lhs.clone().into_owned(), &rhs.clone().into_owned())
+        }
     }
 }
 
@@ -606,7 +612,9 @@ fn scalar_ref<'a>(value: &'a EvaluatedNode<'a>) -> Option<ScalarRef<'a>> {
         EvaluatedNode::ProjectedObject(_) => None,
         EvaluatedNode::Owned(ZqValue::Null) => Some(ScalarRef::Null),
         EvaluatedNode::Owned(ZqValue::Bool(_)) => Some(ScalarRef::Bool),
-        EvaluatedNode::Owned(ZqValue::Number(number)) => Some(ScalarRef::Number(NumberRef::Owned(number))),
+        EvaluatedNode::Owned(ZqValue::Number(number)) => {
+            Some(ScalarRef::Number(NumberRef::Owned(number)))
+        }
         EvaluatedNode::Owned(ZqValue::String(text)) => Some(ScalarRef::String(text)),
         EvaluatedNode::Owned(ZqValue::Array(_) | ZqValue::Object(_)) => None,
     }

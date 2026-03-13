@@ -9,20 +9,25 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
   RUST_TOOLCHAIN: "1.94.0"
   JQ_VERSION: "jq-1.7.1"
+  CARGO_AUDIT_VERSION: "0.22.1"
+  CARGO_DENY_VERSION: "0.19.0"
 
 jobs:
   lint-and-test:
     name: Lint and Test
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
@@ -74,9 +79,13 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
@@ -110,9 +119,13 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
@@ -275,9 +288,13 @@ jobs:
   security:
     name: Security Checks
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
@@ -301,11 +318,14 @@ jobs:
             ${{ runner.os }}-cargo-security-
             ${{ runner.os }}-cargo-
 
-      - name: Install security tools
-        run: cargo install --locked cargo-audit cargo-deny
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit --version ${{ env.CARGO_AUDIT_VERSION }}
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny --version ${{ env.CARGO_DENY_VERSION }}
 
       - name: Cargo audit
         run: cargo audit
 
-      - name: Cargo deny advisories
-        run: cargo deny check advisories
+      - name: Cargo deny policy
+        run: cargo deny check advisories bans sources

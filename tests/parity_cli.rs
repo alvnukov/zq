@@ -741,3 +741,192 @@ fn parity_diff_mode_rejects_double_stdin() {
     assert_exit_code(&out, 5, "--diff - -");
     assert_stderr_contains(&out, "does not support reading both sides from stdin", "--diff - -");
 }
+
+#[test]
+fn parity_diff_mode_reports_left_parse_failure_with_side_label() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let left = td.path().join("left.json");
+    let right = td.path().join("right.json");
+    std::fs::write(&left, "{\n").expect("write invalid left");
+    std::fs::write(&right, "{}\n").expect("write valid right");
+
+    let left_s = left.to_string_lossy().into_owned();
+    let right_s = right.to_string_lossy().into_owned();
+    let out = run_zq(&["--diff", &left_s, &right_s]);
+    assert_fail(&out, "--diff parse failure on left");
+    assert_exit_code(&out, 5, "--diff parse failure on left");
+    assert_stderr_contains(&out, "--diff: cannot parse LEFT input", "--diff parse failure on left");
+    assert_stderr_contains(&out, &left_s, "--diff parse failure on left");
+}
+
+#[test]
+fn parity_diff_mode_reports_right_parse_failure_with_side_label() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let left = td.path().join("left.json");
+    let right = td.path().join("right.json");
+    std::fs::write(&left, "{}\n").expect("write valid left");
+    std::fs::write(&right, "{\n").expect("write invalid right");
+
+    let left_s = left.to_string_lossy().into_owned();
+    let right_s = right.to_string_lossy().into_owned();
+    let out = run_zq(&["--diff", &left_s, &right_s]);
+    assert_fail(&out, "--diff parse failure on right");
+    assert_exit_code(&out, 5, "--diff parse failure on right");
+    assert_stderr_contains(
+        &out,
+        "--diff: cannot parse RIGHT input",
+        "--diff parse failure on right",
+    );
+    assert_stderr_contains(&out, &right_s, "--diff parse failure on right");
+}
+
+#[test]
+fn parity_diff_mode_rejects_from_file_flag() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let query = td.path().join("query.jq");
+    let left = td.path().join("left.json");
+    let right = td.path().join("right.json");
+    std::fs::write(&query, ".").expect("write query");
+    std::fs::write(&left, "{}\n").expect("write left");
+    std::fs::write(&right, "{}\n").expect("write right");
+
+    let query_s = query.to_string_lossy().into_owned();
+    let left_s = left.to_string_lossy().into_owned();
+    let right_s = right.to_string_lossy().into_owned();
+    let out = run_zq(&["--diff", "-f", &query_s, &left_s, &right_s]);
+    assert_fail(&out, "--diff with -f");
+    assert_exit_code(&out, 5, "--diff with -f");
+    assert_stderr_contains(
+        &out,
+        "--diff mode cannot be combined with -f/--from-file",
+        "--diff with -f",
+    );
+}
+
+#[test]
+fn parity_diff_mode_indexes_multi_document_streams() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let left = td.path().join("left.jsonl");
+    let right = td.path().join("right.jsonl");
+    std::fs::write(&left, "{\"a\":1}\n{\"b\":1}\n").expect("write left");
+    std::fs::write(&right, "{\"a\":2}\n{\"b\":1}\n{\"c\":3}\n").expect("write right");
+
+    let left_s = left.to_string_lossy().into_owned();
+    let right_s = right.to_string_lossy().into_owned();
+    let out = run_zq(&["--diff", "--diff-format", "diff", &left_s, &right_s]);
+    assert_fail(&out, "--diff multi-doc");
+    assert_exit_code(&out, 1, "--diff multi-doc");
+    let text = stdout_text(&out);
+    assert!(text.contains("~ $[0].a"), "stdout:\n{text}");
+    assert!(text.contains("+ $[2]"), "stdout:\n{text}");
+}
+
+#[test]
+fn parity_diff_mode_rejects_malformed_inputs_across_supported_formats() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let valid = td.path().join("valid.json");
+    std::fs::write(&valid, "{}\n").expect("write valid baseline");
+    let valid_s = valid.to_string_lossy().into_owned();
+
+    let cases = [
+        ("broken.json", "{\n"),
+        ("broken.yaml", "a: [\n"),
+        ("broken.toml", "a = [\n"),
+        ("broken.xml", "<root>\n"),
+    ];
+
+    for (name, payload) in cases {
+        let left = td.path().join(name);
+        std::fs::write(&left, payload).expect("write malformed input");
+        let left_s = left.to_string_lossy().into_owned();
+        let out = run_zq(&["--diff", &left_s, &valid_s]);
+        assert_fail(&out, name);
+        assert_exit_code(&out, 5, name);
+        assert_stderr_contains(&out, "--diff: cannot parse LEFT input", name);
+        assert_stderr_contains(&out, &left_s, name);
+    }
+}
+
+#[test]
+fn parity_diff_mode_csv_quote_heavy_input_stays_stable() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let left = td.path().join("left.csv");
+    let right = td.path().join("right.json");
+    std::fs::write(&left, "a,\"b\"c\n").expect("write csv");
+    std::fs::write(&right, "{}\n").expect("write right");
+
+    let left_s = left.to_string_lossy().into_owned();
+    let right_s = right.to_string_lossy().into_owned();
+    let out = run_zq(&["--diff", &left_s, &right_s]);
+    assert_fail(&out, "--diff csv quote-heavy input");
+    assert_exit_code(&out, 1, "--diff csv quote-heavy input");
+    let text = stdout_text(&out);
+    assert!(text.contains("Found 1 semantic differences:"), "stdout:\n{text}");
+    assert!(text.contains("~ $:"), "stdout:\n{text}");
+}
+
+#[test]
+fn parity_diff_mode_stress_summary_handles_large_nested_inputs() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let left = td.path().join("left.json");
+    let right = td.path().join("right.json");
+
+    let mut left_items = Vec::with_capacity(128);
+    let mut right_items = Vec::with_capacity(128);
+    for idx in 0..128usize {
+        left_items.push(serde_json::json!({
+            "id": idx,
+            "meta": { "group": idx % 5, "flags": [idx, idx + 1, idx + 2] }
+        }));
+        right_items.push(serde_json::json!({
+            "id": idx,
+            "meta": {
+                "group": if idx % 31 == 0 { 99 } else { idx % 5 },
+                "flags": [idx, idx + 1, idx + 2]
+            }
+        }));
+    }
+    right_items.push(serde_json::json!({"id": 999, "meta": {"group": 1, "flags": []}}));
+
+    std::fs::write(&left, serde_json::to_string(&left_items).expect("left json"))
+        .expect("write left");
+    std::fs::write(&right, serde_json::to_string(&right_items).expect("right json"))
+        .expect("write right");
+
+    let left_s = left.to_string_lossy().into_owned();
+    let right_s = right.to_string_lossy().into_owned();
+    let out = run_zq(&["--diff", "--diff-format", "summary", &left_s, &right_s]);
+    assert_fail(&out, "--diff stress summary");
+    assert_exit_code(&out, 1, "--diff stress summary");
+    assert_stdout_trim_eq(
+        &out,
+        "equal=false total=6 changed=5 added=1 removed=0",
+        "--diff stress summary",
+    );
+}
+
+#[test]
+fn parity_diff_mode_stdin_spool_is_cleaned_after_process_exit() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let spool_root = td.path().join("spool-root");
+    let right = td.path().join("right.yaml");
+    std::fs::write(&right, "x: [1, 2]\n").expect("write right");
+    let right_s = right.to_string_lossy().into_owned();
+
+    let out = run_zq_stdin_env(
+        &["--diff", &right_s],
+        "{\"x\":[1,2]}\n",
+        &[("ZQ_SPOOL_DIR", spool_root.to_string_lossy().as_ref())],
+    );
+    assert_ok(&out, "--diff stdin spool cleanup");
+    assert_exit_code(&out, 0, "--diff stdin spool cleanup");
+
+    let root = spool_root.join("v1");
+    assert!(root.exists(), "spool root must exist after stdin-backed diff");
+    let run_dirs = std::fs::read_dir(&root)
+        .expect("read spool root")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("run-"))
+        .collect::<Vec<_>>();
+    assert!(run_dirs.is_empty(), "run dirs must be cleaned up after process exit");
+}

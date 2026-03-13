@@ -969,6 +969,117 @@ fn semantic_diff_summary_counts_by_kind() {
     assert!(!summary.equal());
 }
 
+fn sample_semantic_diffs() -> Vec<SemanticDiff> {
+    vec![
+        SemanticDiff {
+            kind: SemanticDiffKind::Changed,
+            path: "$.a".to_string(),
+            left: Some(zq::NativeValue::from(1)),
+            right: Some(zq::NativeValue::from(2)),
+        },
+        SemanticDiff {
+            kind: SemanticDiffKind::Added,
+            path: "$.add".to_string(),
+            left: None,
+            right: Some(zq::NativeValue::from_json(serde_json::json!([1, 2]))),
+        },
+        SemanticDiff {
+            kind: SemanticDiffKind::Removed,
+            path: "$.drop".to_string(),
+            left: Some(zq::NativeValue::String("x".to_string())),
+            right: None,
+        },
+    ]
+}
+
+#[test]
+fn collect_semantic_doc_diffs_uses_escaped_paths_for_multidoc_inputs() {
+    let left_docs = vec![
+        zq::NativeValue::from_json(serde_json::json!({
+            "spaced key": 1,
+            "quote\"key": { "inner": [0] }
+        })),
+        zq::NativeValue::Bool(true),
+    ];
+    let right_docs = vec![
+        zq::NativeValue::from_json(serde_json::json!({
+            "spaced key": 2,
+            "quote\"key": { "inner": [0, 1] }
+        })),
+        zq::NativeValue::Bool(false),
+        zq::NativeValue::from_json(serde_json::json!({"extra": 1})),
+    ];
+
+    let diffs = collect_semantic_doc_diffs(&left_docs, &right_docs);
+    let actual = diffs.iter().map(|diff| (diff.kind, diff.path.as_str())).collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            (SemanticDiffKind::Added, "$[0][\"quote\\\"key\"].inner[1]"),
+            (SemanticDiffKind::Changed, "$[0][\"spaced key\"]"),
+            (SemanticDiffKind::Changed, "$[1]"),
+            (SemanticDiffKind::Added, "$[2]"),
+        ]
+    );
+}
+
+#[test]
+fn collect_semantic_doc_diffs_handles_deeply_nested_objects() {
+    let mut left = zq::NativeValue::from(1);
+    let mut right = zq::NativeValue::from(2);
+    let mut keys = Vec::with_capacity(96);
+
+    for depth in (0..96).rev() {
+        let key = format!("level{depth}");
+        keys.push(key.clone());
+
+        let mut left_map = indexmap::IndexMap::new();
+        left_map.insert(key.clone(), left);
+        left = zq::NativeValue::Object(left_map);
+
+        let mut right_map = indexmap::IndexMap::new();
+        right_map.insert(key, right);
+        right = zq::NativeValue::Object(right_map);
+    }
+
+    let diffs = collect_semantic_doc_diffs(&[left], &[right]);
+    assert_eq!(diffs.len(), 1);
+    assert_eq!(diffs[0].kind, SemanticDiffKind::Changed);
+    assert_eq!(
+        diffs[0].path,
+        format!("$.{}", keys.iter().rev().cloned().collect::<Vec<_>>().join("."))
+    );
+    let summary = SemanticDiffSummary::from_diffs(&diffs);
+    assert_eq!(summary.total, 1);
+    assert_eq!(summary.changed, 1);
+}
+
+#[test]
+fn collect_semantic_doc_diffs_handles_wide_arrays_without_losing_paths() {
+    let mut left = Vec::with_capacity(256);
+    let mut right = Vec::with_capacity(256);
+    for idx in 0..256usize {
+        left.push(zq::NativeValue::from(idx as i64));
+        let value = if idx % 53 == 0 { (idx as i64) + 1 } else { idx as i64 };
+        right.push(zq::NativeValue::from(value));
+    }
+    right.push(zq::NativeValue::from(999i64));
+
+    let diffs = collect_semantic_doc_diffs(
+        &[zq::NativeValue::Array(left)],
+        &[zq::NativeValue::Array(right)],
+    );
+    let summary = SemanticDiffSummary::from_diffs(&diffs);
+    assert_eq!(summary.total, 6);
+    assert_eq!(summary.changed, 5);
+    assert_eq!(summary.added, 1);
+    assert_eq!(summary.removed, 0);
+    assert_eq!(
+        diffs.iter().map(|diff| diff.path.as_str()).collect::<Vec<_>>(),
+        vec!["$[0]", "$[53]", "$[106]", "$[159]", "$[212]", "$[256]"]
+    );
+}
+
 #[test]
 fn semantic_diff_report_jsonl_emits_only_summary_for_equal_inputs() {
     let mut out = Vec::new();
@@ -982,6 +1093,26 @@ fn semantic_diff_report_jsonl_emits_only_summary_for_equal_inputs() {
     assert_eq!(payload["type"], serde_json::Value::String("summary".to_string()));
     assert_eq!(payload["equal"], serde_json::Value::Bool(true));
     assert_eq!(payload["total"], serde_json::Value::from(0u64));
+}
+
+#[test]
+fn semantic_diff_report_diff_matches_exact_output() {
+    let diffs = sample_semantic_diffs();
+    let summary = SemanticDiffSummary::from_diffs(&diffs);
+    let mut out = Vec::new();
+    write_semantic_diff_report(&mut out, &diffs, summary, DiffOutputFormat::Diff, false, false)
+        .expect("diff report");
+    let text = String::from_utf8(out).expect("utf8 report");
+    assert_eq!(
+        text,
+        concat!(
+            "Found 3 semantic differences:\n",
+            "~ $.a: 1 -> 2\n",
+            "+ $.add: [1,2]\n",
+            "- $.drop: \"x\"\n",
+            "Summary: changed=1, added=1, removed=1\n"
+        )
+    );
 }
 
 #[test]
@@ -1002,33 +1133,129 @@ fn semantic_diff_report_diff_uses_color_codes_when_enabled() {
 }
 
 #[test]
-fn semantic_diff_report_patch_writes_unified_hunks() {
-    let diffs = vec![
-        SemanticDiff {
-            kind: SemanticDiffKind::Changed,
-            path: "$.a".to_string(),
-            left: Some(zq::NativeValue::from(1)),
-            right: Some(zq::NativeValue::from(2)),
+fn semantic_diff_report_json_matches_exact_payloads() {
+    let diffs = sample_semantic_diffs();
+    let summary = SemanticDiffSummary::from_diffs(&diffs);
+    let payload = serde_json::json!({
+        "equal": false,
+        "summary": {
+            "total": 3,
+            "changed": 1,
+            "added": 1,
+            "removed": 1,
         },
-        SemanticDiff {
-            kind: SemanticDiffKind::Added,
-            path: "$.b".to_string(),
-            left: None,
-            right: Some(zq::NativeValue::from_json(serde_json::json!([1, 2]))),
-        },
+        "differences": [
+            {
+                "kind": "changed",
+                "path": "$.a",
+                "left": 1,
+                "right": 2,
+            },
+            {
+                "kind": "added",
+                "path": "$.add",
+                "left": serde_json::Value::Null,
+                "right": [1, 2],
+            },
+            {
+                "kind": "removed",
+                "path": "$.drop",
+                "left": "x",
+                "right": serde_json::Value::Null,
+            },
+        ],
+    });
+
+    let mut pretty = Vec::new();
+    write_semantic_diff_report(&mut pretty, &diffs, summary, DiffOutputFormat::Json, false, false)
+        .expect("pretty json report");
+    assert_eq!(
+        String::from_utf8(pretty).expect("utf8 pretty report"),
+        format!("{}\n", serde_json::to_string_pretty(&payload).expect("pretty payload"))
+    );
+
+    let mut compact = Vec::new();
+    write_semantic_diff_report(&mut compact, &diffs, summary, DiffOutputFormat::Json, true, false)
+        .expect("compact json report");
+    assert_eq!(
+        String::from_utf8(compact).expect("utf8 compact report"),
+        format!("{}\n", serde_json::to_string(&payload).expect("compact payload"))
+    );
+}
+
+#[test]
+fn semantic_diff_report_jsonl_matches_exact_lines() {
+    let diffs = sample_semantic_diffs();
+    let summary = SemanticDiffSummary::from_diffs(&diffs);
+    let mut out = Vec::new();
+    write_semantic_diff_report(&mut out, &diffs, summary, DiffOutputFormat::Jsonl, false, false)
+        .expect("jsonl report");
+    let text = String::from_utf8(out).expect("utf8 report");
+    let actual = text.lines().map(str::to_string).collect::<Vec<_>>();
+    let expected = vec![
+        serde_json::to_string(&serde_json::json!({
+            "type": "diff",
+            "kind": "changed",
+            "path": "$.a",
+            "left": 1,
+            "right": 2,
+        }))
+        .expect("diff line"),
+        serde_json::to_string(&serde_json::json!({
+            "type": "diff",
+            "kind": "added",
+            "path": "$.add",
+            "left": serde_json::Value::Null,
+            "right": [1, 2],
+        }))
+        .expect("diff line"),
+        serde_json::to_string(&serde_json::json!({
+            "type": "diff",
+            "kind": "removed",
+            "path": "$.drop",
+            "left": "x",
+            "right": serde_json::Value::Null,
+        }))
+        .expect("diff line"),
+        serde_json::to_string(&serde_json::json!({
+            "type": "summary",
+            "equal": false,
+            "total": 3,
+            "changed": 1,
+            "added": 1,
+            "removed": 1,
+        }))
+        .expect("summary line"),
     ];
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn semantic_diff_report_patch_writes_unified_hunks() {
+    let diffs = sample_semantic_diffs();
     let summary = SemanticDiffSummary::from_diffs(&diffs);
     let mut out = Vec::new();
     write_semantic_diff_report(&mut out, &diffs, summary, DiffOutputFormat::Patch, false, false)
         .expect("patch report");
     let text = String::from_utf8(out).expect("utf8 report");
-    assert!(text.contains("--- left"), "report:\n{text}");
-    assert!(text.contains("+++ right"), "report:\n{text}");
-    assert!(text.contains("@@ $.a @@"), "report:\n{text}");
-    assert!(text.contains("-1"), "report:\n{text}");
-    assert!(text.contains("+2"), "report:\n{text}");
-    assert!(text.contains("@@ $.b @@"), "report:\n{text}");
-    assert!(text.contains("+[1,2]"), "report:\n{text}");
+    assert_eq!(
+        text,
+        concat!(
+            "--- left\n",
+            "+++ right\n",
+            "@@ $.a @@\n",
+            "-1\n",
+            "+2\n",
+            "\n",
+            "@@ $.add @@\n",
+            "+[1,2]\n",
+            "\n",
+            "@@ $.drop @@\n",
+            "-\"x\"\n",
+            "\n",
+            "Summary: changed=1, added=1, removed=1\n"
+        )
+    );
 }
 
 #[test]
@@ -1047,6 +1274,45 @@ fn semantic_diff_report_patch_uses_color_codes_when_enabled() {
     assert!(text.contains("\u{1b}[31m--- left\u{1b}[0m"), "report:\n{text}");
     assert!(text.contains("\u{1b}[36m@@ $.a @@\u{1b}[0m"), "report:\n{text}");
     assert!(text.contains("\u{1b}[32m+2\u{1b}[0m"), "report:\n{text}");
+}
+
+#[test]
+fn semantic_diff_report_summary_matches_exact_output() {
+    let diffs = sample_semantic_diffs();
+    let summary = SemanticDiffSummary::from_diffs(&diffs);
+    let mut out = Vec::new();
+    write_semantic_diff_report(&mut out, &diffs, summary, DiffOutputFormat::Summary, false, false)
+        .expect("summary report");
+    assert_eq!(
+        String::from_utf8(out).expect("utf8 summary"),
+        "equal=false total=3 changed=1 added=1 removed=1\n"
+    );
+}
+
+#[test]
+fn diff_mode_rejects_from_file_flag() {
+    let cli = parse_cli_for_test(&["--diff", "-f", "query.jq", "left.json", "right.json"]);
+    let err = run_with(cli, CliCompatArgs::default()).expect_err("must fail");
+    assert_eq!(err.to_string(), "query: --diff mode cannot be combined with -f/--from-file");
+}
+
+#[test]
+fn diff_mode_reports_parse_side_in_errors() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let left = td.path().join("left.json");
+    let right = td.path().join("right.json");
+    std::fs::write(&left, "{\n").expect("write invalid left");
+    std::fs::write(&right, "{}\n").expect("write valid right");
+
+    let cli = parse_cli_for_test(&[
+        "--diff",
+        left.to_str().expect("utf8 path"),
+        right.to_str().expect("utf8 path"),
+    ]);
+    let err = run_with(cli, CliCompatArgs::default()).expect_err("must fail");
+    let text = err.to_string();
+    assert!(text.contains("--diff: cannot parse LEFT input"), "error:\n{text}");
+    assert!(text.contains(left.to_str().expect("utf8 path")), "error:\n{text}");
 }
 
 #[test]
@@ -1074,6 +1340,35 @@ fn run_with_diff_mode_returns_expected_statuses() {
     ]);
     let diff_status = run_with(diff_cli, CliCompatArgs::default()).expect("different diff");
     assert_eq!(diff_status, 1);
+}
+
+#[test]
+fn run_with_diff_mode_tracks_multi_document_stream_indices() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let left = td.path().join("left.jsonl");
+    let right = td.path().join("right.jsonl");
+    std::fs::write(&left, "{\"a\":1}\n{\"b\":1}\n").expect("write left");
+    std::fs::write(&right, "{\"a\":2}\n{\"b\":1}\n{\"c\":3}\n").expect("write right");
+
+    let left_docs = zq::parse_native_input_values_with_format_native(
+        &std::fs::read_to_string(&left).expect("read left"),
+        zq::NativeInputFormat::Json,
+    )
+    .expect("left docs")
+    .values;
+    let right_docs = zq::parse_native_input_values_with_format_native(
+        &std::fs::read_to_string(&right).expect("read right"),
+        zq::NativeInputFormat::Json,
+    )
+    .expect("right docs")
+    .values;
+    let diffs = collect_semantic_doc_diffs(&left_docs, &right_docs);
+
+    let actual = diffs.iter().map(|diff| (diff.kind, diff.path.as_str())).collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![(SemanticDiffKind::Changed, "$[0].a"), (SemanticDiffKind::Added, "$[2]"),]
+    );
 }
 
 #[test]

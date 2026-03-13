@@ -188,9 +188,7 @@ impl FastProgram {
 fn compile_root_field_filter(branches: &[FastBranch]) -> Option<RootFieldFilter> {
     let mut fields = BTreeSet::new();
     for branch in branches {
-        let Some(branch_fields) = branch.required_root_fields() else {
-            return None;
-        };
+        let branch_fields = branch.required_root_fields()?;
         fields.extend(branch_fields);
     }
     Some(RootFieldFilter::from_names(fields.into_iter().collect()))

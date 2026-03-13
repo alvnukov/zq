@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+- Native JSON fast-path now prunes unused root fields and reduces intermediate materialization on common jq-style filters, projections, and comparisons.
+- CI workflows now use pinned Node 24-compatible actions, a pinned `jq 1.7.1` upstream compatibility baseline, and tag-only release publishing.
+
+### Fixed
+- CI lint jobs no longer trip on platform-specific errno aliases or recycle-path clippy warnings.
+
 ## [1.5.0] - 2026-03-12
 
 ### Added

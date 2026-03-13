@@ -35,6 +35,14 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 5. Update docs (`README.md`, `docs/*`) when user-facing behavior changes.
 6. Add changelog entry under `Unreleased` in [CHANGELOG.md](CHANGELOG.md).
 
+## Changelog Rules
+
+- Keep `CHANGELOG.md` curated for user-visible changes only.
+- Add entries to `Unreleased` as part of the same change, not during release scramble.
+- Prefer concrete impact over implementation detail.
+- Do not add local-only noise such as coverage badge updates, formatting-only commits, or refactors with no observable effect.
+- Group entries under Keep a Changelog sections (`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`).
+
 ## Commit Messages
 
 Use clear commit subjects, preferably conventional prefixes:

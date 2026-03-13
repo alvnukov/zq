@@ -7,11 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-03-13
+
 ### Changed
 - Native JSON fast-path now prunes unused root fields and reduces intermediate materialization on common jq-style filters, projections, and comparisons.
-- CI workflows now use pinned Node 24-compatible actions, a pinned `jq 1.7.1` upstream compatibility baseline, and tag-only release publishing.
 
 ### Fixed
+- Release and CI workflows now use pinned Node 24-compatible actions, a pinned `jq 1.7.1` upstream compatibility baseline, and tag-only release publishing.
 - CI lint jobs no longer trip on platform-specific errno aliases or recycle-path clippy warnings.
 
 ## [1.5.0] - 2026-03-12
@@ -49,7 +51,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Added
 - Expanded compatibility and test coverage baseline.
 
-[Unreleased]: https://github.com/alvnukov/zq/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/alvnukov/zq/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/alvnukov/zq/releases/tag/v1.5.1
 [1.5.0]: https://github.com/alvnukov/zq/releases/tag/v1.5.0
 [1.4.2]: https://github.com/alvnukov/zq/releases/tag/v1.4.2
 [1.4.0]: https://github.com/alvnukov/zq/releases/tag/v1.4.0

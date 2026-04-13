@@ -149,7 +149,7 @@ jobs:
           "$($hash.Hash.ToLower())  $PkgDir.zip" | Out-File -Encoding ascii "$PkgDir.zip.sha256"
 
       - name: Upload packaged artifact
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: release-${{ matrix.target }}
           path: |
@@ -172,7 +172,7 @@ jobs:
 
       - name: Upload DEB and RPM artifacts (Linux)
         if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-musl'
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: release-linux-packages
           path: |

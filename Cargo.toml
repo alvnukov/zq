@@ -28,7 +28,7 @@ memmap2 = "0.9"
 libc = "0.2"
 toml = "0.8"
 csv = "1.3"
-roxmltree = "0.20"
+roxmltree = "0.21"
 fs2 = "0.4"
 zstd = "0.13"
 

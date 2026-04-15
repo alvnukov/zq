@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-04-15
+
+### Fixed
+- Filter mode now accepts multiple positional input files (`zq FILTER file1 file2 ...`) and processes them as a single jq-style input stream.
+
 ## [1.5.1] - 2026-03-13
 
 ### Changed
@@ -51,7 +56,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Added
 - Expanded compatibility and test coverage baseline.
 
-[Unreleased]: https://github.com/alvnukov/zq/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/alvnukov/zq/compare/v1.5.2...HEAD
+[1.5.2]: https://github.com/alvnukov/zq/releases/tag/v1.5.2
 [1.5.1]: https://github.com/alvnukov/zq/releases/tag/v1.5.1
 [1.5.0]: https://github.com/alvnukov/zq/releases/tag/v1.5.0
 [1.4.2]: https://github.com/alvnukov/zq/releases/tag/v1.4.2

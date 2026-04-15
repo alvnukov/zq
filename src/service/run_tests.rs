@@ -31,7 +31,7 @@ pub(super) fn run_tests_mode_many(
 
 pub(super) fn run_tests_mode(cli: &Cli, path: &str, spool: &SpoolManager) -> Result<i32, Error> {
     if cli.query.is_some()
-        || cli.input_file.is_some()
+        || !cli.input_files.is_empty()
         || cli.input_legacy.is_some()
         || cli.from_file.is_some()
     {

@@ -579,6 +579,21 @@ fn parity_missing_input_file_exits_with_io_code() {
 }
 
 #[test]
+fn parity_filter_mode_accepts_multiple_input_files() {
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let a = td.path().join("a.json");
+    let b = td.path().join("b.json");
+    std::fs::write(&a, "{\"a\":1}\n").expect("write a");
+    std::fs::write(&b, "{\"b\":2}\n").expect("write b");
+
+    let a_s = a.to_string_lossy().into_owned();
+    let b_s = b.to_string_lossy().into_owned();
+    let out = run_zq(&["-c", ".", &a_s, &b_s]);
+    assert_ok(&out, "multi-file filter mode");
+    assert_stdout_trim_eq(&out, "{\"a\":1}\n{\"b\":2}", "multi-file filter mode");
+}
+
+#[test]
 fn parity_diff_mode_reports_semantic_equality() {
     let td = tempfile::TempDir::new().expect("tempdir");
     let left = td.path().join("left.yaml");

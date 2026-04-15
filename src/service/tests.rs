@@ -1375,23 +1375,27 @@ fn run_with_diff_mode_tracks_multi_document_stream_indices() {
 fn resolve_query_input_and_library_paths_contract() {
     let cli = parse_cli_for_test(&["."]);
     assert_eq!(resolve_base_query(&cli).expect("base query"), ".");
-    assert_eq!(resolve_positional_input(&cli).expect("positional"), None);
-    assert_eq!(resolve_input_path(&cli, None).expect("stdin path"), "-");
+    assert_eq!(resolve_positional_inputs(&cli).expect("positional"), Vec::<String>::new());
+    assert_eq!(resolve_input_paths(&cli, &[]).expect("stdin path"), vec!["-".to_string()]);
 
     let cli = parse_cli_for_test(&[".foo", "in.json"]);
-    let positional = resolve_positional_input(&cli).expect("positional with file");
-    assert_eq!(positional, Some("in.json".to_string()));
+    let positional = resolve_positional_inputs(&cli).expect("positional with file");
+    assert_eq!(positional, vec!["in.json".to_string()]);
     assert_eq!(
-        resolve_input_path(&cli, positional.as_deref()).expect("input file path"),
-        "in.json"
+        resolve_input_paths(&cli, &positional).expect("input file path"),
+        vec!["in.json".to_string()]
     );
 
     let cli = parse_cli_for_test(&[".foo", "--input", "legacy.json"]);
-    assert_eq!(resolve_input_path(&cli, None).expect("legacy input"), "legacy.json");
+    assert_eq!(
+        resolve_input_paths(&cli, &[]).expect("legacy input"),
+        vec!["legacy.json".to_string()]
+    );
 
     let mut cli = parse_cli_for_test(&[".foo", "file.json"]);
     cli.input_legacy = Some("legacy.json".to_string());
-    let err = resolve_input_path(&cli, None).expect_err("duplicate input path");
+    let positional = resolve_positional_inputs(&cli).expect("positional inputs");
+    let err = resolve_input_paths(&cli, &positional).expect_err("duplicate input path");
     assert!(format!("{err}").contains("input path is specified twice"));
 
     let td = tempfile::TempDir::new().expect("tempdir");
@@ -1401,8 +1405,8 @@ fn resolve_query_input_and_library_paths_contract() {
         parse_cli_for_test(&["-f", query_file.to_str().expect("utf8 query file"), "input.json"]);
     assert_eq!(resolve_base_query(&cli).expect("query from file"), ".a".to_string());
     assert_eq!(
-        resolve_positional_input(&cli).expect("file positional with -f"),
-        Some("input.json".to_string())
+        resolve_positional_inputs(&cli).expect("file positional with -f"),
+        vec!["input.json".to_string()]
     );
 
     let cli = parse_cli_for_test(&[
@@ -1411,8 +1415,10 @@ fn resolve_query_input_and_library_paths_contract() {
         "query.jq",
         "input.json",
     ]);
-    let err = resolve_positional_input(&cli).expect_err("too many positional args");
-    assert!(format!("{err}").contains("too many positional arguments"));
+    assert_eq!(
+        resolve_positional_inputs(&cli).expect("multiple files with -f"),
+        vec!["query.jq".to_string(), "input.json".to_string()]
+    );
 
     let test_dir = td.path().join("suite");
     std::fs::create_dir_all(test_dir.join("modules")).expect("create modules dir");

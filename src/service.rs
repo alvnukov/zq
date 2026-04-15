@@ -39,8 +39,8 @@ use self::diff_mode::{build_custom_input_stream_native, run_diff_mode};
 #[cfg(test)]
 use self::input_resolve::requires_filter_for_interactive_stdin;
 use self::input_resolve::{
-    resolve_base_query, resolve_effective_input_format, resolve_input_path,
-    resolve_positional_input,
+    resolve_base_query, resolve_effective_input_format, resolve_input_paths,
+    resolve_positional_inputs,
 };
 #[cfg(test)]
 use self::json_color::{
@@ -229,14 +229,17 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         return run_diff_mode(&cli, &spool);
     }
 
-    let positional_input = resolve_positional_input(&cli)?;
+    let positional_inputs = resolve_positional_inputs(&cli)?;
     let base_query = resolve_base_query(&cli)?;
     let raw_output = cli.raw_output || cli.join_output;
     let force_stderr_text = query_uses_stderr_builtin(base_query.as_str());
     let effective_raw_output = raw_output || force_stderr_text;
     let query = build_query_with_cli_compat(base_query.as_str(), &compat_args)?;
-    let input_path = resolve_input_path(&cli, positional_input.as_deref())?;
-    let effective_input_format = resolve_effective_input_format(cli.input_format, &input_path);
+    let input_paths = resolve_input_paths(&cli, &positional_inputs)?;
+    let single_input_path = (input_paths.len() == 1).then(|| input_paths[0].as_str());
+    let effective_input_format = single_input_path
+        .map(|path| resolve_effective_input_format(cli.input_format, path))
+        .unwrap_or(zq::NativeInputFormat::Auto);
     let doc_mode = zq::parse_doc_mode(&cli.doc_mode, cli.doc_index)
         .map_err(|e| Error::Query(e.to_string()))?;
 
@@ -295,6 +298,7 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
     }
 
     let can_native_stream_direct = matches!(cli.output_format, OutputFormat::Json)
+        && single_input_path.is_some()
         && matches!(effective_input_format, zq::NativeInputFormat::Auto)
         && tool == "zq"
         && !cli.raw_output0
@@ -310,11 +314,12 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         const IO_BUFFER_CAP: usize = 64 * 1024;
         let stdout = io::stdout();
         let mut writer = io::BufWriter::with_capacity(IO_BUFFER_CAP, stdout.lock());
+        let input_path = single_input_path.expect("single input path must exist for fast-path");
 
         let reader: Box<dyn io::Read + Send> = if input_path == "-" {
             Box::new(io::BufReader::with_capacity(IO_BUFFER_CAP, io::stdin()))
         } else {
-            Box::new(io::BufReader::with_capacity(IO_BUFFER_CAP, fs::File::open(&input_path)?))
+            Box::new(io::BufReader::with_capacity(IO_BUFFER_CAP, fs::File::open(input_path)?))
         };
 
         if !color_opts.enabled && zq::supports_native_stream_json_direct_write(query.as_str()) {
@@ -386,23 +391,87 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         && !cli.stream
         && !cli.stream_errors
         && !query_uses_inputs_builtin(base_query.as_str());
-    let mut spool = None;
-    let input_data = if skip_input_read {
-        InputData::Owned(String::new())
-    } else {
-        read_input_lazy(&input_path, &mut spool)?
-    };
-    let input_text = input_data.as_str_lossy();
-    let input = input_text.as_ref();
+    let out_native = if input_paths.len() == 1 {
+        let input_path = single_input_path.expect("single input path must be present");
+        let mut spool = None;
+        let input_data = if skip_input_read {
+            InputData::Owned(String::new())
+        } else {
+            read_input_lazy(input_path, &mut spool)?
+        };
+        let input_text = input_data.as_str_lossy();
+        let input = input_text.as_ref();
 
-    let out_native = if cli.raw_input
-        || cli.slurp
-        || cli.null_input
-        || cli.seq
-        || cli.stream
-        || cli.stream_errors
-        || !matches!(effective_input_format, zq::NativeInputFormat::Auto)
-    {
+        if cli.raw_input
+            || cli.slurp
+            || cli.null_input
+            || cli.seq
+            || cli.stream
+            || cli.stream_errors
+            || !matches!(effective_input_format, zq::NativeInputFormat::Auto)
+        {
+            if (cli.stream || cli.stream_errors) && cli.raw_input {
+                return Err(Error::Query(
+                    "--stream and --stream-errors are incompatible with --raw-input".to_string(),
+                ));
+            }
+
+            let mut seq_errors = Vec::new();
+            let mut inputs = if cli.seq && !cli.raw_input {
+                let parsed = parse_json_seq_input_native(input);
+                seq_errors = parsed.errors;
+                parsed.values
+            } else if cli.stream || cli.stream_errors {
+                match zq::parse_jq_json_values_only_native(input) {
+                    Ok(values) => stream_native_values(values),
+                    Err(zq::EngineError::Query(zq::QueryError::Json(json_err)))
+                        if cli.stream_errors =>
+                    {
+                        vec![stream_error_value_from_json_error_native(input, &json_err)]
+                    }
+                    Err(err) => {
+                        return Err(Error::Query(render_engine_error(
+                            tool,
+                            query.as_str(),
+                            input,
+                            err,
+                        )))
+                    }
+                }
+            } else {
+                build_custom_input_stream_native(&cli, input, doc_mode, effective_input_format)
+                    .map_err(|e| {
+                        Error::Query(render_engine_error(tool, query.as_str(), input, e))
+                    })?
+            };
+
+            if cli.seq
+                && cli.null_input
+                && query_uses_inputs_builtin(&query)
+                && !seq_errors.is_empty()
+            {
+                return Err(Error::Query(format!("{tool}: error (at <stdin>:1): {}", seq_errors[0])));
+            }
+            for err in &seq_errors {
+                eprintln!("{tool}: ignoring parse error: {err}");
+            }
+
+            if cli.slurp && !cli.raw_input {
+                inputs = vec![zq::NativeValue::Array(inputs)];
+            }
+            zq::run_jq_stream_with_paths_options_native(
+                query.as_str(),
+                inputs,
+                &cli.library_path,
+                zq::EngineRunOptions { null_input: cli.null_input },
+            )
+            .map_err(|e| Error::Query(render_engine_error(tool, query.as_str(), input, e)))?
+        } else {
+            let options = zq::QueryOptions { doc_mode, library_path: cli.library_path.clone() };
+            zq::run_jq_native(query.as_str(), input, options)
+                .map_err(|e| Error::Query(render_engine_error(tool, query.as_str(), input, e)))?
+        }
+    } else {
         if (cli.stream || cli.stream_errors) && cli.raw_input {
             return Err(Error::Query(
                 "--stream and --stream-errors are incompatible with --raw-input".to_string(),
@@ -410,26 +479,71 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         }
 
         let mut seq_errors = Vec::new();
-        let mut inputs = if cli.seq && !cli.raw_input {
-            let parsed = parse_json_seq_input_native(input);
-            seq_errors = parsed.errors;
-            parsed.values
-        } else if cli.stream || cli.stream_errors {
-            match zq::parse_jq_json_values_only_native(input) {
-                Ok(values) => stream_native_values(values),
-                Err(zq::EngineError::Query(zq::QueryError::Json(json_err)))
-                    if cli.stream_errors =>
-                {
-                    vec![stream_error_value_from_json_error_native(input, &json_err)]
+        let mut inputs = Vec::new();
+        let mut spool = None;
+        let mut raw_slurp_joined = String::new();
+
+        if !skip_input_read {
+            if cli.raw_input && cli.slurp {
+                for path in &input_paths {
+                    let input_data = read_input_lazy(path, &mut spool)?;
+                    let input_text = input_data.as_str_lossy();
+                    raw_slurp_joined.push_str(input_text.as_ref());
                 }
-                Err(err) => {
-                    return Err(Error::Query(render_engine_error(tool, query.as_str(), input, err)))
+                inputs = build_custom_input_stream_native(
+                    &cli,
+                    &raw_slurp_joined,
+                    doc_mode,
+                    zq::NativeInputFormat::Auto,
+                )
+                .map_err(|e| {
+                    Error::Query(render_engine_error(tool, query.as_str(), &raw_slurp_joined, e))
+                })?;
+            } else if cli.seq && !cli.raw_input {
+                for path in &input_paths {
+                    let input_data = read_input_lazy(path, &mut spool)?;
+                    let input_text = input_data.as_str_lossy();
+                    let parsed = parse_json_seq_input_native(input_text.as_ref());
+                    seq_errors.extend(parsed.errors);
+                    inputs.extend(parsed.values);
+                }
+            } else if cli.stream || cli.stream_errors {
+                for path in &input_paths {
+                    let input_data = read_input_lazy(path, &mut spool)?;
+                    let input_text = input_data.as_str_lossy();
+                    let input = input_text.as_ref();
+                    match zq::parse_jq_json_values_only_native(input) {
+                        Ok(values) => inputs.extend(stream_native_values(values)),
+                        Err(zq::EngineError::Query(zq::QueryError::Json(json_err)))
+                            if cli.stream_errors =>
+                        {
+                            inputs.push(stream_error_value_from_json_error_native(input, &json_err));
+                        }
+                        Err(err) => {
+                            return Err(Error::Query(render_engine_error(
+                                tool,
+                                query.as_str(),
+                                input,
+                                err,
+                            )))
+                        }
+                    }
+                }
+            } else {
+                for path in &input_paths {
+                    let input_data = read_input_lazy(path, &mut spool)?;
+                    let input_text = input_data.as_str_lossy();
+                    let input = input_text.as_ref();
+                    let path_format = resolve_effective_input_format(cli.input_format, path);
+                    let mut path_values =
+                        build_custom_input_stream_native(&cli, input, doc_mode, path_format)
+                            .map_err(|e| {
+                                Error::Query(render_engine_error(tool, query.as_str(), input, e))
+                            })?;
+                    inputs.append(&mut path_values);
                 }
             }
-        } else {
-            build_custom_input_stream_native(&cli, input, doc_mode, effective_input_format)
-                .map_err(|e| Error::Query(render_engine_error(tool, query.as_str(), input, e)))?
-        };
+        }
 
         if cli.seq && cli.null_input && query_uses_inputs_builtin(&query) && !seq_errors.is_empty()
         {
@@ -442,19 +556,13 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
         if cli.slurp && !cli.raw_input {
             inputs = vec![zq::NativeValue::Array(inputs)];
         }
-        let native_out = zq::run_jq_stream_with_paths_options_native(
+        zq::run_jq_stream_with_paths_options_native(
             query.as_str(),
             inputs,
             &cli.library_path,
             zq::EngineRunOptions { null_input: cli.null_input },
         )
-        .map_err(|e| Error::Query(render_engine_error(tool, query.as_str(), input, e)))?;
-        native_out
-    } else {
-        let options = zq::QueryOptions { doc_mode, library_path: cli.library_path.clone() };
-        let native_out = zq::run_jq_native(query.as_str(), input, options)
-            .map_err(|e| Error::Query(render_engine_error(tool, query.as_str(), input, e)))?;
-        native_out
+        .map_err(|e| Error::Query(render_engine_error(tool, query.as_str(), "", e)))?
     };
     if cli.raw_output0 {
         let (rendered, maybe_error) = render_raw_output0_native(&out_native, cli.compact)?;

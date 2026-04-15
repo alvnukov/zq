@@ -58,16 +58,19 @@ fn diff_color_enabled(cli: &Cli) -> bool {
 }
 
 pub(super) fn resolve_diff_paths(cli: &Cli) -> Result<(String, String), Error> {
-    match (&cli.query, &cli.input_file) {
-        (Some(left), Some(right)) => {
-            if left == "-" && right == "-" {
-                return Err(Error::Query(
-                    "--diff mode does not support reading both sides from stdin".to_string(),
-                ));
-            }
-            Ok((left.clone(), right.clone()))
-        }
-        (Some(right), None) => {
+    let Some(first) = &cli.query else {
+        return Err(Error::Query(
+            "--diff mode expects LEFT RIGHT (or a single RIGHT to compare stdin against RIGHT)"
+                .to_string(),
+        ));
+    };
+
+    let mut paths = Vec::with_capacity(1 + cli.input_files.len());
+    paths.push(first.clone());
+    paths.extend(cli.input_files.iter().cloned());
+
+    match paths.as_slice() {
+        [right] => {
             if right == "-" {
                 return Err(Error::Query(
                     "--diff mode requires at least one file path".to_string(),
@@ -75,10 +78,15 @@ pub(super) fn resolve_diff_paths(cli: &Cli) -> Result<(String, String), Error> {
             }
             Ok(("-".to_string(), right.clone()))
         }
-        (None, Some(_)) => {
-            Err(Error::Query("--diff mode expects positional paths as LEFT RIGHT".to_string()))
+        [left, right] => {
+            if left == "-" && right == "-" {
+                return Err(Error::Query(
+                    "--diff mode does not support reading both sides from stdin".to_string(),
+                ));
+            }
+            Ok((left.clone(), right.clone()))
         }
-        (None, None) => Err(Error::Query(
+        _ => Err(Error::Query(
             "--diff mode expects LEFT RIGHT (or a single RIGHT to compare stdin against RIGHT)"
                 .to_string(),
         )),

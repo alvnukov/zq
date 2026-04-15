@@ -40,36 +40,35 @@ fn detect_input_format_from_path(path: &str) -> Option<zq::NativeInputFormat> {
     }
 }
 
-pub(super) fn resolve_input_path(
+pub(super) fn resolve_input_paths(
     cli: &Cli,
-    positional_input: Option<&str>,
-) -> Result<String, Error> {
-    if cli.input_file.is_some() && cli.input_legacy.is_some() {
+    positional_inputs: &[String],
+) -> Result<Vec<String>, Error> {
+    if !positional_inputs.is_empty() && cli.input_legacy.is_some() {
         return Err(Error::Query(
             "input path is specified twice (use either positional FILE or --input)".to_string(),
         ));
     }
-    if let Some(path) = positional_input {
-        return Ok(path.to_string());
+    if !positional_inputs.is_empty() {
+        return Ok(positional_inputs.to_vec());
     }
     if let Some(path) = &cli.input_legacy {
-        return Ok(path.clone());
+        return Ok(vec![path.clone()]);
     }
-    Ok("-".to_string())
+    Ok(vec!["-".to_string()])
 }
 
-pub(super) fn resolve_positional_input(cli: &Cli) -> Result<Option<String>, Error> {
+pub(super) fn resolve_positional_inputs(cli: &Cli) -> Result<Vec<String>, Error> {
     if cli.from_file.is_none() {
-        return Ok(cli.input_file.clone());
+        return Ok(cli.input_files.clone());
     }
 
-    match (&cli.query, &cli.input_file) {
-        (Some(_), Some(_)) => Err(Error::Query(
-            "too many positional arguments with -f (expected optional FILE)".to_string(),
-        )),
-        (Some(path), None) => Ok(Some(path.clone())),
-        (None, maybe_file) => Ok(maybe_file.clone()),
+    let mut paths = Vec::new();
+    if let Some(path) = &cli.query {
+        paths.push(path.clone());
     }
+    paths.extend(cli.input_files.iter().cloned());
+    Ok(paths)
 }
 
 pub(super) fn resolve_base_query(cli: &Cli) -> Result<String, Error> {
@@ -89,7 +88,7 @@ pub(super) fn requires_filter_for_interactive_stdin(cli: &Cli, stdin_is_terminal
     stdin_is_terminal
         && cli.query.is_none()
         && cli.from_file.is_none()
-        && cli.input_file.is_none()
+        && cli.input_files.is_empty()
         && cli.input_legacy.is_none()
         && !cli.null_input
 }

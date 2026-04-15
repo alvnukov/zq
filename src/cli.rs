@@ -25,8 +25,8 @@ pub struct Cli {
 
     #[arg(value_name = "FILTER", help = "jq filter expression (defaults to . when omitted)")]
     pub query: Option<String>,
-    #[arg(value_name = "FILE", help = "Input file path. If omitted, stdin is used ('-').")]
-    pub input_file: Option<String>,
+    #[arg(value_name = "FILE", help = "Input file path(s). If omitted, stdin is used ('-').")]
+    pub input_files: Vec<String>,
     #[arg(
         long = "input",
         hide = true,

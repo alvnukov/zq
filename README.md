@@ -99,10 +99,10 @@ zq -n '$ARGS.positional' --jsonargs 1 '{"a":2}'
 
 ### Query Mode
 
-Default mode: `zq [OPTIONS] [FILTER] [FILE]`
+Default mode: `zq [OPTIONS] [FILTER] [FILE ...]`
 
 - `[FILTER]` defaults to `.` when omitted.
-- `[FILE]` defaults to stdin (`-`) when omitted.
+- `[FILE ...]` defaults to stdin (`-`) when omitted.
 - `--input-format auto|json|yaml|toml|csv|xml` controls input parser selection.
 - `--csv-parse-json-cells` makes CSV input parser decode JSON literals inside cells.
 - `--doc-mode first|all|index` controls YAML document selection.

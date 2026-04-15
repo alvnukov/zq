@@ -5,8 +5,8 @@ This document reflects the current CLI behavior of `zq`.
 ## Synopsis
 
 ```text
-zq [OPTIONS] [FILTER] [FILE]
-zq [OPTIONS] -f FILTER_FILE [FILE]
+zq [OPTIONS] [FILTER] [FILE ...]
+zq [OPTIONS] -f FILTER_FILE [FILE ...]
 zq --diff [LEFT] RIGHT
 zq --run-tests [FILE ...]
 zq completion <SHELL>

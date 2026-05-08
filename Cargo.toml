@@ -21,7 +21,7 @@ serde_stacker = "0.1"
 thiserror = "1"
 indexmap = { version = "2", features = ["serde"] }
 regex = "1"
-fancy-regex = "0.14"
+fancy-regex = "0.17"
 rayon = "1"
 base64 = "0.22"
 memmap2 = "0.9"

@@ -105,6 +105,43 @@ fn native_stream_direct_writer_preserves_large_raw_integer() {
 }
 
 #[test]
+fn native_stream_direct_writer_reports_runtime_input_path() {
+    let mut out = Vec::new();
+    let input =
+        std::io::Cursor::new(b"{\"value\":{\"value\":1}}\n{\"value\":\"{{ template }}\"}".to_vec());
+    let err = try_run_jq_native_stream_json_reader_write_options_native(
+        ".value.value",
+        input,
+        RunOptions::default(),
+        &mut out,
+        NativeJsonWriteOptions { compact: true, raw_output: false, join_output: false, indent: 2 },
+    )
+    .expect_err("direct writer must report the failing source path");
+
+    assert_eq!(
+        err.to_string(),
+        "Cannot index string with string \"value\" at input[1] path $[\"value\"]"
+    );
+}
+
+#[test]
+fn native_stream_reader_reports_runtime_input_path() {
+    let input = std::io::Cursor::new(br#"[{"value":"{{ template }}"}]"#.to_vec());
+    let err = try_run_jq_native_stream_json_reader_options_native(
+        ".[] | .value.value",
+        input,
+        RunOptions::default(),
+        |_value| Ok(()),
+    )
+    .expect_err("stream reader must report the failing source path");
+
+    assert_eq!(
+        err.to_string(),
+        "Cannot index string with string \"value\" at input[0] path $[0][\"value\"]"
+    );
+}
+
+#[test]
 fn yaml_output_for_multiple_values_is_multidoc() {
     let out =
         format_output_yaml_documents(&[serde_json::json!({"a":1}), serde_json::json!({"b":2})])

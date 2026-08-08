@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.5.4] - 2026-08-09
+
+### Fixed
+- Runtime input locations are now preserved by streaming-reader and direct JSON writer execution paths as well as the regular VM path.
+
 ## [1.5.3] - 2026-08-09
 
 ### Fixed
@@ -61,7 +66,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Added
 - Expanded compatibility and test coverage baseline.
 
-[Unreleased]: https://github.com/alvnukov/zq/compare/v1.5.3...HEAD
+[Unreleased]: https://github.com/alvnukov/zq/compare/v1.5.4...HEAD
+[1.5.4]: https://github.com/alvnukov/zq/releases/tag/v1.5.4
 [1.5.3]: https://github.com/alvnukov/zq/releases/tag/v1.5.3
 [1.5.2]: https://github.com/alvnukov/zq/releases/tag/v1.5.2
 [1.5.1]: https://github.com/alvnukov/zq/releases/tag/v1.5.1

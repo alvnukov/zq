@@ -389,9 +389,11 @@ impl CompiledProgram {
         let _program_context_guard = vm_core::install_program_context(&self.program);
         let mut recycle_ctx = NativeValueRecycleContext::default();
         let _recycle_guard = install_active_native_value_recycle_context(&mut recycle_ctx);
-        for item in serde_json::Deserializer::from_str(input).into_iter::<ZqValue>() {
+        for (input_index, item) in
+            serde_json::Deserializer::from_str(input).into_iter::<ZqValue>().enumerate()
+        {
             let root = item.map_err(|e| format!("json parse error: {e}"))?;
-            vm_core::execute_prepared_with(&self.program, root, emit)?;
+            vm_core::execute_prepared_with_input_index(&self.program, root, input_index, emit)?;
         }
         Ok(())
     }
@@ -411,9 +413,18 @@ impl CompiledProgram {
         let mut recycle_ctx = NativeValueRecycleContext::default();
         let _recycle_guard = install_active_native_value_recycle_context(&mut recycle_ctx);
         let mut parser = serde_json::Deserializer::from_reader(reader);
+        let mut input_index = 0usize;
         loop {
             match ZqValue::deserialize(&mut parser) {
-                Ok(root) => vm_core::execute_prepared_with(&self.program, root, emit)?,
+                Ok(root) => {
+                    vm_core::execute_prepared_with_input_index(
+                        &self.program,
+                        root,
+                        input_index,
+                        emit,
+                    )?;
+                    input_index += 1;
+                }
                 Err(err) if err.is_eof() => break,
                 Err(err) => return Err(format!("json parse error: {err}")),
             }

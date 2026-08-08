@@ -71,12 +71,14 @@ impl FastProgram {
     {
         let mut parser = serde_json::Deserializer::from_str(input);
         let mut scratch = JsonDocScratch::default();
+        let mut input_index = 0usize;
         loop {
             match scratch.parse_json_with_root_filter(&mut parser, self.root_field_filter.as_ref())
             {
                 Ok(doc) => {
-                    self.execute_doc(&doc, emit)?;
+                    self.execute_doc(&doc, input_index, emit)?;
                     scratch.recycle(doc);
+                    input_index += 1;
                 }
                 Err(err) if err.is_eof() => break,
                 Err(err) => return Err(format!("json parse error: {err}")),
@@ -95,12 +97,14 @@ impl FastProgram {
     {
         let mut parser = serde_json::Deserializer::from_reader(reader);
         let mut scratch = JsonDocScratch::default();
+        let mut input_index = 0usize;
         loop {
             match scratch.parse_json_with_root_filter(&mut parser, self.root_field_filter.as_ref())
             {
                 Ok(doc) => {
-                    self.execute_doc(&doc, emit)?;
+                    self.execute_doc(&doc, input_index, emit)?;
                     scratch.recycle(doc);
+                    input_index += 1;
                 }
                 Err(err) if err.is_eof() => break,
                 Err(err) => return Err(format!("json parse error: {err}")),
@@ -120,12 +124,14 @@ impl FastProgram {
         let mut json_scratch = Vec::new();
         let pretty_indent = (!options.compact).then(|| vec![b' '; options.indent]);
         let mut wrote_any = false;
+        let mut input_index = 0usize;
         loop {
             match scratch.parse_json_with_root_filter(&mut parser, self.root_field_filter.as_ref())
             {
                 Ok(doc) => {
                     self.execute_doc_write_json(
                         &doc,
+                        input_index,
                         writer,
                         &mut wrote_any,
                         &mut json_scratch,
@@ -133,6 +139,7 @@ impl FastProgram {
                         options,
                     )?;
                     scratch.recycle(doc);
+                    input_index += 1;
                 }
                 Err(err) if err.is_eof() => break,
                 Err(err) => return Err(format!("json parse error: {err}")),
@@ -144,12 +151,12 @@ impl FastProgram {
         Ok(())
     }
 
-    fn execute_doc<F>(&self, doc: &DocTape, emit: &mut F) -> Result<(), String>
+    fn execute_doc<F>(&self, doc: &DocTape, input_index: usize, emit: &mut F) -> Result<(), String>
     where
         F: FnMut(ZqValue) -> Result<(), String>,
     {
         for branch in &self.branches {
-            if let Some(value) = branch.eval(doc)? {
+            if let Some(value) = branch.eval(doc, input_index)? {
                 emit(value.into_owned())?;
             }
         }
@@ -159,6 +166,7 @@ impl FastProgram {
     fn execute_doc_write_json<W: Write>(
         &self,
         doc: &DocTape,
+        input_index: usize,
         writer: &mut W,
         wrote_any: &mut bool,
         scratch: &mut Vec<u8>,
@@ -166,7 +174,7 @@ impl FastProgram {
         options: JsonWriteOptions,
     ) -> Result<(), String> {
         for branch in &self.branches {
-            if let Some(value) = branch.eval(doc)? {
+            if let Some(value) = branch.eval(doc, input_index)? {
                 if *wrote_any && !options.join_output {
                     writer.write_all(b"\n").map_err(|e| e.to_string())?;
                 }
@@ -219,7 +227,15 @@ impl FastBranch {
         Some(fields)
     }
 
-    fn eval<'a>(&self, doc: &'a DocTape) -> Result<Option<EvaluatedNode<'a>>, String> {
+    fn eval<'a>(
+        &self,
+        doc: &'a DocTape,
+        input_index: usize,
+    ) -> Result<Option<EvaluatedNode<'a>>, String> {
+        if let [FastStage::Expr(FastExpr::Path(steps))] = self.stages.as_slice() {
+            return eval_path_with_location(EvaluatedNode::Node(doc.root()), steps, input_index);
+        }
+
         let mut current = Some(EvaluatedNode::Node(doc.root()));
         for stage in &self.stages {
             let Some(input) = current.take() else {
@@ -730,6 +746,46 @@ fn eval_path<'a>(
         current = next;
     }
     Ok(Some(current))
+}
+
+fn eval_path_with_location<'a>(
+    input: EvaluatedNode<'a>,
+    steps: &[PathStep],
+    input_index: usize,
+) -> Result<Option<EvaluatedNode<'a>>, String> {
+    let mut current = input;
+    for (step_index, step) in steps.iter().enumerate() {
+        let next = eval_path_step(current, step).map_err(|err| {
+            format!(
+                "{err} at input[{input_index}] path {}",
+                render_input_path(&steps[..step_index])
+            )
+        })?;
+        let Some(next) = next else {
+            return Ok(None);
+        };
+        current = next;
+    }
+    Ok(Some(current))
+}
+
+fn render_input_path(steps: &[PathStep]) -> String {
+    let mut out = String::from("$");
+    for step in steps {
+        match step {
+            PathStep::Field { name, .. } => {
+                out.push('[');
+                out.push_str(&serde_json::to_string(name).expect("JSON string serialization"));
+                out.push(']');
+            }
+            PathStep::Index { index, .. } => {
+                out.push('[');
+                out.push_str(&index.to_string());
+                out.push(']');
+            }
+        }
+    }
+    out
 }
 
 fn eval_path_step<'a>(

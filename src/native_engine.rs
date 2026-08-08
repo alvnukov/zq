@@ -63,6 +63,7 @@ struct VmRunTask {
     program: CompiledProgram,
     inputs: Vec<ZqValue>,
     run_options: RunOptions,
+    input_index_offset: usize,
     result_tx: mpsc::Sender<Result<Vec<ZqValue>, String>>,
 }
 
@@ -95,10 +96,11 @@ impl VmWorkerPool {
         program: CompiledProgram,
         inputs: Vec<ZqValue>,
         run_options: RunOptions,
+        input_index_offset: usize,
     ) -> Result<mpsc::Receiver<Result<Vec<ZqValue>, String>>, String> {
         let (result_tx, result_rx) = mpsc::channel();
         self.sender
-            .send(VmRunTask { program, inputs, run_options, result_tx })
+            .send(VmRunTask { program, inputs, run_options, input_index_offset, result_tx })
             .map_err(|_| "native VM worker pool is unavailable".to_string())?;
         Ok(result_rx)
     }
@@ -109,7 +111,7 @@ impl VmWorkerPool {
         inputs: Vec<ZqValue>,
         run_options: RunOptions,
     ) -> Result<Vec<ZqValue>, String> {
-        let result_rx = self.submit(program, inputs, run_options)?;
+        let result_rx = self.submit(program, inputs, run_options, 0)?;
         result_rx.recv().map_err(|_| "native VM worker disconnected".to_string())?
     }
 }
@@ -130,9 +132,9 @@ fn vm_worker_loop(receiver: Arc<Mutex<mpsc::Receiver<VmRunTask>>>) {
 }
 
 fn run_vm_task(task: VmRunTask) {
-    let VmRunTask { program, inputs, run_options, result_tx } = task;
+    let VmRunTask { program, inputs, run_options, input_index_offset, result_tx } = task;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        execute_slice_native_inner(program, inputs, run_options)
+        execute_slice_native_inner(program, inputs, run_options, input_index_offset)
     }))
     .unwrap_or_else(|_| Err("native VM worker panicked".to_string()));
     let _ = result_tx.send(result);
@@ -142,13 +144,19 @@ fn execute_slice_native_inner(
     program: CompiledProgram,
     inputs: Vec<ZqValue>,
     run_options: RunOptions,
+    input_index_offset: usize,
 ) -> Result<Vec<ZqValue>, String> {
     let mut out = Vec::new();
     let mut emit = |value| {
         out.push(value);
         Ok(())
     };
-    program.execute_slice_native_owned(inputs, run_options, &mut emit)?;
+    program.execute_slice_native_owned_with_offset(
+        inputs,
+        run_options,
+        input_index_offset,
+        &mut emit,
+    )?;
     Ok(out)
 }
 
@@ -444,7 +452,7 @@ impl CompiledProgram {
         let _input_guard = vm_core::install_input_stream_json_text(remaining, replay, has_first);
         let cursor_start = if reads_as_events { 0 } else { usize::from(has_first) };
         vm_core::set_input_cursor(cursor_start);
-        self.execute_input_native_prepared(root, emit)
+        self.execute_input_native_prepared(root, 0, emit)
     }
 
     fn execute_json_reader_stream_with_inputs_native<F>(
@@ -464,7 +472,7 @@ impl CompiledProgram {
         let _input_guard = vm_core::install_input_stream_json_parser(parser, replay, has_first);
         let cursor_start = if reads_as_events { 0 } else { usize::from(has_first) };
         vm_core::set_input_cursor(cursor_start);
-        self.execute_input_native_prepared(root, emit)
+        self.execute_input_native_prepared(root, 0, emit)
     }
 
     fn execute_json_text_stream_with_metadata_native<F>(
@@ -483,7 +491,7 @@ impl CompiledProgram {
         for (index, item) in values.enumerate() {
             vm_core::set_input_cursor(index);
             let root = item.map_err(|e| format!("json parse error: {e}"))?;
-            self.execute_input_native_prepared(root, emit)?;
+            self.execute_input_native_prepared(root, index, emit)?;
         }
         Ok(())
     }
@@ -506,8 +514,9 @@ impl CompiledProgram {
             match ZqValue::deserialize(&mut parser) {
                 Ok(root) => {
                     vm_core::set_input_cursor(index);
+                    let input_index = index;
                     index += 1;
-                    self.execute_input_native_prepared(root, emit)?;
+                    self.execute_input_native_prepared(root, input_index, emit)?;
                 }
                 Err(err) if err.is_eof() => break,
                 Err(err) => return Err(format!("json parse error: {err}")),
@@ -540,14 +549,19 @@ impl CompiledProgram {
         F: FnMut(ZqValue) -> Result<(), String>,
     {
         let _program_context_guard = vm_core::install_program_context(&self.program);
-        vm_core::execute_prepared_with(&self.program, root, emit)
+        vm_core::execute_prepared_with_input_index(&self.program, root, 0, emit)
     }
 
-    fn execute_input_native_prepared<F>(&self, root: ZqValue, emit: &mut F) -> Result<(), String>
+    fn execute_input_native_prepared<F>(
+        &self,
+        root: ZqValue,
+        input_index: usize,
+        emit: &mut F,
+    ) -> Result<(), String>
     where
         F: FnMut(ZqValue) -> Result<(), String>,
     {
-        vm_core::execute_prepared_with(&self.program, root, emit)
+        vm_core::execute_prepared_with_input_index(&self.program, root, input_index, emit)
     }
 
     #[allow(dead_code)]
@@ -572,6 +586,19 @@ impl CompiledProgram {
     where
         F: FnMut(ZqValue) -> Result<(), String>,
     {
+        self.execute_slice_native_owned_with_offset(inputs, run_options, 0, emit)
+    }
+
+    fn execute_slice_native_owned_with_offset<F>(
+        &self,
+        inputs: Vec<ZqValue>,
+        run_options: RunOptions,
+        input_index_offset: usize,
+        emit: &mut F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(ZqValue) -> Result<(), String>,
+    {
         let uses_input_op = program_uses_input_op(&self.program);
         let uses_input_metadata = program_uses_input_stream_metadata(&self.program);
         let uses_input_stream_state = uses_input_op || uses_input_metadata;
@@ -583,7 +610,7 @@ impl CompiledProgram {
             if uses_input_stream_state {
                 vm_core::set_input_cursor(0);
             }
-            self.execute_input_native_prepared(ZqValue::Null, emit)?;
+            self.execute_input_native_prepared(ZqValue::Null, 0, emit)?;
             return Ok(());
         }
 
@@ -597,18 +624,18 @@ impl CompiledProgram {
                     usize::from(!inputs.is_empty())
                 };
                 vm_core::set_input_cursor(cursor_start);
-                self.execute_input_native_prepared(root, emit)?;
+                self.execute_input_native_prepared(root, 0, emit)?;
                 return Ok(());
             }
             for (index, input) in inputs.into_iter().enumerate() {
                 vm_core::set_input_cursor(index);
-                self.execute_input_native_prepared(input, emit)?;
+                self.execute_input_native_prepared(input, input_index_offset + index, emit)?;
             }
             return Ok(());
         }
 
-        for input in inputs {
-            self.execute_input_native_prepared(input, emit)?;
+        for (index, input) in inputs.into_iter().enumerate() {
+            self.execute_input_native_prepared(input, input_index_offset + index, emit)?;
         }
         Ok(())
     }
@@ -705,7 +732,7 @@ fn execute_slice_native_collect_on_large_stack(
     if program_requires_large_stack(&program.program) {
         return vm_worker_pool()?.run(program, inputs, run_options);
     }
-    execute_slice_native_inner(program, inputs, run_options)
+    execute_slice_native_inner(program, inputs, run_options, 0)
 }
 
 fn should_parallelize_inputs(
@@ -847,13 +874,21 @@ fn execute_slice_parallel_inputs(
 
     let mut results = Vec::with_capacity(task_count);
     let mut iter = inputs.into_iter();
+    let mut input_index_offset = 0usize;
     loop {
         let chunk = iter.by_ref().take(chunk_size).collect::<Vec<_>>();
         if chunk.is_empty() {
             break;
         }
-        let rx = pool.submit(program.clone(), chunk, RunOptions { null_input: false })?;
+        let next_offset = input_index_offset + chunk.len();
+        let rx = pool.submit(
+            program.clone(),
+            chunk,
+            RunOptions { null_input: false },
+            input_index_offset,
+        )?;
         results.push(rx);
+        input_index_offset = next_offset;
     }
 
     let mut out = Vec::new();

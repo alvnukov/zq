@@ -61,6 +61,18 @@ where
     vm::execute_prepared_with(program, input, emit)
 }
 
+pub(crate) fn execute_prepared_with_input_index<F>(
+    program: &ir::Program,
+    input: ZqValue,
+    input_index: usize,
+    emit: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(ZqValue) -> Result<(), String>,
+{
+    vm::execute_prepared_with_input_index(program, input, input_index, emit)
+}
+
 pub(crate) fn install_program_context(program: &ir::Program) -> vm::ProgramContextGuard {
     vm::install_program_context(program)
 }

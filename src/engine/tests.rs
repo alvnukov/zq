@@ -488,6 +488,68 @@ fn format_runtime_error_matches_jq_prefix() {
 }
 
 #[test]
+fn uncaught_runtime_error_reports_exact_input_path() {
+    let err = run_jq_stream_with_paths_options(
+        ".[] | .value.value",
+        vec![serde_json::json!([{"value": "{{ template }}"}])],
+        &[],
+        RunOptions::default(),
+    )
+    .expect_err("query must fail on the template string");
+
+    assert_eq!(
+        err.to_string(),
+        "Cannot index string with string \"value\" at input[0] path $[0][\"value\"]"
+    );
+}
+
+#[test]
+fn runtime_error_reports_the_failing_stream_input() {
+    let err = run_jq_stream_with_paths_options(
+        ".value.value",
+        vec![
+            serde_json::json!({"value": {"value": 1}}),
+            serde_json::json!({"value": "{{ template }}"}),
+        ],
+        &[],
+        RunOptions::default(),
+    )
+    .expect_err("second input must fail on the template string");
+
+    assert_eq!(
+        err.to_string(),
+        "Cannot index string with string \"value\" at input[1] path $[\"value\"]"
+    );
+}
+
+#[test]
+fn caught_runtime_error_keeps_the_jq_message_without_location() {
+    let out = run_jq_stream_with_paths_options(
+        "try (.[] | .value.value) catch .",
+        vec![serde_json::json!([{"value": "{{ template }}"}])],
+        &[],
+        RunOptions::default(),
+    )
+    .expect("catch must handle the runtime error");
+
+    assert_eq!(out, vec![serde_json::json!("Cannot index string with string \"value\"")]);
+}
+
+#[test]
+fn parallel_runtime_error_keeps_the_absolute_input_index() {
+    let mut inputs = vec![serde_json::json!({"value": {"value": 1}}); 128];
+    inputs[127] = serde_json::json!({"value": "{{ template }}"});
+
+    let err = run_jq_stream_with_paths_options(".value.value", inputs, &[], RunOptions::default())
+        .expect_err("last parallel input must fail");
+
+    assert_eq!(
+        err.to_string(),
+        "Cannot index string with string \"value\" at input[127] path $[\"value\"]"
+    );
+}
+
+#[test]
 fn engine_wrapper_helpers_cover_contract() {
     assert!(validate_jq_query(".").is_ok());
     assert!(validate_jq_query_with_paths(".", &[]).is_ok());

@@ -86,9 +86,69 @@ struct ApplyOpDepthGuard;
 
 struct RootApplyContextGuard;
 
+#[derive(Clone)]
+struct ValueOrigin {
+    input_index: usize,
+    path: Vec<InputPathSegment>,
+    exact: bool,
+}
+
+#[derive(Clone)]
+enum InputPathSegment {
+    Key(String),
+    Index(usize),
+}
+
+struct LocatedError {
+    error: String,
+    origin: ValueOrigin,
+}
+
+impl ValueOrigin {
+    fn root(input_index: usize) -> Self {
+        Self { input_index, path: Vec::new(), exact: true }
+    }
+
+    fn key(&self, key: &str) -> Self {
+        let mut next = self.clone();
+        next.path.push(InputPathSegment::Key(key.to_string()));
+        next
+    }
+
+    fn index(&self, index: usize) -> Self {
+        let mut next = self.clone();
+        next.path.push(InputPathSegment::Index(index));
+        next
+    }
+
+    fn near(&self) -> Self {
+        let mut next = self.clone();
+        next.exact = false;
+        next
+    }
+
+    fn render(&self) -> String {
+        let mut path = String::from("$");
+        for segment in &self.path {
+            match segment {
+                InputPathSegment::Key(key) => {
+                    let quoted = serde_json::to_string(key).unwrap_or_else(|_| format!("{key:?}"));
+                    path.push('[');
+                    path.push_str(&quoted);
+                    path.push(']');
+                }
+                InputPathSegment::Index(index) => path.push_str(&format!("[{index}]")),
+            }
+        }
+        let relation = if self.exact { "at" } else { "near" };
+        format!("{relation} input[{}] path {path}", self.input_index)
+    }
+}
+
 #[derive(Default)]
 struct VmExecutionContext {
     value_vec_pool: Vec<Vec<ZqValue>>,
+    runtime_error_origin: Option<ValueOrigin>,
 }
 
 struct VmExecutionContextGuard {
@@ -325,18 +385,58 @@ pub(crate) fn execute_prepared_with<F>(
 where
     F: FnMut(ZqValue) -> Result<(), String>,
 {
-    let mut exec_context = VmExecutionContext::default();
-    let _exec_context_guard = install_vm_execution_context(&mut exec_context);
-    if let Some((last_branch, head_branches)) = program.branches.split_last() {
-        for branch in head_branches {
-            execute_branch(branch, input.clone(), emit)?;
-        }
-        execute_branch(last_branch, input, emit)?;
-    }
-    Ok(())
+    execute_prepared_with_mode(program, input, 0, false, emit)
 }
 
-fn execute_branch<F>(branch: &super::ir::Branch, input: ZqValue, emit: &mut F) -> Result<(), String>
+pub(crate) fn execute_prepared_with_input_index<F>(
+    program: &Program,
+    input: ZqValue,
+    input_index: usize,
+    emit: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(ZqValue) -> Result<(), String>,
+{
+    execute_prepared_with_mode(program, input, input_index, true, emit)
+}
+
+fn execute_prepared_with_mode<F>(
+    program: &Program,
+    input: ZqValue,
+    input_index: usize,
+    enrich_runtime_errors: bool,
+    emit: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(ZqValue) -> Result<(), String>,
+{
+    let mut exec_context = VmExecutionContext::default();
+    let _exec_context_guard = install_vm_execution_context(&mut exec_context);
+    let origin = ValueOrigin::root(input_index);
+    let result = (|| {
+        if let Some((last_branch, head_branches)) = program.branches.split_last() {
+            for branch in head_branches {
+                execute_branch(branch, input.clone(), origin.clone(), emit)?;
+            }
+            execute_branch(last_branch, input, origin, emit)?;
+        }
+        Ok(())
+    })();
+    match result {
+        Err(err) if enrich_runtime_errors => match exec_context.runtime_error_origin.take() {
+            Some(origin) => Err(format!("{err} {}", origin.render())),
+            None => Err(err),
+        },
+        other => other,
+    }
+}
+
+fn execute_branch<F>(
+    branch: &super::ir::Branch,
+    input: ZqValue,
+    origin: ValueOrigin,
+    emit: &mut F,
+) -> Result<(), String>
 where
     F: FnMut(ZqValue) -> Result<(), String>,
 {
@@ -348,13 +448,23 @@ where
     if let [op] = branch.ops.as_slice() {
         let _root_apply_guard = push_root_apply_context();
         let mut emitted = false;
+        let mut sink_failed = false;
         let mut tracked_emit = |produced: ZqValue| {
             emitted = true;
-            emit(produced)
+            match emit(produced) {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    sink_failed = true;
+                    Err(err)
+                }
+            }
         };
-        if let Err(err) = apply_op_terminal(op, input, &mut tracked_emit) {
+        if let Err(fault) = apply_op_terminal_located(op, input, origin, &mut tracked_emit) {
             if !emitted {
-                return Err(render_public_error(err));
+                return Err(render_uncaught_error(fault.error, fault.origin));
+            }
+            if sink_failed {
+                return Err(fault.error);
             }
         }
         return Ok(());
@@ -363,20 +473,32 @@ where
     let mut current = PooledValueVec::acquire();
     let mut next = PooledValueVec::acquire();
     current.push(input);
+    let mut current_origins = vec![origin];
+    let mut next_origins = Vec::new();
     for (op_index, op) in branch.ops.iter().enumerate() {
         let is_last_op = op_index + 1 == branch.ops.len();
         if is_last_op {
             let mut hard_error: Option<String> = None;
-            for value in current.drain(..) {
+            for (value, origin) in current.drain(..).zip(current_origins.drain(..)) {
                 let _root_apply_guard = push_root_apply_context();
                 let mut emitted = false;
+                let mut sink_failed = false;
                 let mut tracked_emit = |produced: ZqValue| {
                     emitted = true;
-                    emit(produced)
+                    match emit(produced) {
+                        Ok(()) => Ok(()),
+                        Err(err) => {
+                            sink_failed = true;
+                            Err(err)
+                        }
+                    }
                 };
-                if let Err(err) = apply_op_terminal(op, value, &mut tracked_emit) {
-                    if !emitted {
-                        hard_error = Some(render_public_error(err));
+                if let Err(fault) = apply_op_terminal_located(op, value, origin, &mut tracked_emit)
+                {
+                    if sink_failed {
+                        hard_error = Some(fault.error);
+                    } else if !emitted {
+                        hard_error = Some(render_uncaught_error(fault.error, fault.origin));
                     }
                     // Preserve outputs produced before terminal failure.
                     break;
@@ -389,11 +511,12 @@ where
         }
 
         next.clear();
+        next_origins.clear();
         let mut hard_error: Option<String> = None;
-        for value in current.drain(..) {
+        for (value, origin) in current.drain(..).zip(current_origins.drain(..)) {
             let _root_apply_guard = push_root_apply_context();
-            if let Err(err) = apply_op(op, value, &mut next) {
-                hard_error = Some(render_public_error(err));
+            if let Err(fault) = apply_op_located(op, value, origin, &mut next, &mut next_origins) {
+                hard_error = Some(render_uncaught_error(fault.error, fault.origin));
                 break;
             }
         }
@@ -401,6 +524,7 @@ where
             return Err(err);
         }
         std::mem::swap(current.deref_mut(), next.deref_mut());
+        std::mem::swap(&mut current_origins, &mut next_origins);
     }
     for value in current.drain(..) {
         emit(value)?;
@@ -2116,6 +2240,183 @@ fn apply_op(op: &Op, input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), Strin
     }
 }
 
+fn apply_op_located(
+    op: &Op,
+    input: ZqValue,
+    origin: ValueOrigin,
+    out: &mut Vec<ZqValue>,
+    origins: &mut Vec<ValueOrigin>,
+) -> Result<(), LocatedError> {
+    if let Op::Pipe(stages) = op {
+        return apply_pipe_stages_located(stages, input, origin, out, origins);
+    }
+    if let Op::Chain(steps) = op {
+        let root = input.clone();
+        return apply_chain_steps_located(steps, &root, input, origin, out, origins);
+    }
+
+    let output_start = out.len();
+    let derived = derive_output_origins(op, &input, &origin);
+    let result = apply_op(op, input, out);
+    let output_count = out.len() - output_start;
+    origins.extend(derived.into_iter().take(output_count));
+    if origins.len() < out.len() {
+        origins.resize(out.len(), origin.near());
+    }
+    result.map_err(|error| LocatedError { error, origin: error_origin_for_op(op, &origin) })
+}
+
+fn apply_op_terminal_located<F>(
+    op: &Op,
+    input: ZqValue,
+    origin: ValueOrigin,
+    emit: &mut F,
+) -> Result<(), LocatedError>
+where
+    F: FnMut(ZqValue) -> Result<(), String>,
+{
+    if let Op::Pipe(stages) = op {
+        return apply_pipe_stages_terminal_located(stages, input, origin, emit);
+    }
+    if let Op::Chain(steps) = op {
+        let root = input.clone();
+        return apply_chain_steps_terminal_located(steps, &root, input, origin, emit);
+    }
+    apply_op_terminal(op, input, emit)
+        .map_err(|error| LocatedError { error, origin: error_origin_for_op(op, &origin) })
+}
+
+fn apply_pipe_stages_located(
+    stages: &[Op],
+    input: ZqValue,
+    origin: ValueOrigin,
+    out: &mut Vec<ZqValue>,
+    origins: &mut Vec<ValueOrigin>,
+) -> Result<(), LocatedError> {
+    let Some((stage, rest)) = stages.split_first() else {
+        out.push(input);
+        origins.push(origin);
+        return Ok(());
+    };
+
+    let mut stage_out = PooledValueVec::acquire();
+    let mut stage_origins = Vec::new();
+    let stage_fault =
+        apply_op_located(stage, input, origin, &mut stage_out, &mut stage_origins).err();
+    for (value, value_origin) in stage_out.drain(..).zip(stage_origins.drain(..)) {
+        apply_pipe_stages_located(rest, value, value_origin, out, origins)?;
+    }
+    if let Some(fault) = stage_fault {
+        return Err(fault);
+    }
+    Ok(())
+}
+
+fn apply_pipe_stages_terminal_located<F>(
+    stages: &[Op],
+    input: ZqValue,
+    origin: ValueOrigin,
+    emit: &mut F,
+) -> Result<(), LocatedError>
+where
+    F: FnMut(ZqValue) -> Result<(), String>,
+{
+    let Some((stage, rest)) = stages.split_first() else {
+        return emit(input).map_err(|error| LocatedError { error, origin });
+    };
+    if rest.is_empty() {
+        return apply_op_terminal_located(stage, input, origin, emit);
+    }
+
+    let mut stage_out = PooledValueVec::acquire();
+    let mut stage_origins = Vec::new();
+    let stage_fault =
+        apply_op_located(stage, input, origin, &mut stage_out, &mut stage_origins).err();
+    for (value, value_origin) in stage_out.drain(..).zip(stage_origins.drain(..)) {
+        apply_pipe_stages_terminal_located(rest, value, value_origin, emit)?;
+    }
+    if let Some(fault) = stage_fault {
+        return Err(fault);
+    }
+    Ok(())
+}
+
+fn apply_chain_steps_located(
+    steps: &[Op],
+    root: &ZqValue,
+    input: ZqValue,
+    origin: ValueOrigin,
+    out: &mut Vec<ZqValue>,
+    origins: &mut Vec<ValueOrigin>,
+) -> Result<(), LocatedError> {
+    let Some((step, rest)) = steps.split_first() else {
+        out.push(input);
+        origins.push(origin);
+        return Ok(());
+    };
+
+    let mut stage_out = PooledValueVec::acquire();
+    let mut stage_origins = Vec::new();
+    let stage_fault = if let Op::DynamicIndex { key, optional } = step {
+        let output_start = stage_out.len();
+        let result = run_dynamic_index(input, key, root, *optional, &mut stage_out);
+        stage_origins.resize(stage_out.len() - output_start, origin.near());
+        result.err().map(|error| LocatedError { error, origin: origin.near() })
+    } else {
+        apply_op_located(step, input, origin, &mut stage_out, &mut stage_origins).err()
+    };
+    for (value, value_origin) in stage_out.drain(..).zip(stage_origins.drain(..)) {
+        apply_chain_steps_located(rest, root, value, value_origin, out, origins)?;
+    }
+    if let Some(fault) = stage_fault {
+        return Err(fault);
+    }
+    Ok(())
+}
+
+fn apply_chain_steps_terminal_located<F>(
+    steps: &[Op],
+    root: &ZqValue,
+    input: ZqValue,
+    origin: ValueOrigin,
+    emit: &mut F,
+) -> Result<(), LocatedError>
+where
+    F: FnMut(ZqValue) -> Result<(), String>,
+{
+    let Some((step, rest)) = steps.split_first() else {
+        return emit(input).map_err(|error| LocatedError { error, origin });
+    };
+    if rest.is_empty() {
+        if let Op::DynamicIndex { key, optional } = step {
+            let mut stage_out = PooledValueVec::acquire();
+            let result = run_dynamic_index(input, key, root, *optional, &mut stage_out);
+            for value in stage_out.drain(..) {
+                emit(value).map_err(|error| LocatedError { error, origin: origin.clone() })?;
+            }
+            return result.map_err(|error| LocatedError { error, origin: origin.near() });
+        }
+        return apply_op_terminal_located(step, input, origin, emit);
+    }
+
+    let mut stage_out = PooledValueVec::acquire();
+    let mut stage_origins = Vec::new();
+    let stage_fault = if let Op::DynamicIndex { key, optional } = step {
+        let result = run_dynamic_index(input, key, root, *optional, &mut stage_out);
+        stage_origins.resize(stage_out.len(), origin.near());
+        result.err().map(|error| LocatedError { error, origin: origin.near() })
+    } else {
+        apply_op_located(step, input, origin, &mut stage_out, &mut stage_origins).err()
+    };
+    for (value, value_origin) in stage_out.drain(..).zip(stage_origins.drain(..)) {
+        apply_chain_steps_terminal_located(rest, root, value, value_origin, emit)?;
+    }
+    if let Some(fault) = stage_fault {
+        return Err(fault);
+    }
+    Ok(())
+}
+
 fn apply_pipe_stages(stages: &[Op], input: ZqValue, out: &mut Vec<ZqValue>) -> Result<(), String> {
     let Some((stage, rest)) = stages.split_first() else {
         out.push(input);
@@ -2284,6 +2585,42 @@ fn render_public_error(err: String) -> String {
         return err;
     }
     decode_thrown_value(&err).map(error_to_string).unwrap_or(err)
+}
+
+fn render_uncaught_error(err: String, origin: ValueOrigin) -> String {
+    if decode_halt_error(&err).is_some() || decode_thrown_value(&err).is_some() {
+        return render_public_error(err);
+    }
+    let _ = with_active_vm_execution_context(|ctx| {
+        ctx.runtime_error_origin = Some(origin);
+    });
+    render_public_error(err)
+}
+
+fn error_origin_for_op(op: &Op, origin: &ValueOrigin) -> ValueOrigin {
+    match op {
+        Op::GetField { .. } | Op::GetIndex { .. } | Op::Iterate { .. } => origin.clone(),
+        _ => origin.near(),
+    }
+}
+
+fn derive_output_origins(op: &Op, input: &ZqValue, origin: &ValueOrigin) -> Vec<ValueOrigin> {
+    match op {
+        Op::Identity => vec![origin.clone()],
+        Op::GetField { name, .. } => vec![origin.key(name)],
+        Op::GetIndex { index, .. } => match input {
+            ZqValue::Array(values) => c_string::normalize_index_jq(values.len(), *index)
+                .map(|index| vec![origin.index(index)])
+                .unwrap_or_else(|| vec![origin.near()]),
+            _ => vec![origin.near()],
+        },
+        Op::Iterate { .. } => match input {
+            ZqValue::Array(values) => (0..values.len()).map(|index| origin.index(index)).collect(),
+            ZqValue::Object(map) => map.keys().map(|key| origin.key(key)).collect(),
+            _ => Vec::new(),
+        },
+        _ => vec![origin.near()],
+    }
 }
 
 fn eval_single(op: &Op, input: &ZqValue) -> Result<ZqValue, String> {

@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-08-09
+
+### Fixed
+- Uncaught jq runtime errors now identify the failing input number and JSON path when provenance is known, while preserving jq-compatible `try/catch` error strings.
+
 ## [1.5.2] - 2026-04-15
 
 ### Fixed
@@ -56,7 +61,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Added
 - Expanded compatibility and test coverage baseline.
 
-[Unreleased]: https://github.com/alvnukov/zq/compare/v1.5.2...HEAD
+[Unreleased]: https://github.com/alvnukov/zq/compare/v1.5.3...HEAD
+[1.5.3]: https://github.com/alvnukov/zq/releases/tag/v1.5.3
 [1.5.2]: https://github.com/alvnukov/zq/releases/tag/v1.5.2
 [1.5.1]: https://github.com/alvnukov/zq/releases/tag/v1.5.1
 [1.5.0]: https://github.com/alvnukov/zq/releases/tag/v1.5.0

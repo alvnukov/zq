@@ -451,13 +451,13 @@ fn parity_accepts_seq_flag() {
 }
 
 #[test]
-fn parity_runtime_errors_match_jq_format() {
+fn runtime_errors_keep_jq_format_and_add_input_location() {
     let out = run_zq_stdin(&[".a"], "1\n");
     assert_fail(&out, "runtime error format");
     assert_exit_code(&out, 5, "runtime error format");
     assert_stderr_trim_eq(
         &out,
-        "zq: error (at <stdin>:1): Cannot index number with string \"a\"",
+        "zq: error (at <stdin>:1): Cannot index number with string \"a\" at input[0] path $",
         "runtime error format",
     );
 
@@ -466,7 +466,7 @@ fn parity_runtime_errors_match_jq_format() {
     assert_exit_code(&out, 5, "index runtime error format");
     assert_stderr_trim_eq(
         &out,
-        "zq: error (at <stdin>:1): Cannot index object with number",
+        "zq: error (at <stdin>:1): Cannot index object with number at input[0] path $",
         "index runtime error format",
     );
 }

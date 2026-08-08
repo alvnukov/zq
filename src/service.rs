@@ -450,7 +450,10 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                 && query_uses_inputs_builtin(&query)
                 && !seq_errors.is_empty()
             {
-                return Err(Error::Query(format!("{tool}: error (at <stdin>:1): {}", seq_errors[0])));
+                return Err(Error::Query(format!(
+                    "{tool}: error (at <stdin>:1): {}",
+                    seq_errors[0]
+                )));
             }
             for err in &seq_errors {
                 eprintln!("{tool}: ignoring parse error: {err}");
@@ -517,7 +520,8 @@ fn run_with(cli: Cli, compat_args: CliCompatArgs) -> Result<i32, Error> {
                         Err(zq::EngineError::Query(zq::QueryError::Json(json_err)))
                             if cli.stream_errors =>
                         {
-                            inputs.push(stream_error_value_from_json_error_native(input, &json_err));
+                            inputs
+                                .push(stream_error_value_from_json_error_native(input, &json_err));
                         }
                         Err(err) => {
                             return Err(Error::Query(render_engine_error(
